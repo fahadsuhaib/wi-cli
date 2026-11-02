@@ -64,7 +64,7 @@ impl Session {
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".ssh/known_hosts"));
 
         let config = Arc::new(client::Config {
-            keepalive_interval: Some(Duration::from_secs(15)),
+            keepalive_interval: Some(Duration::from_secs(10)),
             keepalive_max: 3,
             ..Default::default()
         });
