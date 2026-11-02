@@ -22,6 +22,7 @@ mod tab;
 mod term;
 mod theme;
 mod transfer;
+mod tui;
 mod ui;
 mod workspace;
 
