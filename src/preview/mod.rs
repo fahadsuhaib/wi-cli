@@ -7,6 +7,7 @@ mod markdown;
 mod table;
 mod text;
 
+use crate::theme::theme;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
@@ -296,7 +297,7 @@ impl Preview {
         if let Some((a, b)) = self.target_rows() {
             for (i, row) in rows.iter_mut().enumerate() {
                 if (a..b).contains(&(self.top + i)) {
-                    let marked: Vec<Cell> = cells(row).into_iter().map(|(c, st)| (c, st.bg(ratatui::style::Color::DarkGray))).collect();
+                    let marked: Vec<Cell> = cells(row).into_iter().map(|(c, st)| (c, st.bg(theme().goto_bg))).collect();
                     *row = from_cells(&marked);
                 }
             }
@@ -306,7 +307,7 @@ impl Preview {
 }
 
 fn stub_lines(path: &str, total: u64, kind: &str) -> Vec<Line<'static>> {
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let dim = Style::default().fg(theme().dim);
     let bold = Style::default().add_modifier(Modifier::BOLD);
     vec![
         Line::from(Span::styled(file_name(path), bold)),
@@ -338,7 +339,7 @@ pub fn row_cells(line: &Line<'_>, gutter: usize, width: usize) -> Vec<String> {
     out
 }
 
-/// Draw a selection on one rendered row by flipping reverse video on the selected columns.
+/// Draw a selection on one rendered row by painting the selected columns in the selection colours.
 pub fn highlight_line(line: &Line<'_>, row: u16, sel: crate::select::Sel) -> Line<'static> {
     let mut col = 0u16;
     let flipped: Vec<Cell> = cells(line)
@@ -347,8 +348,7 @@ pub fn highlight_line(line: &Line<'_>, row: u16, sel: crate::select::Sel) -> Lin
             let here = col;
             col += c.width().unwrap_or(0) as u16;
             if crate::select::contains(sel, row, here) {
-                let st = if st.add_modifier.contains(Modifier::REVERSED) { st.remove_modifier(Modifier::REVERSED) } else { st.add_modifier(Modifier::REVERSED) };
-                (c, st)
+                (c, st.fg(theme().sel_fg).bg(theme().sel_bg))
             } else {
                 (c, st)
             }
@@ -530,7 +530,7 @@ mod tests {
     }
 
     fn has_mark(l: &Line<'_>) -> bool {
-        l.spans.iter().any(|s| s.style.bg == Some(ratatui::style::Color::DarkGray))
+        l.spans.iter().any(|s| s.style.bg == Some(theme().goto_bg))
     }
 
     #[test]

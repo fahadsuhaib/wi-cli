@@ -18,6 +18,7 @@ mod files;
 mod session;
 mod tab;
 mod term;
+mod theme;
 mod transfer;
 mod ui;
 mod workspace;
@@ -62,6 +63,21 @@ async fn real_main() -> Result<()> {
 
     let backend = ws.connect().await?;
     app::run(&ws, &backend, &cfg).await
+}
+
+/// Pick the theme (config, then saved menu choice, then the terminal's background) once at startup, after the config and the connection are known good (so error messages never
+/// follow a terminal query).
+pub fn setup_theme(cfg: &config::Config) {
+    let saved = agents::State::load().theme;
+    let fgbg = std::env::var("COLORFGBG").ok();
+    let kind = theme::resolve(
+        &cfg.defaults.theme,
+        saved.as_deref(),
+        || term::query_background().map(theme::kind_from_rgb),
+        fgbg.as_deref(),
+    );
+    let truecolor = theme::colorterm_is_truecolor(std::env::var("COLORTERM").ok().as_deref());
+    theme::init(kind, truecolor, cfg.defaults.ansi_remap);
 }
 
 /// Dev command: `wi fetch <box> <remote-path> [--yes]` downloads through the opener cache.

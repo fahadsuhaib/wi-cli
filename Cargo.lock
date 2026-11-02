@@ -3396,6 +3396,7 @@ dependencies = [
  "crossterm",
  "csv",
  "dirs",
+ "libc",
  "portable-pty",
  "pulldown-cmark",
  "ratatui",

@@ -38,6 +38,10 @@ pub struct Defaults {
     /// What Shift+Enter sends: `auto` (newline in agent tabs, Enter elsewhere), `newline`,
     /// `esc-cr` or `enter`.
     pub shift_enter: String,
+    /// Colour theme: `auto` (ask the terminal, then COLORFGBG, then dark), `dark` or `light`.
+    pub theme: String,
+    /// Map the terminal's named ANSI colours (0-15) in shell tabs to the theme palette.
+    pub ansi_remap: bool,
 }
 
 impl Default for Defaults {
@@ -60,6 +64,8 @@ impl Default for Defaults {
             preview_width_pct: 50,
             key_protocol: "auto".into(),
             shift_enter: "auto".into(),
+            theme: "auto".into(),
+            ansi_remap: true,
         }
     }
 }

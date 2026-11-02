@@ -3,6 +3,7 @@
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
+use crate::theme::{self, theme};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
@@ -24,6 +25,8 @@ pub enum Action {
     NextTab,
     PrevTab,
     Mouse,
+    /// Switch between the dark and light theme.
+    Theme,
     Agent,
     CloseTab,
     Reconnect,
@@ -88,6 +91,7 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Close preview", key: 'v', action: Action::ClosePreview, remote_only: false },
     MenuItem { label: "Start / change agent", key: 'a', action: Action::Agent, remote_only: false },
     MenuItem { label: "Mouse on/off", key: 'm', action: Action::Mouse, remote_only: false },
+    MenuItem { label: "Theme dark / light", key: 'y', action: Action::Theme, remote_only: false },
     MenuItem { label: "Info", key: 'i', action: Action::Info, remote_only: false },
     MenuItem { label: "Quit", key: 'q', action: Action::Quit, remote_only: false },
 ];
@@ -277,7 +281,7 @@ pub struct View<'a> {
 fn vt_color(c: vt100::Color) -> Color {
     match c {
         vt100::Color::Default => Color::Reset,
-        vt100::Color::Idx(i) => Color::Indexed(i),
+        vt100::Color::Idx(i) => theme::remap_ansi(i).unwrap_or(Color::Indexed(i)),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
 }
@@ -311,7 +315,20 @@ impl Widget for ScreenWidget<'_> {
     }
 }
 
+/// Draw a frame. When the terminal has no true colour, every theme colour is then reduced to the
+/// nearest 256-colour index in one pass over the buffer.
 pub fn draw(f: &mut Frame, v: &View) {
+    draw_frame(f, v);
+    if !theme::truecolor() {
+        for cell in f.buffer_mut().content.iter_mut() {
+            cell.fg = theme::to_256(cell.fg);
+            cell.bg = theme::to_256(cell.bg);
+        }
+    }
+}
+
+fn draw_frame(f: &mut Frame, v: &View) {
+    let t = theme();
     let strip_h = if v.tabs.len() > 1 { 1 } else { 0 };
     let [header, strip, main, status] = Layout::vertical([
         Constraint::Length(1),
@@ -320,14 +337,15 @@ pub fn draw(f: &mut Frame, v: &View) {
         Constraint::Length(1),
     ])
     .areas(f.area());
-    let bar = Style::default().bg(Color::DarkGray).fg(Color::White);
+    let bar = Style::default().bg(t.bar_bg).fg(t.bar_fg);
+    let status_bar = Style::default().bg(t.status_bg).fg(t.status_fg);
 
     let tail = if v.remote { "  connected" } else { "" };
     let fixed = format!(" wicli  {}  ", v.name).chars().count() + tail.chars().count();
     let room = (header.width as usize).saturating_sub(fixed);
     let detail = left_trim(v.detail, room);
     f.render_widget(
-        Paragraph::new(format!(" wicli  {}  {detail}{tail}", v.name)).style(bar.add_modifier(Modifier::BOLD)),
+        Paragraph::new(format!(" wicli  {}  {detail}{tail}", v.name)).style(bar.fg(t.header).add_modifier(Modifier::BOLD)),
         header,
     );
 
@@ -337,17 +355,17 @@ pub fn draw(f: &mut Frame, v: &View) {
             use crate::tab::TabState;
             let label = tab_label(i, title, *state);
             let style = if *active {
-                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                Style::default().bg(t.tab_active_bg).fg(t.tab_active_fg).add_modifier(Modifier::BOLD)
             } else {
                 match state {
-                    TabState::Streaming => Style::default().fg(Color::Yellow),
-                    TabState::Quiet => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                    TabState::Idle => Style::default(),
+                    TabState::Streaming => Style::default().fg(t.tab_streaming),
+                    TabState::Quiet => Style::default().fg(t.tab_quiet).add_modifier(Modifier::BOLD),
+                    TabState::Idle => Style::default().fg(t.tab_inactive),
                 }
             };
             spans.push(Span::styled(label, style));
         }
-        f.render_widget(Paragraph::new(Line::from(spans)), strip);
+        f.render_widget(Paragraph::new(Line::from(spans)).style(bar), strip);
     }
 
     let split = v.side.and_then(|_| crate::tab::split_main(main, v.split.0, v.split.1));
@@ -357,12 +375,12 @@ pub fn draw(f: &mut Frame, v: &View) {
     let mut active_prev = v.preview;
     if let (Some(sp), Some(side)) = (&split, v.side) {
         preview_rows = draw_preview(f, sp.side, side, sel_in(crate::tab::Pane::Side));
-        let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let accent = Style::default().fg(t.divider_focus).add_modifier(Modifier::BOLD);
         let div = sp.divider;
         for y in 0..div.height {
             let c = &mut f.buffer_mut()[(div.x, div.y + y)];
             c.set_symbol("│");
-            c.set_style(if v.focus_side { accent } else { Style::default().fg(Color::DarkGray) });
+            c.set_style(if v.focus_side { accent } else { Style::default().fg(t.divider_idle) });
         }
         // An arrow at the top of the divider points at the pane that has the keyboard.
         let side_is_right = sp.side.x > sp.shell.x;
@@ -395,7 +413,7 @@ pub fn draw(f: &mut Frame, v: &View) {
                 if x < area.width && y < area.height {
                     let cell = &mut buf[(x, y)];
                     cell.set_char(ch);
-                    cell.set_style(Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD));
+                    cell.set_style(Style::default().fg(t.hint_fg).bg(t.hint_bg).add_modifier(Modifier::BOLD));
                 }
             }
         }
@@ -424,7 +442,7 @@ pub fn draw(f: &mut Frame, v: &View) {
         (None, None) if split.is_some() => format!(" {}  menu · click a pane or menu W to switch · menu V closes the preview", v.menu_label),
         (None, None) => format!(" {}  menu", v.menu_label),
     };
-    f.render_widget(Paragraph::new(hint).style(bar), status);
+    f.render_widget(Paragraph::new(hint).style(status_bar), status);
 
     if let Some(c) = v.confirm {
         draw_confirm(f, main, c);
@@ -460,7 +478,7 @@ fn draw_preview(f: &mut Frame, area: Rect, p: &crate::preview::Preview, selectio
         (None, area)
     };
     if let (Some(b), Some(text)) = (banner_area, p.banner.as_deref()) {
-        f.render_widget(Paragraph::new(format!(" {text}")).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)), b);
+        f.render_widget(Paragraph::new(format!(" {text}")).style(Style::default().fg(theme().banner).bg(theme().bg).add_modifier(Modifier::BOLD)), b);
     }
     let mut vis = p.visible(body.height as usize, body.width as usize);
     if let Some(sel) = selection {
@@ -468,8 +486,13 @@ fn draw_preview(f: &mut Frame, area: Rect, p: &crate::preview::Preview, selectio
             *line = crate::preview::highlight_line(line, r as u16, sel);
         }
     }
-    f.render_widget(Paragraph::new(vis), body);
+    f.render_widget(Paragraph::new(vis).style(Style::default().fg(theme().fg).bg(theme().bg)), body);
     body.height as usize
+}
+
+/// A bordered box in the given theme colours.
+fn bordered(title: &str, border: Color, bg: Color, fg: Color) -> Block<'_> {
+    Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(border)).style(Style::default().bg(bg).fg(fg))
 }
 
 fn draw_menu(f: &mut Frame, main: Rect, selected: usize, remote: bool) {
@@ -479,11 +502,10 @@ fn draw_menu(f: &mut Frame, main: Rect, selected: usize, remote: bool) {
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let base = if i == selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
+            let t = theme();
+            let sel = i == selected;
+            let base = if sel { Style::default().bg(t.menu_sel_bg).fg(t.menu_sel_fg) } else { Style::default().bg(t.menu_bg).fg(t.menu_fg) };
+            let hot_style = if sel { base } else { base.fg(t.menu_hotkey) };
             let mut chars = item.label.chars();
             let first = chars.next().unwrap_or(' ');
             // Underline the hotkey letter wherever it first appears in the label.
@@ -494,13 +516,14 @@ fn draw_menu(f: &mut Frame, main: Rect, selected: usize, remote: bool) {
             let hot = rest_chars.next().unwrap_or(first);
             Line::from(vec![
                 Span::styled(format!(" {a}"), base),
-                Span::styled(hot.to_string(), base.add_modifier(Modifier::UNDERLINED | Modifier::BOLD)),
+                Span::styled(hot.to_string(), hot_style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD)),
                 Span::styled(format!("{} ", rest_chars.as_str()), base),
             ])
         })
         .collect();
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" menu ")), area);
+    let t = theme();
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.menu_bg).fg(t.menu_fg)).block(bordered(" menu ", t.menu_border, t.menu_bg, t.menu_fg)), area);
 }
 
 /// Keep the tail of a long path, marking the cut with an ellipsis.
@@ -516,13 +539,14 @@ fn left_trim(s: &str, max: usize) -> String {
 fn draw_prompt(f: &mut Frame, main: Rect, p: &Prompt) {
     let more = p.total.saturating_sub(p.shown.len());
     let area = prompt_rect(main, p);
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let t = theme();
+    let dim = Style::default().fg(t.dialog_dim);
     let mut lines: Vec<Line> = p
         .shown
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let st = if p.recent && p.sel == Some(i) { Style::default().add_modifier(Modifier::REVERSED) } else { dim };
+            let st = if p.recent && p.sel == Some(i) { Style::default().bg(t.menu_sel_bg).fg(t.menu_sel_fg) } else { dim };
             Line::from(Span::styled(format!("   {s}"), st))
         })
         .collect();
@@ -530,12 +554,12 @@ fn draw_prompt(f: &mut Frame, main: Rect, p: &Prompt) {
         lines.push(Line::from(Span::styled(format!("   … {more} more"), dim)));
     }
     if let Some(e) = &p.error {
-        lines.push(Line::from(Span::styled(format!(" {e}"), Style::default().fg(Color::Red))));
+        lines.push(Line::from(Span::styled(format!(" {e}"), Style::default().fg(t.error))));
     }
     let label = p.kind.label();
     lines.push(Line::from(vec![Span::styled(label, Style::default().add_modifier(Modifier::BOLD)), Span::raw(p.input.clone())]));
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).style(Style::default().bg(Color::Black)), area);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)), area);
     let x = area.x + (label.chars().count() + unicode_width::UnicodeWidthStr::width(p.input.as_str())) as u16;
     f.set_cursor_position((x.min(area.x + area.width.saturating_sub(1)), area.y + area.height - 1));
 }
@@ -544,11 +568,12 @@ fn draw_ask(f: &mut Frame, main: Rect, a: &Ask) {
     let w = 72.min(main.width);
     let h = (a.agents.len() as u16 + 5).min(main.height);
     let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let t = theme();
+    let dim = Style::default().fg(t.dialog_dim);
     let mut lines = vec![Line::from(Span::styled(" Start an agent here. Your choice is remembered for this workspace.", dim)), Line::from("")];
     for (i, ag) in a.agents.iter().enumerate() {
         let sel = i == a.sel;
-        let base = if sel { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+        let base = if sel { Style::default().bg(t.menu_sel_bg).fg(t.menu_sel_fg) } else { Style::default() };
         let cmd = match (&a.editing, sel) {
             (Some(buf), true) => format!("{buf}▏"),
             _ => a.commands[i].clone(),
@@ -563,31 +588,33 @@ fn draw_ask(f: &mut Frame, main: Rect, a: &Ask) {
     let hint = if a.editing.is_some() { " type the command, Enter starts it, Esc cancels" } else { " Enter start · E edit · N not now · X never here" };
     lines.push(Line::from(Span::styled(hint, dim)));
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" start an agent ")), area);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(" start an agent ", t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
 }
 
 fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {
     let w = 78.min(main.width);
     let h = (c.lines.len() as u16 + 5).min(main.height);
     let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let t = theme();
+    let dim = Style::default().fg(t.dialog_dim);
+    let sel = Style::default().bg(t.menu_sel_bg).fg(t.menu_sel_fg);
     let mut lines: Vec<Line> = vec![Line::from("")];
     for l in &c.lines {
         lines.push(Line::from(format!(" {}", sanitize(l))));
     }
     lines.push(Line::from(""));
     if c.yes.is_empty() {
-        lines.push(Line::from(vec![Span::styled(" Cancel ", Style::default().add_modifier(Modifier::REVERSED)), Span::styled("   Esc", dim)]));
+        lines.push(Line::from(vec![Span::styled(" Cancel ", sel), Span::styled("   Esc", dim)]));
     } else {
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", c.yes), Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
+            Span::styled(format!(" {} ", c.yes), sel.add_modifier(Modifier::BOLD)),
             Span::raw("  "),
-            Span::styled(" Cancel ", Style::default().add_modifier(Modifier::REVERSED)),
+            Span::styled(" Cancel ", sel),
             Span::styled("   Y / Enter  ·  N / Esc", dim),
         ]));
     }
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(" {} ", sanitize(&c.title)))), area);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(&format!(" {} ", sanitize(&c.title)), t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
 }
 
 #[cfg(test)]

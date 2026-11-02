@@ -68,6 +68,46 @@ pub fn install_panic_hook() {
     }));
 }
 
+/// Ask the terminal for its background colour (OSC 11) once, before the main loop. Waits at most
+/// ~150 ms for the reply; terminals that do not answer simply time out. Returns 0..=1 channels.
+pub fn query_background() -> Option<(f64, f64, f64)> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() || !stdout().is_terminal() || std::env::var("TERM").is_ok_and(|t| t == "dumb") {
+        return None;
+    }
+    terminal::enable_raw_mode().ok()?;
+    let mut out = stdout();
+    let sent = out.write_all(b"\x1b]11;?\x07").and_then(|_| out.flush()).is_ok();
+    let mut reply = Vec::new();
+    if sent {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let mut fds = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+            // SAFETY: one valid pollfd for stdin.
+            let n = unsafe { libc::poll(&mut fds, 1, left.as_millis() as libc::c_int) };
+            if n <= 0 {
+                break;
+            }
+            let mut buf = [0u8; 256];
+            // SAFETY: reading into a local buffer of the stated length.
+            let got = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+            if got <= 0 {
+                break;
+            }
+            reply.extend_from_slice(&buf[..got as usize]);
+            if reply.ends_with(b"\x07") || reply.ends_with(b"\x1b\\") {
+                break;
+            }
+        }
+    }
+    let _ = terminal::disable_raw_mode();
+    crate::theme::parse_osc11(&reply)
+}
+
 /// Size of the shell area: the terminal minus header, status bar and, with
 /// two or more tabs, the tab strip.
 pub fn shell_size(tab_count: usize) -> Result<(u16, u16)> {

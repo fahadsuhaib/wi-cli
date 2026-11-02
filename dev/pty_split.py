@@ -53,7 +53,8 @@ def check(name, cond):
 class Run:
     def __init__(self, cfg, cols=120, rows=30):
         self.cols, self.rows_n = cols, rows
-        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_CLIPBOARD="file:" + clipfile)
+        env = {k: v for k, v in os.environ.items() if k != "COLORFGBG"}
+        env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", COLORTERM="truecolor", WICLI_CLIPBOARD="file:" + clipfile)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             if not remote: os.chdir(W)
@@ -163,7 +164,7 @@ noclip()
 if pos:
     r.drag(pos[0], pos[1], pos[0] + len("alpha_line_5") - 1, pos[1])
 check("dragging in the preview pane copies the preview text (no line numbers)", clip() == "alpha_line_5")
-check("selection highlights in the preview", pos is not None and r.scr.buffer[pos[1]][pos[0]].reverse)
+check("selection highlights in the preview", pos is not None and r.scr.buffer[pos[1]][pos[0]].bg == "3d59a1")  # sel_bg of the dark theme
 
 # wheel
 r.click(10, 20)
@@ -199,7 +200,7 @@ pos = r.find(r"split/b\.txt", 0, 60)
 r.click(pos[0] + 3, pos[1], code=16)   # b.txt, which mentions a.txt:7, now fills the preview
 r.click(10, 20)
 r.send(MENU + b"o", 0.8)
-lab = [(x, y) for y in range(1, 29) for x in range(120) if r.scr.buffer[y][x].bg in ("brown", "yellow", "cdcd00")]
+lab = [(x, y) for y in range(1, 29) for x in range(120) if r.scr.buffer[y][x].bg == "f2cc60"]  # hint_bg of the dark theme
 check("labels are drawn in both panes", any(x < 60 for x, y in lab) and any(x > 60 for x, y in lab))
 r.send(b"\x1b", 0.6)
 

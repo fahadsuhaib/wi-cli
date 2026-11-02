@@ -11,7 +11,8 @@ openlog = S + "/open.log"; cache = S + "/cache"
 # dev/pty_split.py covers the side-by-side pane.
 cfg = S + "/links_tab.toml"
 open(cfg, "w").write(open(S + "/test.toml").read() + '\n[defaults]\npreview_side = "tab"\n')
-env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_OPEN_LOG=openlog, WICLI_CACHE_DIR=cache)
+env = {k: v for k, v in os.environ.items() if k != "COLORFGBG"}
+env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", COLORTERM="truecolor", WICLI_OPEN_LOG=openlog, WICLI_CACHE_DIR=cache)
 
 def build_fixtures():
     script = r'''
@@ -182,7 +183,7 @@ r.send(f"echo A {hello} B https://x.dev/y C {pdf}\n".encode(), 0.8)
 r.send(MENU + b"o", 0.8)
 t = r.text()
 check("the menu entry labels the paths and links on screen", "labels" not in t and "type a label" in t)
-lab = [r.scr.buffer[y][x].data for y in range(2, 29) for x in range(0, 110) if r.scr.buffer[y][x].bg in ("brown", "yellow", "cdcd00")]
+lab = [r.scr.buffer[y][x].data for y in range(2, 29) for x in range(0, 110) if r.scr.buffer[y][x].bg == "f2cc60"]  # hint_bg of the dark theme
 check("labels are drawn over the links (home-row letters)", len(lab) >= 3 and set(lab) <= set("asdfghjkl "))
 r.send(b"a", 1.0)
 if remote:

@@ -39,12 +39,14 @@ def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
     if not cond: fails.append(name)
 
-HEX = {"cyan": "00cdcd", "green": "00cd00", "red": "cd0000"}  # pyte reports 256-colour SGR 36/32/31 as hex
-def is_col(c, name): return c.fg in (name, HEX[name])
+# Theme colours (dark theme: no COLORFGBG, no OSC 11 answer; true colour so pyte sees the exact RGB).
+HEX = {"cyan": "7dcfe0", "green": "8fdc7f", "red": "f07178"}  # diff_hunk, diff_add, diff_remove in src/theme.rs
+def is_col(c, name): return c.fg == HEX[name]
 
 class Session:
     def __init__(self, cwd, env_extra=None):
-        env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color", **(env_extra or {}))
+        env = {k: v for k, v in os.environ.items() if k != "COLORFGBG"}
+        env.update(WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color", COLORTERM="truecolor", **(env_extra or {}))
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             if not remote: os.chdir(cwd)
@@ -113,7 +115,7 @@ check("added line is green", c is not None and is_col(c, "green"))
 c = s.cell("-line 2")
 check("removed line is red", c is not None and is_col(c, "red"))
 c = s.cell(" line 1")
-check("context line is uncoloured", c is not None and c.fg == "default")
+check("context line has the plain theme text colour", c is not None and c.fg == "d7dae0")
 check("hint mentions N/P", "N/P" in s.scr.display[-1])
 
 # N / P jump between files (a.txt first, then b.txt)

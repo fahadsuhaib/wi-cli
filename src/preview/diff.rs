@@ -1,6 +1,7 @@
 //! Git changes view: branch and status summary, the coloured diff against HEAD, untracked files.
 
-use ratatui::style::{Color, Modifier, Style};
+use crate::theme::theme;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Raw git output the view is built from.
@@ -34,19 +35,20 @@ fn clean(s: &str) -> String {
 }
 
 pub fn style_diff_line(line: &str, in_header: bool) -> Style {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let t = theme();
+    let bold = Style::default().fg(t.diff_file).add_modifier(Modifier::BOLD);
     if line.starts_with("diff --git") {
         bold
     } else if line.starts_with("@@") {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(t.diff_hunk)
     } else if in_header {
         bold
     } else if line.starts_with('+') {
-        Style::default().fg(Color::Green)
+        Style::default().fg(t.diff_add)
     } else if line.starts_with('-') {
-        Style::default().fg(Color::Red)
+        Style::default().fg(t.diff_remove)
     } else if line.starts_with('\\') {
-        Style::default().add_modifier(Modifier::DIM)
+        Style::default().fg(t.dim)
     } else {
         Style::default()
     }
@@ -60,18 +62,18 @@ fn status_line(l: &str) -> Line<'static> {
     let (x, y): (String, String) = (chars[0].to_string(), chars[1].to_string());
     let rest: String = chars[2..].iter().collect();
     if x == "?" {
-        return Line::from(vec![Span::styled(format!("{x}{y}"), Style::default().fg(Color::Yellow)), Span::raw(clean(&rest))]);
+        return Line::from(vec![Span::styled(format!("{x}{y}"), Style::default().fg(theme().diff_untracked)), Span::raw(clean(&rest))]);
     }
     Line::from(vec![
-        Span::styled(x, Style::default().fg(Color::Green)),
-        Span::styled(y, Style::default().fg(Color::Red)),
+        Span::styled(x, Style::default().fg(theme().diff_add)),
+        Span::styled(y, Style::default().fg(theme().diff_remove)),
         Span::raw(clean(&rest)),
     ])
 }
 
 pub fn render(s: &Snapshot) -> Rendered {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let bold = Style::default().fg(theme().diff_branch).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(theme().dim);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut jumps = Vec::new();
 
@@ -110,7 +112,7 @@ pub fn render(s: &Snapshot) -> Rendered {
         lines.push(Line::from(""));
         jumps.push(lines.len());
         lines.push(Line::from(Span::styled(format!("Untracked files ({})", untracked.len()), bold)));
-        lines.extend(untracked.iter().map(|f| Line::from(Span::styled(format!("  {}", clean(f)), Style::default().fg(Color::Yellow)))));
+        lines.extend(untracked.iter().map(|f| Line::from(Span::styled(format!("  {}", clean(f)), Style::default().fg(theme().diff_untracked)))));
     }
     Rendered { lines, jumps }
 }
@@ -139,16 +141,16 @@ mod tests {
     #[test]
     fn colours_added_removed_hunk_and_headers() {
         let r = render(&snap());
-        assert_eq!(find(&r, "+TWO").spans[0].style.fg, Some(Color::Green));
-        assert_eq!(find(&r, "-two").spans[0].style.fg, Some(Color::Red));
-        assert_eq!(find(&r, "@@ -1,2 +1,2 @@").spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(find(&r, "+TWO").spans[0].style.fg, Some(theme().diff_add));
+        assert_eq!(find(&r, "-two").spans[0].style.fg, Some(theme().diff_remove));
+        assert_eq!(find(&r, "@@ -1,2 +1,2 @@").spans[0].style.fg, Some(theme().diff_hunk));
         let h = find(&r, "diff --git a/a.txt b/a.txt");
         assert!(h.spans[0].style.add_modifier.contains(Modifier::BOLD));
         // file header lines are not mistaken for added/removed lines
         let plus = find(&r, "+++ b/a.txt");
-        assert_eq!(plus.spans[0].style.fg, None);
+        assert_eq!(plus.spans[0].style.fg, Some(theme().diff_file));
         assert!(plus.spans[0].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(find(&r, "--- a/a.txt").spans[0].style.fg, None);
+        assert_eq!(find(&r, "--- a/a.txt").spans[0].style.fg, Some(theme().diff_file));
         assert_eq!(find(&r, " one").spans[0].style.fg, None);
     }
 

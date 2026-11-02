@@ -67,6 +67,9 @@ pub struct Remembered {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct State {
+    /// Theme chosen from the menu (`dark` or `light`); an explicit config theme overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
     #[serde(default)]
     pub workspace: BTreeMap<String, Remembered>,
     /// Last command used per agent, offered as the default in new workspaces.
