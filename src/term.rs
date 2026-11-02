@@ -7,9 +7,14 @@ use std::io::stdout;
 
 pub struct TermGuard;
 impl TermGuard {
-    pub fn enter() -> Result<Self> {
+    pub fn enter(mouse: bool) -> Result<Self> {
         terminal::enable_raw_mode()?;
         execute!(stdout(), terminal::EnterAlternateScreen, EnableBracketedPaste)?;
+        if mouse {
+            use std::io::Write;
+            stdout().write_all(crate::mouse::ENABLE)?;
+            stdout().flush()?;
+        }
         Ok(Self)
     }
 }

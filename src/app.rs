@@ -6,7 +6,9 @@ use crate::config::{Config, parse_prefix_key, prefix_label};
 use crate::tab::Tab;
 use crate::files::complete;
 use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
-use crate::ui::{self, Action, Prompt, View, menu_items};
+use crate::mouse::{self, Kind, MouseEvent, Piece};
+use crate::ui::{self, Action, MenuItem, Prompt, View, menu_items};
+use ratatui::layout::Rect;
 use crate::workspace::{Backend, Event, Workspace, spawn_shell};
 use anyhow::{Result, bail};
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -82,7 +84,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)) };
     open_tab(&mut app, backend, &events_tx, cols, rows).await?;
 
-    let _guard = TermGuard::enter()?;
+    let _guard = TermGuard::enter(cfg.defaults.mouse)?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut stdin = tokio::io::stdin();
     let mut winch = signal(SignalKind::window_change())?;
@@ -91,6 +93,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut buf = [0u8; 8192];
     let mut mode = Mode::Shell;
+    let mut mouse_on = cfg.defaults.mouse;
+    let mut splitter = mouse::Splitter::default();
     let mut filter = PasteFilter::default();
     let mut flush_at: Option<Instant> = None;
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
@@ -183,7 +187,49 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 flush_at = filter.has_pending().then(|| Instant::now() + Duration::from_millis(50));
                 for ev in in_events {
                   let bytes = match ev {
-                    InEv::Keys(b) => b,
+                    InEv::Keys(b) => {
+                        // Mouse reports are pulled out of the key stream; clicks that mean a key
+                        // press (menu entry, completion) are turned into that key.
+                        let mut out: Vec<u8> = Vec::new();
+                        for piece in splitter.split(&b) {
+                            let m = match piece {
+                                Piece::Bytes(x) => { out.extend(x); continue; }
+                                Piece::Mouse(m) => m,
+                            };
+                            let (tc, tr) = crossterm::terminal::size()?;
+                            let strip_h = u16::from(app.tabs.len() > 1);
+                            let main = Rect::new(0, 1 + strip_h, tc, tr.saturating_sub(2 + strip_h).max(1));
+                            match mouse_intent(&m, &mode, &app, &items, main) {
+                                Intent::None => {}
+                                Intent::Synth(bytes) => out.extend(bytes),
+                                Intent::SwitchTab(i) => { switch_to(&mut app, i); dirty = true; }
+                                Intent::PreviewScroll(n) => {
+                                    let page = main.height as usize;
+                                    if let Some(p) = app.tabs[app.active].preview.as_mut() {
+                                        let key = if n < 0 { PvKey::Up } else { PvKey::Down };
+                                        for _ in 0..n.unsigned_abs() { p.navigate(key, page); }
+                                    }
+                                    dirty = true;
+                                }
+                                Intent::EnterScroll => {
+                                    mode = Mode::Scroll;
+                                    out.extend(b"\x1b[A".repeat(3));
+                                }
+                                Intent::ExitScroll => { mode = Mode::Shell; dirty = true; }
+                                Intent::PickCandidate(i) => {
+                                    if let Mode::Prompt(pr) = &mut mode
+                                        && let Some(c) = pr.shown.get(i).cloned()
+                                    {
+                                        let dir = crate::files::split_input(&pr.input).0.to_string();
+                                        pr.input = format!("{dir}{c}");
+                                        pr.error = None;
+                                        out.extend(if c.ends_with('/') { b"\t".to_vec() } else { b"\r".to_vec() });
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    }
                     InEv::PasteStart => {
                         let fwd = matches!(mode, Mode::Shell) && !app.tabs[app.active].is_preview();
                         let wrap = app.tabs[app.active].parser.screen().bracketed_paste();
@@ -352,6 +398,13 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     } else {
                                         format!("local workspace · {detail} · {} tab(s)", app.tabs.len())
                                     }),
+                                    Action::Mouse => {
+                                        mouse_on = !mouse_on;
+                                        let mut o = stdout();
+                                        let _ = std::io::Write::write_all(&mut o, if mouse_on { mouse::ENABLE } else { mouse::DISABLE });
+                                        let _ = std::io::Write::flush(&mut o);
+                                        message = Some(if mouse_on { "mouse on".to_string() } else { "mouse off: select and copy text natively".to_string() });
+                                    }
                                     Action::Scroll if app.tabs[app.active].is_preview() => message = Some("scroll a preview with the arrow keys and PgUp/PgDn".into()),
                                     Action::Scroll => mode = Mode::Scroll,
                                     Action::Preview => mode = Mode::Prompt(Prompt::default()),
@@ -503,4 +556,94 @@ fn go_back(app: &mut App) {
         app.tabs.iter().position(|t| !t.is_preview()).unwrap_or(0)
     };
     switch_to(app, target);
+}
+
+enum Intent {
+    None,
+    /// Handle as if these bytes had been typed (or, in a shell tab, send them to the app).
+    Synth(Vec<u8>),
+    SwitchTab(usize),
+    PreviewScroll(isize),
+    EnterScroll,
+    ExitScroll,
+    PickCandidate(usize),
+}
+
+/// What a mouse event means right now. Pure so it can be tested without a terminal.
+fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], main: Rect) -> Intent {
+    let inside = |r: Rect| m.col >= r.x && m.col < r.x + r.width && m.row >= r.y && m.row < r.y + r.height;
+    let up3 = || Intent::Synth(b"\x1b[A".repeat(3));
+    let down3 = || Intent::Synth(b"\x1b[B".repeat(3));
+    match mode {
+        Mode::Menu(_) => {
+            let r = ui::menu_rect(main, items.len());
+            match m.kind {
+                Kind::Down(_) if inside(r) => {
+                    // Rows 1..=n inside the border are the entries.
+                    let idx = m.row.saturating_sub(r.y + 1) as usize;
+                    match items.get(idx) {
+                        Some(it) if m.row > r.y => Intent::Synth(vec![it.key as u8]),
+                        _ => Intent::None,
+                    }
+                }
+                Kind::Down(_) => Intent::Synth(vec![0x1b]),
+                Kind::WheelUp => Intent::Synth(b"\x1b[A".to_vec()),
+                Kind::WheelDown => Intent::Synth(b"\x1b[B".to_vec()),
+                _ => Intent::None,
+            }
+        }
+        Mode::Prompt(p) => {
+            let r = ui::prompt_rect(main, p);
+            match m.kind {
+                Kind::Down(_) if inside(r) && ((m.row - r.y) as usize) < p.shown.len() => Intent::PickCandidate((m.row - r.y) as usize),
+                _ => Intent::None,
+            }
+        }
+        Mode::Scroll => match m.kind {
+            Kind::WheelUp => up3(),
+            Kind::WheelDown if app.tabs[app.active].parser.screen().scrollback() == 0 => Intent::ExitScroll,
+            Kind::WheelDown => down3(),
+            _ => Intent::None,
+        },
+        Mode::Shell => {
+            if app.tabs.len() > 1 && m.row == 1 {
+                let strip: Vec<_> = app.tabs.iter().enumerate().map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
+                return match m.kind {
+                    Kind::Down(mouse::Button::Left) => ui::tab_at(&strip, m.col).map_or(Intent::None, Intent::SwitchTab),
+                    _ => Intent::None,
+                };
+            }
+            if !inside(main) {
+                return Intent::None;
+            }
+            let tab = &app.tabs[app.active];
+            if tab.is_preview() {
+                return match m.kind {
+                    Kind::WheelUp => Intent::PreviewScroll(-3),
+                    Kind::WheelDown => Intent::PreviewScroll(3),
+                    _ => Intent::None,
+                };
+            }
+            let scr = tab.parser.screen();
+            use vt100::{MouseProtocolEncoding, MouseProtocolMode};
+            let wanted = match scr.mouse_protocol_mode() {
+                MouseProtocolMode::None => None,
+                MouseProtocolMode::Press => Some(matches!(m.kind, Kind::Down(_) | Kind::WheelUp | Kind::WheelDown)),
+                MouseProtocolMode::PressRelease => Some(!matches!(m.kind, Kind::Drag(_) | Kind::Other)),
+                MouseProtocolMode::ButtonMotion | MouseProtocolMode::AnyMotion => Some(!matches!(m.kind, Kind::Other)),
+            };
+            match wanted {
+                // The app in this tab asked for the mouse: give it the event at its own coordinates.
+                Some(true) => Intent::Synth(mouse::encode(m, m.col, m.row - main.y, scr.mouse_protocol_encoding() == MouseProtocolEncoding::Sgr)),
+                Some(false) => Intent::None,
+                None => match m.kind {
+                    // Full-screen apps without mouse support get arrow keys, like a terminal's alternate-scroll.
+                    Kind::WheelUp if scr.alternate_screen() => up3(),
+                    Kind::WheelDown if scr.alternate_screen() => down3(),
+                    Kind::WheelUp => Intent::EnterScroll,
+                    _ => Intent::None,
+                },
+            }
+        }
+    }
 }

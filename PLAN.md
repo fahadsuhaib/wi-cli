@@ -24,6 +24,10 @@ Done when: Claude Code runs in one tab, `cargo test` in another, you can scroll 
 6. Robustness: restore the terminal on panic/SIGTERM/SIGHUP, forward Ctrl-C, shell exit closes only its tab.
 7. Repo hygiene: git init, CI-less `cargo test` with unit tests for key parsing, config, left_trim; pty smoke tests in `dev/`.
 
+## Phase A2: Agent-aware workspaces and mouse (added 2026-11-02, from user requests)
+1. Agent workspaces: wi recognises Claude Code workspaces (`CLAUDE.md`, `.claude/`) and Codex workspaces (`AGENTS.md`, `.codex/`), local or remote, with a bounded check at startup. Config `[agents.<name>]` holds the user's usual command and flags (for example `claude --continue`). Behaviour per workspace: `ask` (default, first time), `always`, `never`; the answer and the chosen command are remembered in a small state file, changeable from the menu. Starting an agent opens it in its own shell tab.
+2. Mouse: click a tab, menu entry or completion; wheel scrolls previews and shell scrollback; events are passed to apps that ask for the mouse (vim, htop). Mouse capture blocks native text selection, so add a menu toggle (Mouse on/off) and document Shift-drag; config `mouse = true|false`.
+
 ## Phase B: Remote M1 completion
 1. tmux-backed detach/reattach (`tmux new -A -s wicli`, tmux status/keys disabled so it is invisible; plain session if tmux missing).
 2. ssh-agent auth, passphrase-protected keys, `~/.ssh/config` host aliases (HostName, User, Port, IdentityFile).

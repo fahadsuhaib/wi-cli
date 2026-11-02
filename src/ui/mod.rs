@@ -17,6 +17,7 @@ pub enum Action {
     NewTab,
     NextTab,
     PrevTab,
+    Mouse,
     CloseTab,
     Reconnect,
     Scroll,
@@ -47,6 +48,7 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Close tab", key: 'c', action: Action::CloseTab, remote_only: false },
     MenuItem { label: "Reconnect", key: 'r', action: Action::Reconnect, remote_only: true },
     MenuItem { label: "Scroll", key: 's', action: Action::Scroll, remote_only: false },
+    MenuItem { label: "Mouse on/off", key: 'm', action: Action::Mouse, remote_only: false },
     MenuItem { label: "Info", key: 'i', action: Action::Info, remote_only: false },
     MenuItem { label: "Quit", key: 'q', action: Action::Quit, remote_only: false },
 ];
@@ -60,6 +62,45 @@ pub struct Prompt {
     /// Total number of matches, which may exceed what is shown.
     pub total: usize,
     pub error: Option<String>,
+}
+
+/// Text of one tab in the strip, e.g. ` 2 build * `.
+pub fn tab_label(i: usize, title: &str, state: crate::tab::TabState) -> String {
+    use crate::tab::TabState;
+    let mark = match state {
+        TabState::Streaming => " *",
+        TabState::Quiet => " !",
+        TabState::Idle => "",
+    };
+    format!(" {} {}{} ", i + 1, title, mark)
+}
+
+/// Which tab is under column `x` of the strip.
+pub fn tab_at(tabs: &[(String, bool, crate::tab::TabState)], x: u16) -> Option<usize> {
+    let mut start = 0usize;
+    for (i, (title, _, state)) in tabs.iter().enumerate() {
+        let w = tab_label(i, title, *state).chars().count();
+        if (x as usize) < start + w {
+            return Some(i);
+        }
+        start += w;
+    }
+    None
+}
+
+/// Where the menu box is drawn inside the main area.
+pub fn menu_rect(main: Rect, items: usize) -> Rect {
+    let w = 30.min(main.width);
+    let h = (items as u16 + 2).min(main.height);
+    Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h)
+}
+
+/// Where the open-file prompt (candidates plus input line) is drawn.
+pub fn prompt_rect(main: Rect, p: &Prompt) -> Rect {
+    let more = p.total.saturating_sub(p.shown.len());
+    let rows = p.shown.len() + usize::from(more > 0) + usize::from(p.error.is_some()) + 1;
+    let h = (rows as u16).min(main.height);
+    Rect::new(main.x, main.y + main.height - h, main.width, h)
 }
 
 pub struct View<'a> {
@@ -138,13 +179,7 @@ pub fn draw(f: &mut Frame, v: &View) {
         let mut spans = Vec::new();
         for (i, (title, active, state)) in v.tabs.iter().enumerate() {
             use crate::tab::TabState;
-            // `*` still printing, `!` printed and then went quiet (finished or waiting for you).
-            let mark = match state {
-                TabState::Streaming => " *",
-                TabState::Quiet => " !",
-                TabState::Idle => "",
-            };
-            let label = format!(" {} {}{} ", i + 1, title, mark);
+            let label = tab_label(i, title, *state);
             let style = if *active {
                 Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else {
@@ -211,9 +246,7 @@ pub fn draw(f: &mut Frame, v: &View) {
 
 fn draw_menu(f: &mut Frame, main: Rect, selected: usize, remote: bool) {
     let items = menu_items(remote);
-    let w = 30.min(main.width);
-    let h = (items.len() as u16 + 2).min(main.height);
-    let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
+    let area = menu_rect(main, items.len());
     let lines: Vec<Line> = items
         .iter()
         .enumerate()
@@ -254,9 +287,7 @@ fn left_trim(s: &str, max: usize) -> String {
 
 fn draw_prompt(f: &mut Frame, main: Rect, p: &Prompt) {
     let more = p.total.saturating_sub(p.shown.len());
-    let rows = p.shown.len() + usize::from(more > 0) + usize::from(p.error.is_some()) + 1;
-    let h = (rows as u16).min(main.height);
-    let area = Rect::new(main.x, main.y + main.height - h, main.width, h);
+    let area = prompt_rect(main, p);
     let dim = Style::default().add_modifier(Modifier::DIM);
     let mut lines: Vec<Line> = p.shown.iter().map(|s| Line::from(Span::styled(format!("   {s}"), dim))).collect();
     if more > 0 {

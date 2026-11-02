@@ -3,6 +3,7 @@ mod compat;
 mod config;
 mod input;
 mod link;
+mod mouse;
 mod preview;
 mod scroll;
 mod files;

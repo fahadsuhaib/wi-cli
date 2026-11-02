@@ -17,6 +17,8 @@ pub struct Defaults {
     pub quiet_secs: u64,
     /// Ring the terminal bell when a background tab goes quiet.
     pub bell_on_quiet: bool,
+    /// Capture the mouse (clicks, wheel). Turning it off restores native text selection.
+    pub mouse: bool,
 }
 
 impl Default for Defaults {
@@ -31,6 +33,7 @@ impl Default for Defaults {
             scrollback_lines: 1000,
             quiet_secs: 5,
             bell_on_quiet: false,
+            mouse: true,
         }
     }
 }
