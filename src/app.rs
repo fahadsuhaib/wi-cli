@@ -77,6 +77,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut stdin = tokio::io::stdin();
     let mut winch = signal(SignalKind::window_change())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sighup = signal(SignalKind::hangup())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
     let mut buf = [0u8; 8192];
     let mut mode = Mode::Shell;
     let mut message: Option<String> = None;
@@ -188,6 +191,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     }
                 }
             }
+            _ = sigterm.recv() => return finish(&app, backend).await,
+            _ = sighup.recv() => return finish(&app, backend).await,
+            _ = sigint.recv() => return finish(&app, backend).await,
             _ = winch.recv() => {
                 resize_all(&mut app)?;
                 dirty = true;
@@ -199,6 +205,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         if i != app.active { app.tabs[i].activity = true; }
                         dirty = true;
                     }
+                }
+                Some(Event::Exited(_)) if backend.is_lost() => {
+                    message = Some("connection lost - open the menu and quit".into());
+                    dirty = true;
                 }
                 Some(Event::Exited(id)) => {
                     if remove_tab(&mut app, id)? { return finish(&app, backend).await; }
@@ -253,5 +263,7 @@ async fn finish(app: &App, backend: &Backend) -> Result<()> {
         t.handle.close();
     }
     backend.close().await;
+    // Give the shell tasks a moment to kill their children before we exit.
+    tokio::time::sleep(Duration::from_millis(150)).await;
     Ok(())
 }

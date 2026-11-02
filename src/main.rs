@@ -13,6 +13,7 @@ use anyhow::{Result, bail};
 
 #[tokio::main]
 async fn main() {
+    term::install_panic_hook();
     let code = match real_main().await {
         Ok(()) => 0,
         Err(e) => {

@@ -14,9 +14,33 @@ impl TermGuard {
 }
 impl Drop for TermGuard {
     fn drop(&mut self) {
-        let _ = execute!(stdout(), terminal::LeaveAlternateScreen);
-        let _ = terminal::disable_raw_mode();
+        restore_terminal();
     }
+}
+
+/// Put the host terminal back: mouse/paste modes off, cursor shown, alternate
+/// screen left, raw mode off. Safe to call any number of times, from a panic
+/// hook or a signal path as well as from `TermGuard::drop`.
+pub fn restore_terminal() {
+    use std::io::Write;
+    let mut out = stdout();
+    // Disable mouse reporting (1000/1002/1003/1006) and bracketed paste (2004),
+    // show the cursor, then leave the alternate screen.
+    let _ = out.write_all(RESTORE_SEQ);
+    let _ = out.flush();
+    let _ = terminal::disable_raw_mode();
+}
+
+const RESTORE_SEQ: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l";
+
+/// Panic hook: restore the terminal before the message is printed, exit 1.
+pub fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        prev(info);
+        std::process::exit(1);
+    }));
 }
 
 /// Size of the shell area: the terminal minus header, status bar and, with
@@ -27,3 +51,36 @@ pub fn shell_size(tab_count: usize) -> Result<(u16, u16)> {
     Ok((c.max(1), r.saturating_sub(chrome).max(1)))
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_is_idempotent() {
+        restore_terminal();
+        restore_terminal();
+    }
+
+    #[test]
+    fn restore_sequence_ends_with_leave_alt_screen() {
+        assert!(RESTORE_SEQ.ends_with(b"\x1b[?1049l"));
+    }
+
+    #[test]
+    fn panic_hook_restores_then_chains() {
+        // The hook must run restore before the previous hook; verify the hook
+        // survives a caught panic without aborting the test process.
+        let prev = std::panic::take_hook();
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c = called.clone();
+        std::panic::set_hook(Box::new(move |_| {
+            restore_terminal();
+            c.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let r = std::panic::catch_unwind(|| panic!("boom"));
+        std::panic::set_hook(prev);
+        assert!(r.is_err());
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}

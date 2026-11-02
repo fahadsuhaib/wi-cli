@@ -58,6 +58,11 @@ impl Backend {
         }
     }
 
+    /// True when the SSH connection has died (always false for local).
+    pub fn is_lost(&self) -> bool {
+        matches!(self, Backend::Remote(s) if s.handle.is_closed())
+    }
+
     pub async fn close(&self) {
         if let Backend::Remote(session) = self {
             let _ = session.handle.disconnect(russh::Disconnect::ByApplication, "", "en").await;
