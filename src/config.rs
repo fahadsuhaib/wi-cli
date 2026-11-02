@@ -51,6 +51,14 @@ pub struct BoxConfig {
     pub identity: Option<String>,
     /// Override known_hosts file (default: ~/.ssh/known_hosts)
     pub known_hosts: Option<String>,
+    /// Run shells inside tmux on the box so they survive disconnects (default true).
+    /// Set false to always use plain shells.
+    #[serde(default = "default_true")]
+    pub use_tmux: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_port() -> u16 {
@@ -103,6 +111,113 @@ impl Config {
     }
 }
 
+/// What `~/.ssh/config` says about one host alias.
+#[derive(Debug, PartialEq, Eq, Default, Clone)]
+pub struct SshHost {
+    pub hostname: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    pub identity: Option<String>,
+    /// Set when ProxyJump/ProxyCommand applies; wi does not support those.
+    pub proxy: Option<String>,
+}
+
+pub fn ssh_config_path() -> PathBuf {
+    if let Ok(p) = std::env::var("WICLI_SSH_CONFIG") {
+        return PathBuf::from(p);
+    }
+    dirs::home_dir().unwrap_or_default().join(".ssh/config")
+}
+
+/// Look `alias` up in ssh config text. Returns None unless a `Host` line names the alias
+/// explicitly (a lone `Host *` must not make every typo look like a box). As in OpenSSH,
+/// the first value found for each option wins, and wildcard blocks still contribute.
+pub fn parse_ssh_config(text: &str, alias: &str) -> Option<SshHost> {
+    let mut host = SshHost::default();
+    let mut named = false;
+    let mut active = false;
+    let mut hostname: Option<String> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, val) = match line.find(|c: char| c.is_whitespace() || c == '=') {
+            Some(i) => (&line[..i], line[i..].trim_start_matches(|c: char| c.is_whitespace() || c == '=').trim()),
+            None => (line, ""),
+        };
+        let val = unquote(val);
+        match key.to_ascii_lowercase().as_str() {
+            "host" => {
+                let pats: Vec<&str> = val.split_whitespace().collect();
+                let negated = pats.iter().any(|p| p.strip_prefix('!').is_some_and(|n| glob(n, alias)));
+                active = !negated && pats.iter().any(|p| !p.starts_with('!') && glob(p, alias));
+                if active && pats.contains(&alias) {
+                    named = true;
+                }
+            }
+            // Conditional blocks are not supported: ignore everything inside them.
+            "match" => active = false,
+            _ if !active => {}
+            "hostname" => hostname = hostname.or(Some(val.to_string())),
+            "user" => host.user = host.user.take().or(Some(val.to_string())),
+            "port" => host.port = host.port.or(val.parse().ok()),
+            "identityfile" => host.identity = host.identity.take().or(Some(val.to_string())),
+            "proxyjump" | "proxycommand" if !val.eq_ignore_ascii_case("none") => {
+                host.proxy = host.proxy.take().or(Some(key.to_string()));
+            }
+            _ => {}
+        }
+    }
+    if !named {
+        return None;
+    }
+    host.hostname = hostname.unwrap_or_else(|| alias.to_string()).replace("%h", alias);
+    Some(host)
+}
+
+fn unquote(v: &str) -> &str {
+    v.trim().trim_matches('"')
+}
+
+/// ssh-style pattern match: `*` any run, `?` one character.
+fn glob(pat: &str, s: &str) -> bool {
+    fn go(p: &[u8], s: &[u8]) -> bool {
+        match p.first() {
+            None => s.is_empty(),
+            Some(b'*') => (0..=s.len()).any(|i| go(&p[1..], &s[i..])),
+            Some(b'?') => !s.is_empty() && go(&p[1..], &s[1..]),
+            Some(c) => s.first() == Some(c) && go(&p[1..], &s[1..]),
+        }
+    }
+    go(pat.as_bytes(), s.as_bytes())
+}
+
+impl Config {
+    /// A box taken from `~/.ssh/config` (or WICLI_SSH_CONFIG). Ok(None) when the alias is not there.
+    pub fn ssh_config_box(alias: &str) -> Result<Option<BoxConfig>> {
+        let path = ssh_config_path();
+        let Ok(text) = std::fs::read_to_string(&path) else { return Ok(None) };
+        let Some(h) = parse_ssh_config(&text, alias) else { return Ok(None) };
+        if let Some(p) = h.proxy {
+            anyhow::bail!("'{alias}' in {} uses {p}, which wi does not support yet", path.display());
+        }
+        let user = h
+            .user
+            .or_else(|| std::env::var("USER").ok())
+            .context("no User in ssh config and $USER is not set")?;
+        Ok(Some(BoxConfig {
+            name: alias.to_string(),
+            host: h.hostname,
+            port: h.port.unwrap_or(22),
+            user,
+            identity: h.identity,
+            known_hosts: None,
+            use_tmux: true,
+        }))
+    }
+}
+
 /// Parse a key name like "ctrl-space" or "ctrl-g" into the control byte the
 /// terminal sends. Only Ctrl-combinations are supported: they never clash with
 /// text input.
@@ -151,5 +266,50 @@ mod tests {
         let c: Config = toml::from_str("[[box]]\nname=\"a\"\nhost=\"h\"\nuser=\"u\"\n").unwrap();
         assert_eq!(c.boxes[0].port, 22);
         assert_eq!(c.defaults.prefix_key, "ctrl-space");
+    }
+
+    const SSH: &str = "# comment\nHost dev devbox\n  HostName 10.0.0.5\n  User fahad\n  Port 2200\n  IdentityFile ~/.ssh/id_dev\n\nHost jump\n  HostName j.example.com\n  ProxyJump bastion\n\nHost web-*\n  User www\n\nHost *\n  User fallback\n  Port 22\n  IdentityFile ~/.ssh/id_any\n";
+
+    #[test]
+    fn ssh_config_host() {
+        let h = parse_ssh_config(SSH, "devbox").unwrap();
+        assert_eq!(h.hostname, "10.0.0.5");
+        assert_eq!(h.user.as_deref(), Some("fahad"));
+        assert_eq!(h.port, Some(2200));
+        assert_eq!(h.identity.as_deref(), Some("~/.ssh/id_dev"));
+        assert!(h.proxy.is_none());
+    }
+
+    #[test]
+    fn ssh_config_wildcards() {
+        // Not named explicitly: only wildcard blocks match, so it is not an alias.
+        assert!(parse_ssh_config(SSH, "unknown").is_none());
+        assert!(parse_ssh_config(SSH, "web-1").is_none());
+        // Wildcard block fills what the named block lacks.
+        let h = parse_ssh_config("Host a\n HostName h\nHost *\n User u\n IdentityFile ~/k\n", "a").unwrap();
+        assert_eq!((h.user.as_deref(), h.identity.as_deref()), (Some("u"), Some("~/k")));
+        // First value wins.
+        let h = parse_ssh_config("Host a\n User first\nHost *\n User second\n", "a").unwrap();
+        assert_eq!(h.user.as_deref(), Some("first"));
+        // Defaults: hostname is the alias.
+        let h = parse_ssh_config("Host a\n", "a").unwrap();
+        assert_eq!((h.hostname.as_str(), h.port), ("a", None));
+    }
+
+    #[test]
+    fn ssh_config_proxy_rejected() {
+        let h = parse_ssh_config(SSH, "jump").unwrap();
+        assert_eq!(h.proxy.as_deref(), Some("ProxyJump"));
+        let h = parse_ssh_config("Host a\n ProxyCommand ssh -W %h:%p x\n", "a").unwrap();
+        assert!(h.proxy.is_some());
+        assert!(parse_ssh_config("Host a\n ProxyJump none\n", "a").unwrap().proxy.is_none());
+    }
+
+    #[test]
+    fn ssh_config_syntax() {
+        let h = parse_ssh_config("host=a\n  hostname = \"h.example\"\n  port=2022\n", "a").unwrap();
+        assert_eq!((h.hostname.as_str(), h.port), ("h.example", Some(2022)));
+        assert!(parse_ssh_config("Host !a *\n User u\nHost a\n", "a").is_some());
+        assert!(parse_ssh_config("Host b\n HostName x\n", "a").is_none());
     }
 }

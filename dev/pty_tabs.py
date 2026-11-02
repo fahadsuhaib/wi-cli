@@ -42,7 +42,7 @@ os.write(fd, MENU + b"t"); pump(0.8)
 check("next tab", "TWO4" in text())
 os.write(fd, MENU + b"c"); pump(1)
 check("close tab returns to tab 1", "ONE2" in text() and not re.search(r"\b1 \S.*\b2 \S", text().split("\n")[1]))
-os.write(fd, MENU + b"q"); pump(1.5)
+os.write(fd, MENU + (b"e" if mode == "remote" else b"q")); pump(1.5)  # remote: End sessions and quit, so no tmux session leaks into the next test
 p, _ = os.waitpid(pid, os.WNOHANG)
 check("quit exits", p != 0)
 sys.exit(1 if fails else 0)
