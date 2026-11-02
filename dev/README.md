@@ -11,6 +11,12 @@
 then every `dev/pty_*.py` (except the interactive `pty_drive.py`) in local mode, and remote mode when the
 script mentions it and the box answers on port 2222. Prints a summary and exits non-zero on any failure.
 
+## Hidden dev command
+`wi __ls [--box NAME] <dir> [--git] [--sort name|size|mtime]` (not in `wi --help`) prints the explorer's data layer as text: lines
+`<d|f|l> <size|-> <mtime|-> <hidden 0|1> <name>`, `truncated <n>` past 5,000 entries, and with `--git` `repo <root>`, `git <mark> <path>`,
+`dirty <folder>`, `branch <name>` (or `nogit`). `dev/pty_listing.py` drives it locally and against the Docker box (fixtures under
+`/home/dev/explorer-test`, removed afterwards).
+
 ## Benchmarks
 `cargo build --release && python dev/bench.py <scratch-dir> [--remote]`
 Measures wi's own RSS and CPU (the flood is judged in CPU milliseconds per MB of output, budget 120) (ps on the wi pid; child shells excluded) with 10 tabs idle for 20 s, and while

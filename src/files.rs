@@ -26,7 +26,7 @@ fn home() -> std::path::PathBuf {
 impl Backend {
     /// Turn what the user typed into a path the backend understands. Relative paths start at
     /// the workspace root (local) or the login directory (remote); `~/` means home.
-    fn absolutize(&self, path: &str) -> String {
+    pub(crate) fn absolutize(&self, path: &str) -> String {
         match self {
             Backend::Local(root) => {
                 let p = if path == "~" {
