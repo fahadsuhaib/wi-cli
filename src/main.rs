@@ -1,3 +1,4 @@
+mod agents;
 mod app;
 mod compat;
 mod config;

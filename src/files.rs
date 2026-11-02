@@ -49,6 +49,18 @@ impl Backend {
         }
     }
 
+    /// Whether `path` exists (a single bounded stat; false on any error).
+    pub async fn exists(&self, path: &str) -> bool {
+        let p = self.absolutize(path);
+        match self {
+            Backend::Local(_) => tokio::fs::metadata(&p).await.is_ok(),
+            Backend::Remote(s) => match s.sftp().await {
+                Ok(sftp) => sftp.metadata(p).await.is_ok(),
+                Err(_) => false,
+            },
+        }
+    }
+
     /// Absolute path with symlinks resolved; fails if it does not exist.
     pub async fn resolve(&self, path: &str) -> Result<String> {
         let p = self.absolutize(path);

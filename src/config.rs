@@ -19,6 +19,8 @@ pub struct Defaults {
     pub bell_on_quiet: bool,
     /// Capture the mouse (clicks, wheel). Turning it off restores native text selection.
     pub mouse: bool,
+    /// What to do when an AI-agent workspace is detected: `ask`, `always` or `never`.
+    pub agent_start: String,
 }
 
 impl Default for Defaults {
@@ -34,6 +36,7 @@ impl Default for Defaults {
             quiet_secs: 5,
             bell_on_quiet: false,
             mouse: true,
+            agent_start: "ask".into(),
         }
     }
 }
@@ -54,8 +57,16 @@ fn default_port() -> u16 {
     22
 }
 
+/// Your usual way of starting an agent, e.g. `claude --continue`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AgentCfg {
+    pub command: String,
+}
+
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Config {
+    #[serde(default)]
+    pub agents: std::collections::HashMap<String, AgentCfg>,
     #[serde(default)]
     pub defaults: Defaults,
     #[serde(default, rename = "box")]

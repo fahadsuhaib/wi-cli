@@ -7,7 +7,8 @@ use crate::tab::Tab;
 use crate::files::complete;
 use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
 use crate::mouse::{self, Kind, MouseEvent, Piece};
-use crate::ui::{self, Action, MenuItem, Prompt, View, menu_items};
+use crate::agents::{self, Agent, Decision};
+use crate::ui::{self, Action, Ask, MenuItem, Prompt, View, menu_items};
 use ratatui::layout::Rect;
 use crate::workspace::{Backend, Event, Workspace, spawn_shell};
 use anyhow::{Result, bail};
@@ -23,6 +24,7 @@ use tokio::time::sleep_until;
 enum Mode {
     Shell,
     Prompt(Prompt),
+    Ask(Ask),
     Menu(usize),
     /// Browsing scrollback of the active tab.
     Scroll,
@@ -94,6 +96,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut buf = [0u8; 8192];
     let mut mode = Mode::Shell;
     let mut mouse_on = cfg.defaults.mouse;
+    let mut agent_state = agents::State::load();
+    let wkey = agents::workspace_key(ws);
     let mut splitter = mouse::Splitter::default();
     let mut filter = PasteFilter::default();
     let mut flush_at: Option<Instant> = None;
@@ -108,6 +112,19 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let frame = Duration::from_secs_f64(1.0 / fps.clamp(1, 120) as f64);
     let mut last_draw = Instant::now() - frame;
     let mut dirty = true;
+
+    // Recognise Claude Code / Codex workspaces: start the remembered agent, or ask the first time.
+    let detected = agents::detect(backend).await;
+    match agents::decide(&cfg.defaults.agent_start, &detected, agent_state.workspace.get(&wkey)) {
+        Decision::Nothing => {}
+        Decision::Start(ag) => {
+            let cmd = agents::command_for(ag, cfg, &agent_state, &wkey);
+            if let Err(e) = start_agent(&mut app, backend, &events_tx, ag, &cmd).await {
+                message = Some(format!("could not start {}: {e}", ag.key()));
+            }
+        }
+        Decision::Ask(list) => mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &wkey)),
+    }
 
     loop {
         let due = last_draw + frame;
@@ -152,6 +169,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 let view = View {
                     preview: app.tabs[app.active].preview.as_ref(),
                     prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
+                    ask: match &mode { Mode::Ask(x) => Some(x), _ => None },
                     screen: app.tabs[app.active].parser.screen(),
                     name: &name,
                     detail: &detail,
@@ -242,6 +260,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             p.input.push_str(&String::from_utf8_lossy(&b).replace(['\r', '\n'], ""));
                             p.error = None;
                             dirty = true;
+                        } else if let Mode::Ask(x) = &mut mode {
+                            if let Some(buf) = x.editing.as_mut() {
+                                buf.push_str(&String::from_utf8_lossy(&b).replace(['\r', '\n'], ""));
+                                dirty = true;
+                            }
                         } else if matches!(pasting, Some((true, _))) { app.tabs[app.active].write(b); }
                         continue;
                     }
@@ -306,6 +329,73 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 }
                                 None => chunk = &[],
                             }
+                        }
+                        Mode::Ask(ref mut ask) => {
+                            // None = still deciding, Some(None) = not now, Some(Some(i)) = start agent i, plus `never`.
+                            let (mut start, mut later, mut never) = (None::<usize>, false, false);
+                            let mut i = 0;
+                            while i < chunk.len() {
+                                let b = chunk[i];
+                                if let Some(buf) = ask.editing.as_mut() {
+                                    match b {
+                                        b'\r' | b'\n' => {
+                                            let cmd = buf.trim().to_string();
+                                            if !cmd.is_empty() { ask.commands[ask.sel] = cmd; start = Some(ask.sel); }
+                                            ask.editing = None;
+                                            break;
+                                        }
+                                        0x1b if !matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) => { ask.editing = None; }
+                                        0x1b => { i += 2; while i < chunk.len() && !(0x40..=0x7e).contains(&chunk[i]) { i += 1; } }
+                                        0x7f | 0x08 => { buf.pop(); }
+                                        0x15 => buf.clear(),
+                                        c if c >= 0x20 => {
+                                            // keep multi-byte characters whole
+                                            let end = (i + 4).min(chunk.len());
+                                            let take = chunk[i..end].iter().position(|&x| x < 0x20 || x == 0x7f).unwrap_or(end - i);
+                                            buf.push_str(&String::from_utf8_lossy(&chunk[i..i + take]));
+                                            i += take - 1;
+                                        }
+                                        _ => {}
+                                    }
+                                } else {
+                                    match b {
+                                        0x1b if matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) => {
+                                            match chunk.get(i + 2) {
+                                                Some(b'A') => ask.sel = (ask.sel + ask.agents.len() - 1) % ask.agents.len(),
+                                                Some(b'B') => ask.sel = (ask.sel + 1) % ask.agents.len(),
+                                                _ => {}
+                                            }
+                                            i += 2;
+                                        }
+                                        0x1b => { later = true; break; }
+                                        b'\r' | b'\n' | b's' | b'S' => { start = Some(ask.sel); break; }
+                                        b'e' | b'E' => { ask.editing = Some(ask.commands[ask.sel].clone()); }
+                                        b'n' | b'N' => { later = true; break; }
+                                        b'x' | b'X' => { never = true; break; }
+                                        d @ b'1'..=b'9' if ((d - b'1') as usize) < ask.agents.len() => { ask.sel = (d - b'1') as usize; }
+                                        _ => {}
+                                    }
+                                }
+                                i += 1;
+                            }
+                            if let Some(idx) = start {
+                                let (ag, cmd) = (ask.agents[idx], ask.commands[idx].clone());
+                                mode = Mode::Shell;
+                                agent_state.remember(&wkey, ag.key(), &cmd);
+                                if let Err(e) = agent_state.save() { message = Some(format!("could not save choice: {e}")); }
+                                if let Err(e) = start_agent(&mut app, backend, &events_tx, ag, &cmd).await {
+                                    message = Some(format!("could not start {}: {e}", ag.key()));
+                                }
+                            } else if never {
+                                mode = Mode::Shell;
+                                agent_state.remember(&wkey, "none", "");
+                                if let Err(e) = agent_state.save() { message = Some(format!("could not save choice: {e}")); }
+                                else { message = Some("won't ask here again (menu: Start an agent)".into()); }
+                            } else if later {
+                                mode = Mode::Shell;
+                            }
+                            dirty = true;
+                            chunk = &[];
                         }
                         Mode::Prompt(ref mut pr) => {
                             let (mut cancel, mut complete_now, mut open_now) = (false, false, false);
@@ -398,6 +488,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     } else {
                                         format!("local workspace · {detail} · {} tab(s)", app.tabs.len())
                                     }),
+                                    Action::Agent => {
+                                        let mut list = agents::detect(backend).await;
+                                        if list.is_empty() { list = agents::ALL.to_vec(); }
+                                        mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &wkey));
+                                    }
                                     Action::Mouse => {
                                         mouse_on = !mouse_on;
                                         let mut o = stdout();
@@ -592,6 +687,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
+        Mode::Ask(_) => Intent::None,
         Mode::Prompt(p) => {
             let r = ui::prompt_rect(main, p);
             match m.kind {
@@ -646,4 +742,18 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
             }
         }
     }
+}
+
+/// Open a shell tab named after the agent and run the user's command in it. The tab stays a
+/// normal shell, so when the agent exits you are left at a prompt.
+async fn start_agent(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, agent: Agent, command: &str) -> Result<()> {
+    let (c, r) = shell_size(app.tabs.len() + 1)?;
+    open_tab(app, backend, tx, c, r).await?;
+    let last = app.tabs.len() - 1;
+    let tab = &mut app.tabs[last];
+    tab.fallback = agent.key().to_string();
+    tab.title = agent.key().to_string();
+    tab.write(format!("{command}\n").into_bytes());
+    app.active = last;
+    resize_all(app)
 }

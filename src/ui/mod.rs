@@ -18,6 +18,7 @@ pub enum Action {
     NextTab,
     PrevTab,
     Mouse,
+    Agent,
     CloseTab,
     Reconnect,
     Scroll,
@@ -48,10 +49,28 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Close tab", key: 'c', action: Action::CloseTab, remote_only: false },
     MenuItem { label: "Reconnect", key: 'r', action: Action::Reconnect, remote_only: true },
     MenuItem { label: "Scroll", key: 's', action: Action::Scroll, remote_only: false },
+    MenuItem { label: "Start an agent", key: 'a', action: Action::Agent, remote_only: false },
     MenuItem { label: "Mouse on/off", key: 'm', action: Action::Mouse, remote_only: false },
     MenuItem { label: "Info", key: 'i', action: Action::Info, remote_only: false },
     MenuItem { label: "Quit", key: 'q', action: Action::Quit, remote_only: false },
 ];
+
+/// The "start an agent?" prompt.
+#[derive(Clone)]
+pub struct Ask {
+    pub agents: Vec<crate::agents::Agent>,
+    pub commands: Vec<String>,
+    pub sel: usize,
+    /// Some while the command is being edited.
+    pub editing: Option<String>,
+}
+
+impl Ask {
+    pub fn new(agents: Vec<crate::agents::Agent>, cfg: &crate::config::Config, state: &crate::agents::State, key: &str) -> Ask {
+        let commands = agents.iter().map(|a| crate::agents::command_for(*a, cfg, state, key)).collect();
+        Ask { agents, commands, sel: 0, editing: None }
+    }
+}
 
 /// State of the "open a file" prompt.
 #[derive(Default, Clone)]
@@ -104,6 +123,7 @@ pub fn prompt_rect(main: Rect, p: &Prompt) -> Rect {
 }
 
 pub struct View<'a> {
+    pub ask: Option<&'a Ask>,
     pub preview: Option<&'a crate::preview::Preview>,
     pub prompt: Option<&'a Prompt>,
     pub screen: &'a vt100::Screen,
@@ -218,6 +238,7 @@ pub fn draw(f: &mut Frame, v: &View) {
         format!(" arrows scroll · W wrap · R reload · Esc back to shell   lines {}-{} of {}", (p.top + 1).min(total), last, total)
     });
     let hint = match (v.menu, v.message) {
+        _ if v.ask.is_some() => " Enter starts · E edits the command · N not now · X never here".to_string(),
         _ if v.prompt.is_some() => " Tab completes · Enter opens · Esc cancels".to_string(),
         _ if scroll_hint.is_some() => scroll_hint.unwrap_or_default(),
         (None, None) if preview_hint.is_some() => preview_hint.unwrap_or_default(),
@@ -227,6 +248,10 @@ pub fn draw(f: &mut Frame, v: &View) {
     };
     f.render_widget(Paragraph::new(hint).style(bar), status);
 
+    if let Some(a) = v.ask {
+        draw_ask(f, main, a);
+        return;
+    }
     if let Some(pr) = v.prompt {
         draw_prompt(f, main, pr);
         return;
@@ -302,4 +327,30 @@ fn draw_prompt(f: &mut Frame, main: Rect, p: &Prompt) {
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(Color::Black)), area);
     let x = area.x + (label.chars().count() + unicode_width::UnicodeWidthStr::width(p.input.as_str())) as u16;
     f.set_cursor_position((x.min(area.x + area.width.saturating_sub(1)), area.y + area.height - 1));
+}
+
+fn draw_ask(f: &mut Frame, main: Rect, a: &Ask) {
+    let w = 72.min(main.width);
+    let h = (a.agents.len() as u16 + 5).min(main.height);
+    let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut lines = vec![Line::from(Span::styled(" Agent workspace detected. Start one here?", dim)), Line::from("")];
+    for (i, ag) in a.agents.iter().enumerate() {
+        let sel = i == a.sel;
+        let base = if sel { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+        let cmd = match (&a.editing, sel) {
+            (Some(buf), true) => format!("{buf}▏"),
+            _ => a.commands[i].clone(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", if sel { "›" } else { " " }), base),
+            Span::styled(format!("{:<12}", ag.label()), base.add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {cmd} "), base),
+        ]));
+    }
+    lines.push(Line::from(""));
+    let hint = if a.editing.is_some() { " type the command, Enter starts it, Esc cancels" } else { " Enter start · E edit · N not now · X never here" };
+    lines.push(Line::from(Span::styled(hint, dim)));
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" start an agent ")), area);
 }
