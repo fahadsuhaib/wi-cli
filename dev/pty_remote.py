@@ -12,7 +12,8 @@ def check(name, cond):
     if not cond: fails.append(name)
 def box(cmd):
     return subprocess.run(["docker", "exec", "-u", "dev", "devbox-test", "sh", "-c", cmd], capture_output=True, text=True).stdout
-def sessions(): return box("tmux -L wicli list-sessions -F '#S' 2>/dev/null")
+SOCK = os.environ.get("WICLI_TMUX_SOCKET", "wicli")   # the same socket name wi uses
+def sessions(): return box(f"tmux -L {SOCK} list-sessions -F '#S' 2>/dev/null")
 
 class Run:
     def __init__(self, args, env):
@@ -38,7 +39,7 @@ class Run:
         p, _ = os.waitpid(self.pid, os.WNOHANG); return p != 0
 
 env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color")
-box("tmux -L wicli kill-server 2>/dev/null; pkill -f DETACHSLEEP")
+box(f"tmux -L {SOCK} kill-server 2>/dev/null; pkill -f DETACHSLEEP")
 screens = ""
 
 # (a) two tabs with markers, detach
@@ -111,5 +112,5 @@ check("status bar says plain shells", "no tmux" in r.text())
 check("no tmux session created", sessions().strip() == "")
 r.send(MENU + b"q", 1.5)
 check("Quit exits in plain mode", r.exited())
-box("tmux -L wicli kill-server 2>/dev/null")
+box(f"tmux -L {SOCK} kill-server 2>/dev/null")
 sys.exit(1 if fails else 0)
