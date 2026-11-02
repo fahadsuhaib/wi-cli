@@ -195,7 +195,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
             ev = events.recv() => match ev {
                 Some(Event::Output(id, data)) => {
                     if let Some(i) = app.tabs.iter().position(|t| t.id == id) {
-                        app.tabs[i].parser.process(&data);
+                        app.tabs[i].output(&data);
                         if i != app.active { app.tabs[i].activity = true; }
                         dirty = true;
                     }
