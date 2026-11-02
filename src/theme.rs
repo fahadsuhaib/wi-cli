@@ -95,6 +95,14 @@ pub struct Theme {
     pub md_link: Color,
     pub md_bullet: Color,
     pub md_rule: Color,
+    /// Background panel of code blocks and inline code.
+    pub md_code_bg: Color,
+    /// The bar at the start of every block-quote row.
+    pub md_quote_bar: Color,
+    pub md_task_done: Color,
+    pub md_task_open: Color,
+    /// Text of the YAML front-matter block.
+    pub md_front: Color,
     pub json_key: Color,
     pub json_string: Color,
     pub json_number: Color,
@@ -160,6 +168,11 @@ pub const DARK: Theme = Theme {
     md_link: c(0x6cb6ff),
     md_bullet: c(0xf2cc60),
     md_rule: c(0x6b7484),
+    md_code_bg: c(0x2b303b),
+    md_quote_bar: c(0x6f8fd6),
+    md_task_done: c(0x8fdc7f),
+    md_task_open: c(0xc0c5d0),
+    md_front: c(0x9aa3b2),
     json_key: c(0x7dcfe0),
     json_string: c(0x98d982),
     json_number: c(0xf2cc60),
@@ -221,6 +234,11 @@ pub const LIGHT: Theme = Theme {
     md_link: c(0x0b57d0),
     md_bullet: c(0x7a4e00),
     md_rule: c(0x7d8694),
+    md_code_bg: c(0xeceff3),
+    md_quote_bar: c(0x4f6fc0),
+    md_task_done: c(0x1a6b2a),
+    md_task_open: c(0x57606a),
+    md_front: c(0x57606a),
     json_key: c(0x0a7087),
     json_string: c(0x1a6b2a),
     json_number: c(0x7a4e00),
@@ -424,6 +442,11 @@ mod tests {
                 ("quote", t.md_quote, t.bg),
                 ("link", t.md_link, t.bg),
                 ("bullet", t.md_bullet, t.bg),
+                ("code on its panel", t.md_code, t.md_code_bg),
+                ("text on code panel", t.fg, t.md_code_bg),
+                ("task done", t.md_task_done, t.bg),
+                ("task open", t.md_task_open, t.bg),
+                ("front matter", t.md_front, t.bg),
                 ("json key", t.json_key, t.bg),
                 ("json string", t.json_string, t.bg),
                 ("json number", t.json_number, t.bg),
@@ -457,11 +480,13 @@ mod tests {
                 ("md rule", t.md_rule, t.bg),
                 ("table sep", t.table_sep, t.bg),
                 ("goto mark", t.goto_bg, t.bg),
+                ("quote bar", t.md_quote_bar, t.bg),
+                ("code panel", t.md_code_bg, t.bg),
             ];
             for (name, fg, bg) in pairs {
                 let r = contrast(fg, bg);
                 // The goto-line mark is a background tint: it only has to differ from the canvas.
-                let need = if name == "goto mark" { 1.1 } else { 3.0 };
+                let need = if name == "goto mark" || name == "code panel" { 1.1 } else { 3.0 };
                 assert!(r >= need, "{} {name}: contrast {r:.2} < {need}", k.name());
             }
             for (i, col) in t.ansi.iter().enumerate() {

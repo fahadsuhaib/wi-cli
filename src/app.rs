@@ -1673,8 +1673,10 @@ async fn reload_git(app: &mut App, backend: &Backend) -> Result<String> {
 async fn reload_preview(app: &mut App, backend: &Backend, cap: usize, opts: &Opts) -> Result<()> {
     let Some(old) = focused_slot(app).as_ref() else { return Ok(()) };
     let (path, top, left, wrap, from, target) = (old.path.clone(), old.top, old.left, old.wrap, old.from_tab, old.target_line);
+    let md_view = old.md_view();
     let (bytes, total) = backend.read_prefix(&path, cap).await?;
     let mut p = Preview::build(&path, &bytes, total, opts);
+    p.restore_md_view(md_view);
     p.top = top;
     p.left = left;
     if p.wrap != wrap {

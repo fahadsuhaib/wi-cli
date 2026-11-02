@@ -54,6 +54,20 @@ pub struct Preview {
     pub find: Option<Find>,
     hl: Option<Vec<Line<'static>>>,
     find_pending: bool,
+    find_needle: Option<String>,
+    /// Parsed markdown and which view is on (Kind::Markdown only).
+    md: Option<Md>,
+}
+
+/// A parsed markdown document and how it is shown.
+struct Md {
+    doc: markdown::Doc,
+    body: String,
+    /// Showing the raw source (line numbers) instead of the rendered view.
+    source: bool,
+    /// Layout width of the rendered lines.
+    width: u16,
+    row_src: Vec<usize>,
 }
 
 /// Matches of the text typed in the preview's find prompt.
@@ -113,6 +127,8 @@ impl Preview {
             find: None,
             hl: None,
             find_pending: false,
+            find_needle: None,
+            md: None,
         };
         // Content wins over the extension: a binary file named notes.txt is never shown as text.
         if sniff_binary(bytes) {
@@ -125,8 +141,10 @@ impl Preview {
         match ext.as_str() {
             "md" | "markdown" => {
                 p.kind = Kind::Markdown;
-                p.wrap = true;
-                p.lines = markdown::render(&body);
+                let doc = markdown::parse(&body);
+                let r = markdown::render(&doc, 80);
+                p.lines = r.lines;
+                p.md = Some(Md { doc, body: body.to_string(), source: false, width: 80, row_src: r.row_src });
             }
             "csv" | "tsv" => {
                 let delim = if ext == "tsv" { b'\t' } else { b',' };
@@ -180,6 +198,8 @@ impl Preview {
             find: None,
             hl: None,
             find_pending: false,
+            find_needle: None,
+            md: None,
         }
     }
 
@@ -220,6 +240,9 @@ impl Preview {
 
     /// Refresh the wrap cache for `width` and clamp the scroll position. Call before drawing.
     pub fn layout(&mut self, width: u16, height: usize) {
+        if self.md.as_ref().is_some_and(|m| !m.source && m.width != width) {
+            self.md_rerender(width);
+        }
         if self.wrap {
             if self.wrapped.as_ref().map(|(w, _)| *w) != Some(width) {
                 let g = self.gutter;
@@ -280,6 +303,10 @@ impl Preview {
     /// Light up every match of `needle` (smart case) and make the first one at or below the top of
     /// the view current. Returns the number of matches.
     pub fn set_find(&mut self, needle: &str) -> usize {
+        self.set_find_at(needle, None)
+    }
+
+    fn set_find_at(&mut self, needle: &str, keep: Option<usize>) -> usize {
         let mut hits = Vec::new();
         for (i, l) in self.lines.iter().enumerate() {
             let text: String = cells(l).into_iter().skip(self.gutter).map(|(c, _)| c).collect();
@@ -294,14 +321,16 @@ impl Preview {
             (Some(_), true) => self.starts.partition_point(|&r| r < self.top),
             _ => self.top,
         };
-        let cur = hits.iter().position(|h| h.0 >= top_line).unwrap_or(0);
+        let cur = keep.map(|k| k.min(n - 1)).unwrap_or_else(|| hits.iter().position(|h| h.0 >= top_line).unwrap_or(0));
         self.find = Some(Find { hits, cur });
+        self.find_needle = Some(needle.to_string());
         self.refresh_find();
         n
     }
 
     pub fn clear_find(&mut self) {
         self.find = None;
+        self.find_needle = None;
         self.hl = None;
         self.wrapped = None;
     }
@@ -387,11 +416,13 @@ impl Preview {
             Bottom => self.top = max,
             Left => self.left = self.left.saturating_sub(4),
             Right => {
-                if !self.wrap {
+                if !self.wrap && !self.md_rendered() {
                     self.left += 4;
                 }
             }
+            Wrap if self.md_rendered() => {}
             Wrap => self.toggle_wrap(),
+            Source => self.toggle_md_source(),
             NextFile if self.find.is_some() && self.kind != Kind::Diff => self.find_step(true),
             PrevFile if self.find.is_some() && self.kind != Kind::Diff => self.find_step(false),
             NextFile => self.jump_file(true, page),
@@ -401,6 +432,103 @@ impl Preview {
             Reload | Back | Find | Close => return false,
         }
         true
+    }
+
+    /// Markdown shown rendered (the renderer wraps for itself; `W` does nothing there).
+    pub fn md_rendered(&self) -> bool {
+        self.md.as_ref().is_some_and(|m| !m.source)
+    }
+
+    /// Status-hint text for the source toggle, for markdown only.
+    pub fn md_hint(&self) -> Option<&'static str> {
+        self.md.as_ref().map(|m| if m.source { "M preview" } else { "M source" })
+    }
+
+    /// (raw source shown, layout width) so a reload can show the same view.
+    pub fn md_view(&self) -> Option<(bool, u16)> {
+        self.md.as_ref().map(|m| (m.source, m.width))
+    }
+
+    /// Show the view a previous copy of this preview had (after a reload).
+    pub fn restore_md_view(&mut self, view: Option<(bool, u16)>) {
+        let Some((source, width)) = view else { return };
+        if self.md.is_none() {
+            return;
+        }
+        if source {
+            self.set_md_source(true);
+        } else {
+            self.md_rerender(width);
+        }
+    }
+
+    pub fn toggle_md_source(&mut self) {
+        if let Some(on) = self.md.as_ref().map(|m| !m.source) {
+            self.set_md_source(on);
+        }
+    }
+
+    /// First source line (0-based) shown at the top of the view.
+    fn top_source_line(&self) -> usize {
+        let Some(m) = self.md.as_ref() else { return 0 };
+        if !m.source {
+            m.row_src.get(self.top).copied().unwrap_or(0)
+        } else if self.wrap && self.wrapped.is_some() {
+            self.starts.partition_point(|&r| r < self.top)
+        } else {
+            self.top
+        }
+    }
+
+    fn set_md_source(&mut self, on: bool) {
+        let Some(m) = self.md.as_ref() else { return };
+        if m.source == on {
+            return;
+        }
+        let line = self.top_source_line();
+        let needle = self.find_needle.clone();
+        let m = self.md.as_mut().expect("checked above");
+        m.source = on;
+        self.hl = None;
+        self.wrapped = None;
+        self.left = 0;
+        self.wrap = false;
+        if on {
+            let (lines, gutter) = text::render(&m.body);
+            self.lines = lines;
+            self.gutter = gutter;
+            self.top = line;
+        } else {
+            let r = markdown::render(&m.doc, m.width as usize);
+            self.lines = r.lines;
+            m.row_src = r.row_src;
+            self.gutter = 0;
+            self.top = m.row_src.partition_point(|&x| x < line);
+        }
+        self.refind(needle, None);
+    }
+
+    /// Lay the rendered markdown out again for a new width, keeping the top block in view.
+    fn md_rerender(&mut self, width: u16) {
+        let line = self.top_source_line();
+        let needle = self.find_needle.clone();
+        let cur = self.find.as_ref().map(|f| f.cur);
+        let Some(m) = self.md.as_mut() else { return };
+        let r = markdown::render(&m.doc, width as usize);
+        self.lines = r.lines;
+        m.row_src = r.row_src;
+        m.width = width;
+        self.hl = None;
+        self.wrapped = None;
+        self.top = m.row_src.partition_point(|&x| x < line);
+        self.refind(needle, cur);
+    }
+
+    /// Recompute find matches after the lines changed, without scrolling to the current one.
+    fn refind(&mut self, needle: Option<String>, cur: Option<usize>) {
+        let Some(n) = needle else { return };
+        self.set_find_at(&n, cur);
+        self.find_pending = false;
     }
 
     pub fn toggle_wrap(&mut self) {
@@ -790,6 +918,115 @@ mod tests {
         p.layout(40, 5);
         assert!(p.left > 0);
         assert_eq!(p.visible(5, 40).iter().map(lit).collect::<Vec<_>>().concat(), "needle");
+    }
+
+    fn md_body() -> String {
+        let mut s = String::from("# Title\n\n");
+        for i in 0..40 {
+            s.push_str(&format!("## Part {i}\n\nA paragraph about needle{i} that goes on for a while so that it wraps when the pane is narrow, with many words.\n\n"));
+        }
+        s
+    }
+
+    fn md() -> Preview {
+        let b = md_body();
+        Preview::build("a.md", b.as_bytes(), b.len() as u64, &opts())
+    }
+
+    #[test]
+    fn markdown_rerenders_when_the_width_changes() {
+        let mut p = md();
+        assert!(p.md_rendered() && !p.wrap);
+        p.layout(100, 10);
+        let wide = p.display_len();
+        p.layout(30, 10);
+        assert!(p.display_len() > wide, "narrower pane has more rows");
+        assert!(p.visible(10, 30).iter().all(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>() <= 30));
+        p.navigate(keys::PvKey::Wrap, 10);
+        assert!(!p.wrap, "W does nothing for rendered markdown");
+        p.navigate(keys::PvKey::Right, 10);
+        assert_eq!(p.left, 0);
+    }
+
+    #[test]
+    fn markdown_keeps_its_place_across_a_resize() {
+        let mut p = md();
+        p.layout(100, 10);
+        p.top = p.display_len() / 2;
+        let before = plain(&p.visible(10, 100)[0]);
+        let heading = before.trim().to_string();
+        p.layout(40, 10);
+        p.layout(100, 10);
+        let after = plain(&p.visible(10, 100)[0]);
+        // the block that was at the top is still at (or just above) the top
+        assert!(after.trim().starts_with("Part") || after.trim().starts_with("A paragraph") || after.trim().is_empty() || after.contains('─'), "{after:?} vs {heading:?}");
+        assert!(p.top > 0 && p.top <= p.max_top(10));
+        p.top = 9999;
+        p.layout(40, 10);
+        assert!(p.top <= p.max_top(10), "top stays clamped");
+    }
+
+    #[test]
+    fn m_toggles_source_and_back() {
+        let mut p = md();
+        p.layout(80, 10);
+        assert_eq!(p.md_hint(), Some("M source"));
+        p.navigate(keys::PvKey::Source, 10);
+        assert!(!p.md_rendered());
+        assert_eq!(p.md_hint(), Some("M preview"));
+        assert!(plain(&p.lines[0]).contains("# Title"), "raw markers visible");
+        assert!(p.gutter > 0);
+        p.layout(80, 10);
+        p.navigate(keys::PvKey::Source, 10);
+        assert!(p.md_rendered() && p.gutter == 0);
+        assert!(!plain(&p.lines[0]).contains('#'));
+        // a reload shows the same view
+        let view = {
+            p.navigate(keys::PvKey::Source, 10);
+            p.md_view()
+        };
+        let mut q = md();
+        q.restore_md_view(view);
+        assert!(!q.md_rendered());
+        let mut t = Preview::build("a.txt", b"x\n", 2, &opts());
+        t.navigate(keys::PvKey::Source, 10);
+        assert_eq!(t.md_hint(), None);
+    }
+
+    #[test]
+    fn source_toggle_keeps_the_place() {
+        let mut p = md();
+        p.layout(80, 10);
+        p.top = p.display_len() / 2;
+        p.navigate(keys::PvKey::Source, 10);
+        assert!(p.top > 10, "mapped to a source line, not the top");
+        let src_top = p.top;
+        p.navigate(keys::PvKey::Source, 10);
+        assert!(p.top > 10 && p.top < p.display_len());
+        assert!(src_top < md_body().lines().count());
+    }
+
+    #[test]
+    fn find_survives_rerender_and_works_on_rendered_text() {
+        let mut p = md();
+        p.layout(100, 10);
+        assert_eq!(p.set_find("needle7"), 1);
+        p.layout(100, 10);
+        assert!(p.visible(10, 100).iter().any(|l| plain(l).contains("needle7")));
+        assert_eq!(p.visible(10, 100).iter().map(lit).collect::<Vec<_>>().concat(), "needle7");
+        p.layout(50, 10);
+        assert_eq!(p.find_label().as_deref(), Some("match 1 of 1"));
+        assert!(p.visible(10, 50).iter().any(|l| plain(l).contains("needle7")), "still in view after the resize");
+        assert_eq!(p.set_find("# Title"), 0, "raw markers are not in the rendered text");
+    }
+
+    #[test]
+    fn copy_cells_of_rendered_text_are_plain() {
+        let b = b"# Head\n\nsome **bold** text\n";
+        let mut p = Preview::build("a.md", b, b.len() as u64, &opts());
+        p.layout(40, 5);
+        let cells = row_cells(&p.visible(5, 40)[3], p.gutter, 40).concat();
+        assert_eq!(cells.trim(), "some bold text");
     }
 
     #[test]
