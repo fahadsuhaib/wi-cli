@@ -192,12 +192,10 @@ pub enum Event {
 pub struct ShellHandle {
     tx: mpsc::UnboundedSender<Cmd>,
     /// Process id of a local shell (used to find its working directory).
-    #[allow(dead_code)] // read by the link integration
     pid: Option<u32>,
 }
 
 impl ShellHandle {
-    #[allow(dead_code)] // used by the link integration
     pub fn pid(&self) -> Option<u32> {
         self.pid
     }

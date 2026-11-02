@@ -24,6 +24,9 @@ pub struct Defaults {
     /// Which click opens a file path or URL shown in terminal output: `any` (Ctrl or Alt held),
     /// `ctrl`, `alt`, `plain` or `off`.
     pub link_click: String,
+    /// Ask before opening a file in its native app, opening a link, or downloading from a box:
+    /// `always` (default) or `never`.
+    pub confirm_open: String,
 }
 
 impl Default for Defaults {
@@ -41,6 +44,7 @@ impl Default for Defaults {
             mouse: true,
             agent_start: "ask".into(),
             link_click: "any".into(),
+            confirm_open: "always".into(),
         }
     }
 }
@@ -77,6 +81,9 @@ pub struct AgentCfg {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Config {
+    /// Overrides for which files wi previews itself and which go to the native app.
+    #[serde(default)]
+    pub open: crate::opener::OpenCfg,
     #[serde(default)]
     pub agents: std::collections::HashMap<String, AgentCfg>,
     #[serde(default)]

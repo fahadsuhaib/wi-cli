@@ -11,15 +11,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 // ---------------------------------------------------------------- classification
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // used by the click/hint integration, not wired up yet
 pub enum Handling {
     Preview,
     Native,
 }
 
 /// Optional overrides from the future `[open]` config table (extensions without the dot).
-#[derive(Clone, Debug, Default)]
-#[allow(dead_code)] // read from config once the integration pass lands
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(default)]
 pub struct OpenCfg {
     pub native_ext: Vec<String>,
     pub preview_ext: Vec<String>,
@@ -67,7 +66,6 @@ fn listed(list: &[String], ext: &str) -> bool {
 /// Content wins over extension for binaries: a NUL byte always means Native. Built-in native
 /// extensions stay Native even when the content is text (svg, html). `preview_ext` beats the
 /// built-in native list, `native_ext` always forces Native.
-#[allow(dead_code)] // used by the click/hint integration, not wired up yet
 pub fn classify(path: &str, head: &[u8], size: u64, cfg: &OpenCfg) -> Handling {
     let ext = ext_of(path);
     if head[..head.len().min(SNIFF)].contains(&0) {
@@ -125,8 +123,60 @@ fn launch(arg: &std::ffi::OsStr) -> Result<(), String> {
     Err(format!("no tool to open files found (tried {})", names.join(", ")))
 }
 
+/// Types that may be handed to the operating system's default app: documents, images, audio,
+/// video, web pages, fonts and archives.
+const SAFE_NATIVE: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "heic", "ico", "svg", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt",
+    "ods", "odp", "pages", "numbers", "key", "rtf", "mp3", "wav", "flac", "m4a", "aac", "ogg", "mp4", "mov", "mkv", "avi", "webm", "m4v", "html",
+    "htm", "ttf", "otf", "woff", "woff2", "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar",
+];
+
+/// Programs, installers, shortcuts, libraries, disk images and databases. These are never opened
+/// natively, whatever the config says: handing them to `open` could run code or mount things.
+const NEVER_NATIVE: &[&str] = &[
+    "app", "command", "pkg", "mpkg", "dmg", "iso", "img", "exe", "msi", "bat", "cmd", "com", "scr", "vbs", "vbe", "jar", "appimage", "deb", "rpm",
+    "run", "bin", "webloc", "inetloc", "url", "terminal", "workflow", "action", "scpt", "scptd", "so", "dylib", "o", "a", "lnk", "ps1", "desktop",
+    "sqlite", "sqlite3", "db", "prefpane", "saver", "kext", "xpc", "plugin", "bundle",
+];
+
+/// Whether wi may ask the OS to open this file. Err carries the reason shown to the user.
+pub fn native_safe(path: &str) -> Result<(), String> {
+    let ext = ext_of(path);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if NEVER_NATIVE.contains(&ext.as_str()) {
+        return Err(format!("{name}: programs, installers, disk images and databases are never opened by wi"));
+    }
+    if ext.is_empty() {
+        return Err(format!("{name}: unknown file type, not opened"));
+    }
+    if SAFE_NATIVE.contains(&ext.as_str()) {
+        Ok(())
+    } else {
+        Err(format!("{name}: .{ext} is not a document or media type wi opens natively"))
+    }
+}
+
+/// macOS only: mark a downloaded file as coming from the network, so Gatekeeper and the usual
+/// "downloaded from the Internet" checks apply when the OS opens it. Best effort.
+pub fn mark_quarantine(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let _ = std::process::Command::new("xattr")
+            .arg("-w")
+            .arg("com.apple.quarantine")
+            .arg(format!("0081;{secs:x};wicli;"))
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
+}
+
 /// Open a local file in the system's default app.
-#[allow(dead_code)] // used by the click/hint integration, not wired up yet
 pub fn native_open(local_path: &Path) -> Result<(), String> {
     let p = absolute(local_path); // absolute, so a name starting with '-' is never an option
     launch(p.as_os_str())
@@ -142,7 +192,6 @@ pub fn url_allowed(url: &str) -> bool {
 }
 
 /// Open a URL in the default browser / mail client.
-#[allow(dead_code)] // used by the click/hint integration, not wired up yet
 pub fn open_url(url: &str) -> Result<(), String> {
     if !url_allowed(url) {
         return Err(format!("refusing to open '{url}': only http, https, file and mailto links are allowed"));
@@ -152,7 +201,6 @@ pub fn open_url(url: &str) -> Result<(), String> {
 
 // ---------------------------------------------------------------- remote fetch cache
 
-#[allow(dead_code)] // used by the click/hint integration, not wired up yet
 pub struct FetchOpts {
     pub confirm_over: u64,
     pub confirmed: bool,
@@ -162,7 +210,6 @@ pub struct FetchOpts {
 }
 
 impl FetchOpts {
-    #[allow(dead_code)] // used by the click/hint integration, not wired up yet
     pub fn new(box_name: &str) -> Self {
         FetchOpts {
             confirm_over: 100 * 1024 * 1024,
@@ -175,14 +222,12 @@ impl FetchOpts {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-#[allow(dead_code)] // used by the click/hint integration, not wired up yet
 pub enum FetchResult {
     Ready(PathBuf),
     NeedsConfirm { size: u64 },
 }
 
 /// `$WICLI_CACHE_DIR` if set (tests), else `<user cache dir>/wicli`.
-#[allow(dead_code)] // used by the click/hint integration, not wired up yet
 pub fn default_cache_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("WICLI_CACHE_DIR") {
         return PathBuf::from(d);
@@ -263,7 +308,6 @@ impl Backend {
     /// Make `remote_path` available as a local file. Local backends just resolve the path.
     /// Remote ones stream it over SFTP into the cache (see module docs); `progress(done, total)`
     /// is called at most 10 times a second.
-    #[allow(dead_code)] // used by the click/hint integration, not wired up yet
     pub async fn fetch_to_cache(
         &self,
         remote_path: &str,
@@ -358,6 +402,18 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_allowlist_and_blocklist() {
+        for ok in ["/a/report.pdf", "/a/Photo.PNG", "x.docx", "/a/b/clip.mp4", "page.html", "a.zip"] {
+            assert!(native_safe(ok).is_ok(), "{ok}");
+        }
+        for bad in ["/Applications/Tool.app", "setup.pkg", "x.dmg", "run.command", "a.exe", "x.jar", "link.webloc", "data.sqlite", "noext", "lib.dylib", "x.unknown"] {
+            assert!(native_safe(bad).is_err(), "{bad}");
+        }
+        assert!(native_safe("/a/b/evil.pdf.app").is_err(), "the last extension decides");
+        assert!(native_safe("/a/.hidden").is_err());
+    }
 
     fn cl(p: &str, head: &[u8], size: u64) -> Handling {
         classify(p, head, size, &OpenCfg::default())

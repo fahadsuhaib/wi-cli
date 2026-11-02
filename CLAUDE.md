@@ -9,7 +9,7 @@ Lightweight terminal workspace for working with AI coding tools (Claude Code, Co
 - Local and remote share the `Workspace`/`Shell` interface in `src/workspace.rs`.
 
 ## Features in place
-Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet), previews (text, markdown, CSV/TSV, JSON, binary stub; `Ctrl-Space` then `P`), mouse (clicks and wheel; menu toggle), scrollback, bracketed paste, and agent workspaces (detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once, remembers the command per workspace in `~/.config/wicli/state.toml`; `[agents.claude] command = "..."` in the config sets your usual command).
+Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet), previews (text, markdown, CSV/TSV, JSON, binary stub; `Ctrl-Space` then `P`), mouse (clicks and wheel; menu toggle), scrollback, bracketed paste, and clickable paths and links (Ctrl/Alt+click or right-click a path, `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation; `Ctrl-Space` then `O` labels everything on screen), mouse selection with copy on release, and agent workspaces (detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once, remembers the command per workspace in `~/.config/wicli/state.toml`; `[agents.claude] command = "..."` in the config sets your usual command).
 
 ## Build and test
 - Rust is at `~/.cargo/bin` (add to PATH). `cargo build` produces `target/debug/wi`.

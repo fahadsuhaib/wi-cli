@@ -40,15 +40,12 @@ pub const DISABLE: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 /// Modifier bits in a mouse report's button code. The Cmd/Super key is not reported by most
 /// terminals, so links are opened with Ctrl or Alt held.
-#[allow(dead_code)] // used once link clicks are wired up
 pub const MOD_ALT: u16 = 8;
-#[allow(dead_code)] // used once link clicks are wired up
 pub const MOD_CTRL: u16 = 16;
 
 /// Whether this click should open a link, per the `link_click` setting:
 /// `any` (Ctrl or Alt held, the default), `ctrl`, `alt`, `plain` (an ordinary click on a link),
 /// or `off`.
-#[allow(dead_code)] // used once link clicks are wired up
 pub fn is_link_click(code: u16, setting: &str) -> bool {
     let (ctrl, alt) = (code & MOD_CTRL != 0, code & MOD_ALT != 0);
     match setting {

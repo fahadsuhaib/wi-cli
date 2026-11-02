@@ -7,9 +7,15 @@ use crate::tab::Tab;
 use crate::files::complete;
 use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
 use crate::mouse::{self, Button, Kind, MouseEvent, Piece};
+use crate::links::{self, Link, LinkKind};
+use crate::opener::{self, FetchOpts, FetchResult, Handling, OpenCfg};
 use crate::select::{self, Pos};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::agents::{self, Agent, Decision};
-use crate::ui::{self, Action, Ask, MenuItem, Prompt, View, menu_items_for};
+use crate::ui::{self, Action, Ask, Confirm, Hint, MenuItem, Prompt, View, hint_labels, menu_items_for, sanitize};
 use ratatui::layout::Rect;
 use crate::workspace::{Backend, Event, Workspace, spawn_shell};
 use anyhow::{Result, bail};
@@ -26,6 +32,12 @@ enum Mode {
     Shell,
     Prompt(Prompt),
     Ask(Ask),
+    /// A yes/no question before anything is opened or downloaded.
+    Confirm(Confirm),
+    /// A download is running; Esc cancels it.
+    Fetch,
+    /// Every path and link on screen is labelled with a letter.
+    Hints(HintState),
     Menu(usize),
     /// Browsing scrollback of the active tab.
     Scroll,
@@ -112,6 +124,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut splitter = mouse::Splitter::default();
     let mut sel: Option<SelState> = None;
     let mut last_click: Option<(Instant, Pos, u8)> = None;
+    let open_cfg = cfg.open.clone();
+    let link_click = cfg.defaults.link_click.clone();
+    let confirm_needed = cfg.defaults.confirm_open != "never";
+    let mut pending: Option<Pending> = None;
+    let mut fetching: Option<Fetching<'_>> = None;
     let mut filter = PasteFilter::default();
     let mut flush_at: Option<Instant> = None;
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
@@ -192,13 +209,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 let strip: Vec<(String, bool, crate::tab::TabState)> = app.tabs.iter().enumerate()
                     .map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
                 let selection = sel.as_ref().filter(|s| s.tab == app.tabs[app.active].id).map(|s| select::normalize(s.anchor, s.end));
+                let progress_dlg = fetching.as_ref().map(|f| f.dialog());
+                let confirm_ref = match &mode { Mode::Confirm(c) => Some(c), Mode::Fetch => progress_dlg.as_ref(), _ => None };
+                let hints_ref = match &mode { Mode::Hints(h) => Some((&h.hints[..], h.typed.as_str())), _ => None };
                 let view = View {
                     selection,
                     preview: app.tabs[app.active].preview.as_ref(),
                     prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
                     ask: match &mode { Mode::Ask(x) => Some(x), _ => None },
-                    confirm: None,
-                    hints: None,
+                    confirm: confirm_ref,
+                    hints: hints_ref,
                     screen: app.tabs[app.active].parser.screen(),
                     name: &name,
                     detail: &detail,
@@ -246,10 +266,17 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             let (tc, tr) = crossterm::terminal::size()?;
                             let strip_h = u16::from(app.tabs.len() > 1);
                             let main = Rect::new(0, 1 + strip_h, tc, tr.saturating_sub(2 + strip_h).max(1));
-                            match mouse_intent(&m, &mode, &app, &items, main, sel.as_ref().is_some_and(|s| s.dragging)) {
+                            match mouse_intent(&m, &mode, &app, &items, main, sel.as_ref().is_some_and(|s| s.dragging), &link_click) {
                                 Intent::None => {}
                                 Intent::Synth(bytes) => out.extend(bytes),
                                 Intent::SwitchTab(i) => { sel = None; switch_to(&mut app, i); dirty = true; }
+                                Intent::OpenLink(l) => {
+                                    sel = None;
+                                    if matches!(mode, Mode::Scroll) { mode = Mode::Shell; }
+                                    let o = resolve_link(&app, backend, ws, &l, &open_cfg, confirm_needed).await;
+                                    apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                    dirty = true;
+                                }
                                 Intent::Select(phase, pos) => {
                                     let tab_id = app.tabs[app.active].id;
                                     let (rows, wrapped) = area_rows(&app, main);
@@ -418,6 +445,78 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 None => chunk = &[],
                             }
                         }
+                        Mode::Confirm(_) => {
+                            let (mut yes, mut no) = (false, false);
+                            for (i, &b) in chunk.iter().enumerate() {
+                                match b {
+                                    b'\r' | b'\n' | b'y' | b'Y' => { yes = true; break; }
+                                    b'n' | b'N' => { no = true; break; }
+                                    0x1b if chunk.get(i + 1).is_none() => { no = true; break; }
+                                    x if x == menu_key => { no = true; break; }
+                                    _ => {}
+                                }
+                            }
+                            if yes {
+                                mode = Mode::Shell;
+                                if let Some(p) = pending.take() {
+                                    run_pending(p, backend, ws, &mut mode, &mut fetching, &mut message);
+                                }
+                            } else if no {
+                                mode = Mode::Shell;
+                                pending = None;
+                                message = Some("cancelled".into());
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
+                        Mode::Fetch => {
+                            if (chunk == [0x1b] || chunk.contains(&menu_key)) && let Some(f) = &fetching {
+                                f.cancel.store(true, Ordering::Relaxed);
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
+                        Mode::Hints(ref mut hs) => {
+                            let (mut cancel, mut chosen) = (false, None::<Link>);
+                            let mut i = 0;
+                            while i < chunk.len() {
+                                let b = chunk[i];
+                                match b {
+                                    0x1b => {
+                                        if matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) {
+                                            i += 2;
+                                            while i < chunk.len() && !(0x40..=0x7e).contains(&chunk[i]) { i += 1; }
+                                        } else {
+                                            cancel = true;
+                                        }
+                                    }
+                                    0x7f | 0x08 => { hs.typed.pop(); }
+                                    x if x == menu_key => cancel = true,
+                                    c if c.is_ascii_alphabetic() => {
+                                        let mut t = hs.typed.clone();
+                                        t.push((c as char).to_ascii_lowercase());
+                                        if hs.hints.iter().any(|h| h.label.starts_with(&t)) {
+                                            hs.typed = t;
+                                            if let Some(ix) = hs.hints.iter().position(|h| h.label == hs.typed) {
+                                                chosen = Some(hs.links[ix].clone());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                i += 1;
+                            }
+                            if cancel {
+                                mode = Mode::Shell;
+                            } else if let Some(l) = chosen {
+                                mode = Mode::Shell;
+                                let o = resolve_link(&app, backend, ws, &l, &open_cfg, confirm_needed).await;
+                                apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
                         Mode::Ask(ref mut ask) => {
                             // None = still deciding, Some(None) = not now, Some(Some(i)) = start agent i, plus `never`.
                             let (mut start, mut later, mut never) = (None::<usize>, false, false);
@@ -535,7 +634,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             }
                             if open_now && !pr.input.trim().is_empty() {
                                 let path = pr.input.trim().to_string();
-                                match open_preview(&mut app, backend, &path, read_cap, &opts).await {
+                                match open_preview(&mut app, backend, &path, read_cap, &opts, None).await {
                                     Ok(()) => cancel = true,
                                     Err(e) => pr.error = Some(format!("{path}: {e}")),
                                 }
@@ -580,6 +679,24 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     } else {
                                         format!("local workspace · {detail} · {} tab(s)", app.tabs.len())
                                     }),
+                                    Action::OpenLink => {
+                                        let main = main_rect(&app)?;
+                                        let (rows, wrapped) = area_rows(&app, main);
+                                        let mut ls = links::all_links(&rows, &wrapped);
+                                        ls.truncate(200);
+                                        if ls.is_empty() {
+                                            message = Some("no file paths or links on screen".into());
+                                        } else {
+                                            let origin = origin_row(&app, main);
+                                            let hints = ls.iter().zip(hint_labels(ls.len())).map(|(l, label)| Hint {
+                                                label,
+                                                row: origin + l.row,
+                                                col: l.start_col,
+                                                width: if l.wrap_rows == 0 { l.end_col - l.start_col + 1 } else { main.width - l.start_col },
+                                            }).collect();
+                                            mode = Mode::Hints(HintState { links: ls, hints, typed: String::new() });
+                                        }
+                                    }
                                     Action::Agent => {
                                         let mut list = agents::detect(backend).await;
                                         if list.is_empty() { list = agents::ALL.to_vec(); }
@@ -630,6 +747,30 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 }
                 }
             }
+            res = async {
+                match fetching.as_mut() {
+                    Some(f) => f.fut.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            }, if fetching.is_some() => {
+                fetching = None;
+                if matches!(mode, Mode::Fetch) { mode = Mode::Shell; }
+                message = Some(match res {
+                    Ok(FetchResult::Ready(p)) => {
+                        opener::mark_quarantine(&p);
+                        let name = p.file_name().map(|n| sanitize(&n.to_string_lossy())).unwrap_or_default();
+                        match native_open_hooked(&p) {
+                            Ok(()) => format!("opened {name}"),
+                            Err(e) => e,
+                        }
+                    }
+                    Ok(FetchResult::NeedsConfirm { size }) => format!("file is {}; open it again to confirm", crate::preview::human(size)),
+                    Err(e) if e == "cancelled" => "download cancelled".to_string(),
+                    Err(e) => format!("download failed: {e}"),
+                });
+                dirty = true;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)), if fetching.is_some() => { dirty = true; }
             _ = sigterm.recv() => return finish(&app, backend).await,
             _ = sighup.recv() => return finish(&app, backend).await,
             _ = sigint.recv() => return finish(&app, backend).await,
@@ -715,10 +856,13 @@ async fn finish(app: &App, backend: &Backend) -> Result<()> {
 }
 
 /// Open `input` (relative to the workspace) in a new preview tab and switch to it.
-async fn open_preview(app: &mut App, backend: &Backend, input: &str, cap: usize, opts: &Opts) -> Result<()> {
+async fn open_preview(app: &mut App, backend: &Backend, input: &str, cap: usize, opts: &Opts, line: Option<u32>) -> Result<()> {
     let abs = backend.resolve(input).await?;
     let (bytes, total) = backend.read_prefix(&abs, cap).await?;
     let mut p = Preview::build(&abs, &bytes, total, opts);
+    if let Some(l) = line {
+        p.goto_line(l as usize);
+    }
     p.from_tab = app.active;
     let id = app.next_id;
     app.next_id += 1;
@@ -775,7 +919,7 @@ async fn reload_git(app: &mut App, backend: &Backend) -> Result<String> {
 /// Re-read the file shown in the active preview tab, keeping scroll position and wrap setting.
 async fn reload_preview(app: &mut App, backend: &Backend, cap: usize, opts: &Opts) -> Result<()> {
     let Some(old) = app.tabs[app.active].preview.as_ref() else { return Ok(()) };
-    let (path, top, left, wrap, from) = (old.path.clone(), old.top, old.left, old.wrap, old.from_tab);
+    let (path, top, left, wrap, from, target) = (old.path.clone(), old.top, old.left, old.wrap, old.from_tab, old.target_line);
     let (bytes, total) = backend.read_prefix(&path, cap).await?;
     let mut p = Preview::build(&path, &bytes, total, opts);
     p.top = top;
@@ -785,6 +929,7 @@ async fn reload_preview(app: &mut App, backend: &Backend, cap: usize, opts: &Opt
         p.left = left;
     }
     p.from_tab = from;
+    p.target_line = target;
     app.tabs[app.active].preview = Some(p);
     Ok(())
 }
@@ -798,6 +943,58 @@ fn go_back(app: &mut App) {
         app.tabs.iter().position(|t| !t.is_preview()).unwrap_or(0)
     };
     switch_to(app, target);
+}
+
+/// What a confirmed question will do.
+enum Pending {
+    Url(String),
+    OpenLocal(std::path::PathBuf),
+    /// Download from the box into the cache, then open.
+    Fetch { remote: String },
+}
+
+struct HintState {
+    links: Vec<Link>,
+    hints: Vec<Hint>,
+    typed: String,
+}
+
+/// A running download. The future is polled by the main loop so the screen stays responsive.
+struct Fetching<'a> {
+    name: String,
+    done: Arc<AtomicU64>,
+    total: Arc<AtomicU64>,
+    cancel: Arc<AtomicBool>,
+    fut: Pin<Box<dyn Future<Output = Result<FetchResult, String>> + 'a>>,
+}
+
+impl Fetching<'_> {
+    fn dialog(&self) -> Confirm {
+        let (d, t) = (self.done.load(Ordering::Relaxed), self.total.load(Ordering::Relaxed));
+        let pct = (d * 100).checked_div(t).unwrap_or(0);
+        let filled = (pct as usize * 30) / 100;
+        Confirm {
+            title: "Downloading from the box".into(),
+            lines: vec![
+                self.name.clone(),
+                String::new(),
+                format!("{} of {}  ({pct}%)", crate::preview::human(d), crate::preview::human(t)),
+                format!("[{}{}]", "#".repeat(filled), "-".repeat(30 - filled)),
+            ],
+            yes: String::new(),
+        }
+    }
+}
+
+/// The result of looking at a clicked or labelled link.
+enum LinkOutcome {
+    Message(String),
+    /// Show this file in a preview tab, at this line.
+    Preview(String, Option<u32>),
+    /// Ask first.
+    Confirm(Confirm, Pending),
+    /// Confirmation is switched off in the config: do it now.
+    Now(Pending),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -829,6 +1026,8 @@ struct SelState {
 
 enum Intent {
     None,
+    /// Ctrl/Alt+click (or right-click) on a path or URL.
+    OpenLink(Link),
     Select(Phase, Pos),
     /// Handle as if these bytes had been typed (or, in a shell tab, send them to the app).
     Synth(Vec<u8>),
@@ -841,7 +1040,7 @@ enum Intent {
 }
 
 /// What a mouse event means right now. Pure so it can be tested without a terminal.
-fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], main: Rect, selecting: bool) -> Intent {
+fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], main: Rect, selecting: bool, link_click: &str) -> Intent {
     let inside = |r: Rect| m.col >= r.x && m.col < r.x + r.width && m.row >= r.y && m.row < r.y + r.height;
     let up3 = || Intent::Synth(b"\x1b[A".repeat(3));
     let down3 = || Intent::Synth(b"\x1b[B".repeat(3));
@@ -863,7 +1062,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Ask(_) => Intent::None,
+        Mode::Ask(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) => Intent::None,
         Mode::Prompt(p) => {
             let r = ui::prompt_rect(main, p);
             match m.kind {
@@ -874,7 +1073,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
         Mode::Scroll => match m.kind {
             Kind::WheelUp => Intent::ScrollWheel(3),
             Kind::WheelDown => Intent::ScrollWheel(-3),
-            _ => select_intent(m, app, main, selecting),
+            _ => link_intent(m, app, main, link_click).unwrap_or_else(|| select_intent(m, app, main, selecting)),
         },
         Mode::Shell => {
             if app.tabs.len() > 1 && m.row == 1 {
@@ -892,7 +1091,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 return match m.kind {
                     Kind::WheelUp => Intent::PreviewScroll(-3),
                     Kind::WheelDown => Intent::PreviewScroll(3),
-                    _ => select_intent(m, app, main, selecting),
+                    _ => link_intent(m, app, main, link_click).unwrap_or_else(|| select_intent(m, app, main, selecting)),
                 };
             }
             let scr = tab.parser.screen();
@@ -912,7 +1111,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                     Kind::WheelUp if scr.alternate_screen() => up3(),
                     Kind::WheelDown if scr.alternate_screen() => down3(),
                     Kind::WheelUp => Intent::EnterScroll,
-                    _ => select_intent(m, app, main, selecting),
+                    _ => link_intent(m, app, main, link_click).unwrap_or_else(|| select_intent(m, app, main, selecting)),
                 },
             }
         }
@@ -962,4 +1161,225 @@ async fn start_agent(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>,
     tab.write(format!("{command}\n").into_bytes());
     app.active = last;
     resize_all(app)
+}
+
+/// The area the shell (or a preview) is drawn in.
+fn main_rect(app: &App) -> Result<Rect> {
+    let (tc, tr) = crossterm::terminal::size()?;
+    let strip_h = u16::from(app.tabs.len() > 1);
+    Ok(Rect::new(0, 1 + strip_h, tc, tr.saturating_sub(2 + strip_h).max(1)))
+}
+
+/// First screen row of the content (below the banner of a preview that has one).
+fn origin_row(app: &App, main: Rect) -> u16 {
+    let banner = app.tabs[app.active].preview.as_ref().is_some_and(|p| p.banner.is_some()) && main.height > 1;
+    main.y + u16::from(banner)
+}
+
+/// A left click with Ctrl/Alt held (per `link_click`), or a right click, on a path or URL.
+fn link_intent(m: &MouseEvent, app: &App, main: Rect, link_click: &str) -> Option<Intent> {
+    let wanted = match m.kind {
+        Kind::Down(Button::Left) => mouse::is_link_click(m.code, link_click),
+        Kind::Down(Button::Right) => link_click != "off",
+        _ => false,
+    };
+    if !wanted {
+        return None;
+    }
+    let origin = origin_row(app, main);
+    if m.row < origin || m.row >= main.y + main.height || m.col >= main.width {
+        return None;
+    }
+    let (rows, wrapped) = area_rows(app, main);
+    links::link_at(&rows, &wrapped, m.row - origin, m.col).map(Intent::OpenLink)
+}
+
+/// Where relative paths in the active tab's output point: a preview's own folder, else the
+/// shell's working directory.
+async fn link_cwd(app: &App, backend: &Backend) -> Option<String> {
+    let tab = &app.tabs[app.active];
+    if let Some(p) = &tab.preview {
+        return std::path::Path::new(&p.path).parent().filter(|_| p.path.starts_with('/')).map(|d| d.to_string_lossy().into_owned());
+    }
+    crate::cwd::tab_cwd(backend, tab.compat.cwd.as_deref(), tab.handle.as_ref().and_then(|h| h.pid()), app.sessions.get(&tab.id).map(String::as_str)).await
+}
+
+/// Work out what a link means and what to ask the user, without doing anything yet.
+async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link, open_cfg: &OpenCfg, confirm: bool) -> LinkOutcome {
+    match &link.kind {
+        LinkKind::Url(u) => {
+            let lower = u.to_ascii_lowercase();
+            if !(lower.starts_with("http://") || lower.starts_with("https://")) || !opener::url_allowed(u) {
+                return LinkOutcome::Message("only http and https links are opened".into());
+            }
+            let p = Pending::Url(u.clone());
+            if !confirm {
+                return LinkOutcome::Now(p);
+            }
+            LinkOutcome::Confirm(
+                Confirm {
+                    title: "Open link in your browser".into(),
+                    lines: vec![u.clone(), String::new(), "Opened by the operating system's default browser.".into()],
+                    yes: "Open".into(),
+                },
+                p,
+            )
+        }
+        LinkKind::Path { path, line, .. } => {
+            let remote = matches!(backend, Backend::Remote(_));
+            let cwd = link_cwd(app, backend).await;
+            let root = backend.resolve("").await.unwrap_or_default();
+            let home = if remote { root.clone() } else { dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default() };
+            let mut found = None;
+            let mut is_dir = false;
+            for cand in links::resolve_candidates(path, cwd.as_deref(), &root, Some(&home)) {
+                match backend.read_prefix(&cand, 4096).await {
+                    Ok((head, size)) => {
+                        found = Some((cand, head, size));
+                        break;
+                    }
+                    Err(e) => is_dir |= e.to_string().contains("is a directory"),
+                }
+            }
+            let Some((abs, head, size)) = found else {
+                return LinkOutcome::Message(if is_dir { format!("{}: is a folder", sanitize(path)) } else { format!("no such file: {}", sanitize(path)) });
+            };
+            match opener::classify(&abs, &head, size, open_cfg) {
+                Handling::Preview => LinkOutcome::Preview(abs, *line),
+                Handling::Native => {
+                    if let Err(e) = opener::native_safe(&abs) {
+                        return LinkOutcome::Message(sanitize(&e));
+                    }
+                    let (p, dialog) = if remote {
+                        let from = match ws {
+                            Workspace::Remote(b) => b.name.clone(),
+                            Workspace::Local(_) => String::new(),
+                        };
+                        (
+                            Pending::Fetch { remote: abs.clone() },
+                            Confirm {
+                                title: "Download and open".into(),
+                                lines: vec![
+                                    format!("File: {abs}"),
+                                    format!("Size: {}", crate::preview::human(size)),
+                                    format!("From: {from}"),
+                                    String::new(),
+                                    "It is copied to your computer's cache, then opened by the".into(),
+                                    "operating system's default app for this type.".into(),
+                                ],
+                                yes: "Download and open".into(),
+                            },
+                        )
+                    } else {
+                        (
+                            Pending::OpenLocal(std::path::PathBuf::from(&abs)),
+                            Confirm {
+                                title: "Open in the default app".into(),
+                                lines: vec![
+                                    format!("File: {abs}"),
+                                    format!("Size: {}", crate::preview::human(size)),
+                                    String::new(),
+                                    "Opened by the operating system's default app for this type.".into(),
+                                ],
+                                yes: "Open".into(),
+                            },
+                        )
+                    };
+                    if confirm { LinkOutcome::Confirm(dialog, p) } else { LinkOutcome::Now(p) }
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_outcome<'a>(
+    o: LinkOutcome,
+    app: &mut App,
+    backend: &'a Backend,
+    ws: &Workspace,
+    mode: &mut Mode,
+    pending: &mut Option<Pending>,
+    message: &mut Option<String>,
+    fetching: &mut Option<Fetching<'a>>,
+    read_cap: usize,
+    opts: &Opts,
+) {
+    match o {
+        LinkOutcome::Message(m) => *message = Some(m),
+        LinkOutcome::Preview(abs, line) => {
+            if let Err(e) = open_preview(app, backend, &abs, read_cap, opts, line).await {
+                *message = Some(format!("could not open: {e}"));
+            }
+        }
+        LinkOutcome::Confirm(c, p) => {
+            *mode = Mode::Confirm(c);
+            *pending = Some(p);
+        }
+        LinkOutcome::Now(p) => run_pending(p, backend, ws, mode, fetching, message),
+    }
+}
+
+/// Do what the user just agreed to.
+fn run_pending<'a>(p: Pending, backend: &'a Backend, ws: &Workspace, mode: &mut Mode, fetching: &mut Option<Fetching<'a>>, message: &mut Option<String>) {
+    match p {
+        Pending::Url(u) => {
+            *message = Some(match open_url_hooked(&u) {
+                Ok(()) => "opened link in your browser".to_string(),
+                Err(e) => e,
+            });
+        }
+        Pending::OpenLocal(path) => {
+            let name = path.file_name().map(|n| sanitize(&n.to_string_lossy())).unwrap_or_default();
+            *message = Some(match native_open_hooked(&path) {
+                Ok(()) => format!("opened {name}"),
+                Err(e) => e,
+            });
+        }
+        Pending::Fetch { remote } => {
+            let box_name = match ws {
+                Workspace::Remote(b) => b.name.clone(),
+                Workspace::Local(_) => String::new(),
+            };
+            *fetching = Some(start_fetch(backend, remote, box_name));
+            *mode = Mode::Fetch;
+        }
+    }
+}
+
+fn start_fetch(backend: &Backend, remote: String, box_name: String) -> Fetching<'_> {
+    let (done, total, cancel) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)));
+    let (d, t, c) = (done.clone(), total.clone(), cancel.clone());
+    let name = sanitize(remote.rsplit('/').next().unwrap_or(&remote));
+    let mut opts = FetchOpts::new(&box_name);
+    opts.confirmed = true; // the user already agreed in the dialog, which showed the size
+    let fut = Box::pin(async move {
+        let mut progress = |dn: u64, tt: u64| {
+            d.store(dn, Ordering::Relaxed);
+            t.store(tt, Ordering::Relaxed);
+        };
+        backend.fetch_to_cache(&remote, &opts, &mut progress, &c).await
+    });
+    Fetching { name, done, total, cancel, fut }
+}
+
+fn append_log(log: &str, line: String) -> Result<(), String> {
+    use std::io::Write;
+    std::fs::OpenOptions::new().create(true).append(true).open(log).and_then(|mut f| f.write_all(line.as_bytes())).map_err(|e| e.to_string())
+}
+
+/// Hand a file to the OS. `WICLI_OPEN_LOG=<file>` records the request instead (used by the tests,
+/// so they never launch real apps).
+fn native_open_hooked(p: &std::path::Path) -> Result<(), String> {
+    match std::env::var("WICLI_OPEN_LOG") {
+        Ok(log) => append_log(&log, format!("open {}\n", p.display())),
+        Err(_) => opener::native_open(p),
+    }
+}
+
+fn open_url_hooked(u: &str) -> Result<(), String> {
+    match std::env::var("WICLI_OPEN_LOG") {
+        Ok(log) => append_log(&log, format!("url {u}\n")),
+        Err(_) => opener::open_url(u),
+    }
 }

@@ -228,7 +228,6 @@ impl Preview {
     }
 
     /// Bring a source line (1-based) into view and mark it. Only text previews have source lines.
-    #[allow(dead_code)] // used once link clicks are wired up
     pub fn goto_line(&mut self, line: usize) {
         if self.kind == Kind::Text && line > 0 {
             self.target_line = Some(line.min(self.lines.len().max(1)));

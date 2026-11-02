@@ -348,6 +348,7 @@ pub fn draw(f: &mut Frame, v: &View) {
         format!(" arrows scroll · {files}W wrap · R reload · Esc back   lines {}-{} of {}", (p.top + 1).min(total), last, total)
     });
     let hint = match (v.menu, v.message) {
+        _ if v.confirm.is_some_and(|c| c.yes.is_empty()) => " Esc cancels the download".to_string(),
         _ if v.confirm.is_some() => " Y or Enter to continue · N or Esc to cancel".to_string(),
         _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
         _ if v.ask.is_some() => " Enter starts · E edits the command · N not now · X never here".to_string(),
@@ -481,12 +482,16 @@ fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {
         lines.push(Line::from(format!(" {}", sanitize(l))));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(format!(" {} ", c.yes), Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(" Cancel ", Style::default().add_modifier(Modifier::REVERSED)),
-        Span::styled("   Y / Enter  ·  N / Esc", dim),
-    ]));
+    if c.yes.is_empty() {
+        lines.push(Line::from(vec![Span::styled(" Cancel ", Style::default().add_modifier(Modifier::REVERSED)), Span::styled("   Esc", dim)]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", c.yes), Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(" Cancel ", Style::default().add_modifier(Modifier::REVERSED)),
+            Span::styled("   Y / Enter  ·  N / Esc", dim),
+        ]));
+    }
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(" {} ", sanitize(&c.title)))), area);
 }

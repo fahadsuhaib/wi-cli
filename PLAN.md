@@ -58,6 +58,10 @@ Privacy and safety rules (user requirement, 2026-11-02): nothing leaves wi witho
 - Previews inside wi are read-only renders of a file the user explicitly clicked; they need no extra confirmation.
 Work split: links engine (pure path/URL detection, `src/links.rs`), opener (classification, native open, remote fetch cache, `src/opener.rs`), then one integration pass (mouse modifiers, hint mode, cwd resolution, goto-line).
 
+## Phase A6: Side-by-side preview and per-tab folders (added 2026-11-02, user requests)
+1. Side-by-side preview: opening a file from a shell tab (path prompt, link click, labels, git view) shows it in a pane beside the shell, on the right by default (`preview_side = right | left | tab`, `preview_width_pct`), instead of a separate full-screen tab. Falls back to a tab on narrow terminals. Focus moves by click or a menu action; Esc in the preview returns focus to the shell; the divider can be dragged.
+2. Per-tab base folder: open a new tab in any folder (menu prompt with Tab completion and recent folders), so several Claude sessions can run in different projects. Existing tab: change folder only when it is idle at a shell prompt (never type into a running agent). Previews, git view, links and agent detection use the tab's folder.
+
 ## Phase B: Remote M1 completion
 1. tmux-backed detach/reattach (`tmux new -A -s wicli`, tmux status/keys disabled so it is invisible; plain session if tmux missing).
 2. ssh-agent auth, passphrase-protected keys, `~/.ssh/config` host aliases (HostName, User, Port, IdentityFile).

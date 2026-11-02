@@ -21,7 +21,6 @@
 //!   `wrap_rows` is how many extra rows it covers.
 //! - `a/` / `b/` are stripped only for the path token right after `---`/`+++`.
 
-#[allow(dead_code)] // public API for the integration pass; unused until then
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkKind {
     Path {
@@ -32,7 +31,6 @@ pub enum LinkKind {
     Url(String),
 }
 
-#[allow(dead_code)] // public API for the integration pass; unused until then
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
     pub kind: LinkKind,
@@ -203,7 +201,6 @@ fn line_links(rows: &[Vec<String>], first: usize, last: usize) -> Vec<Link> {
 }
 
 /// Every link on screen in reading order.
-#[allow(dead_code)] // public API for the integration pass; unused until then
 pub fn all_links(rows: &[Vec<String>], wrapped: &[bool]) -> Vec<Link> {
     let mut out = Vec::new();
     let mut r = 0;
@@ -219,7 +216,6 @@ pub fn all_links(rows: &[Vec<String>], wrapped: &[bool]) -> Vec<Link> {
 }
 
 /// The link under screen cell (row, col), if any.
-#[allow(dead_code)] // public API for the integration pass; unused until then
 pub fn link_at(rows: &[Vec<String>], wrapped: &[bool], row: u16, col: u16) -> Option<Link> {
     let row_u = row as usize;
     if row_u >= rows.len() {
@@ -694,7 +690,6 @@ fn valid_path(p: &str) -> bool {
 // ---------------------------------------------------------------- OSC 7
 
 /// `file://host/Users/me/proj` (percent-encoded) -> `/Users/me/proj`.
-#[allow(dead_code)] // public API for the integration pass; unused until then
 pub fn parse_osc7(payload: &str) -> Option<String> {
     let head = payload.get(..7)?;
     if !head.eq_ignore_ascii_case("file://") {
@@ -745,7 +740,6 @@ fn normalise(path: &str) -> String {
 }
 
 /// Ordered, de-duplicated absolute paths to try for a detected path.
-#[allow(dead_code)] // public API for the integration pass; unused until then
 pub fn resolve_candidates(
     link_path: &str,
     tab_cwd: Option<&str>,

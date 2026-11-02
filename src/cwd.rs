@@ -4,7 +4,6 @@
 
 use crate::workspace::Backend;
 
-#[allow(dead_code)] // used by the link integration
 pub async fn tab_cwd(backend: &Backend, osc7: Option<&str>, pid: Option<u32>, tmux_session: Option<&str>) -> Option<String> {
     if let Some(p) = osc7 {
         return Some(p.to_string());
