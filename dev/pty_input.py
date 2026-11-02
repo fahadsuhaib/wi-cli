@@ -74,7 +74,9 @@ check("split markers: no menu, no markers", "arrows + Enter" not in t and "200~"
 os.write(fd, b"\x03"); pump(0.5)
 
 # bracketed-paste-aware shell: paste with newline is not executed until Enter
-sh = "zsh -f -i"  # macOS bash 3.2 has no bracketed paste; zsh ZLE does (same as bash 5 readline)
+import shutil
+sh = "zsh -f -i" if shutil.which("zsh") else "bash --norc -i"  # (bash 5.1+ readline also brackets paste)
+# macOS bash 3.2 has no bracketed paste; zsh ZLE does (same as bash 5 readline)
 os.write(fd, sh.encode() + b"\n"); pump(1.5)
 os.write(fd, b"clear\n"); pump(0.5)
 os.write(fd, PS + b"echo PAST$((1+2))ED\necho SEC$((2+2))OND" + PE); pump(1)
