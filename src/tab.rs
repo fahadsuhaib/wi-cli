@@ -55,14 +55,32 @@ pub struct Split {
 
 /// Width in cells of the close button in the top corner of the preview pane.
 pub const CLOSE_W: u16 = 3;
+/// Width in cells of the swap button (⇄) just left of the close button.
+pub const SWAP_W: u16 = 3;
+
+/// The title-bar buttons of a pane.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Btn {
+    Close,
+    Swap,
+}
+
+/// Which button of a pane occupying `r` is at this cell: ✕ in the top outer corner, ⇄ next to it.
+pub fn button_at(r: ratatui::layout::Rect, col: u16, row: u16) -> Option<Btn> {
+    if r.width < (CLOSE_W + SWAP_W) * 2 || row != r.y || col >= r.x + r.width {
+        return None;
+    }
+    let from_right = r.x + r.width - 1 - col.min(r.x + r.width - 1);
+    if col < r.x || from_right >= CLOSE_W + SWAP_W {
+        None
+    } else if from_right < CLOSE_W {
+        Some(Btn::Close)
+    } else {
+        Some(Btn::Swap)
+    }
+}
 
 impl Split {
-    /// The ✕ button at the top outer corner of the preview pane.
-    pub fn on_close(&self, col: u16, row: u16) -> bool {
-        let r = self.side;
-        r.width >= CLOSE_W * 2 && row == r.y && col + CLOSE_W >= r.x + r.width && col < r.x + r.width
-    }
-
     pub fn on_divider(&self, col: u16, row: u16) -> bool {
         col == self.divider.x && row >= self.divider.y && row < self.divider.y + self.divider.height
     }
@@ -85,6 +103,15 @@ pub fn split_main(main: ratatui::layout::Rect, side: Side, pct: u16) -> Option<S
         Side::Left => Split { side: Rect::new(x, y, pw, h), divider: Rect::new(x + pw, y, 1, h), shell: Rect::new(x + pw + 1, y, sw, h) },
         _ => Split { shell: Rect::new(x, y, sw, h), divider: Rect::new(x + sw, y, 1, h), side: Rect::new(x + sw + 1, y, pw, h) },
     })
+}
+
+/// Like `split_main` for a pinned tab on `pin_side` (Left or Right; anything else counts as Right).
+/// In the result `shell` is the rectangle of the ACTIVE tab and `side` the other one, so the
+/// pinned tab sits on `pin_side` whichever of the two has the keyboard.
+pub fn split_pinned(main: ratatui::layout::Rect, pin_side: Side, pct: u16, active_is_pinned: bool) -> Option<Split> {
+    let side = if pin_side == Side::Left { Side::Left } else { Side::Right };
+    let s = split_main(main, side, pct)?;
+    Some(if active_is_pinned { Split { shell: s.side, divider: s.divider, side: s.shell } } else { s })
 }
 
 /// The preview percentage that puts the divider at screen column `col`.
@@ -335,18 +362,6 @@ mod tests {
     }
 
     #[test]
-    fn close_button_hit_testing() {
-        let s = split_main(main(120), Side::Right, 50).unwrap();
-        let r = s.side;
-        assert!(s.on_close(r.x + r.width - 1, r.y) && s.on_close(r.x + r.width - 3, r.y));
-        assert!(!s.on_close(r.x + r.width - 4, r.y), "only the three button cells");
-        assert!(!s.on_close(r.x + r.width - 1, r.y + 1), "only the top row");
-        assert!(!s.on_close(s.divider.x, r.y) && !s.on_close(s.shell.x + 5, r.y));
-        let l = split_main(main(120), Side::Left, 50).unwrap();
-        assert!(l.on_close(l.side.x + l.side.width - 1, l.side.y));
-    }
-
-    #[test]
     fn divider_hit_testing_and_drag_percentage() {
         let s = split_main(main(120), Side::Right, 50).unwrap();
         assert!(s.on_divider(60, 2) && s.on_divider(60, 27));
@@ -356,6 +371,32 @@ mod tests {
         assert_eq!(pct_for_col(main(120), Side::Left, 40), 33);
         assert_eq!(pct_for_col(main(120), Side::Right, 119), 25, "clamped");
         assert_eq!(pct_for_col(main(120), Side::Right, 0), 75);
+    }
+
+    #[test]
+    fn swap_and_close_buttons() {
+        let r = Rect::new(61, 2, 59, 26);
+        assert_eq!(button_at(r, 119, 2), Some(Btn::Close));
+        assert_eq!(button_at(r, 117, 2), Some(Btn::Close));
+        assert_eq!(button_at(r, 116, 2), Some(Btn::Swap));
+        assert_eq!(button_at(r, 114, 2), Some(Btn::Swap));
+        assert_eq!(button_at(r, 113, 2), None);
+        assert_eq!(button_at(r, 119, 3), None);
+        assert_eq!(button_at(r, 120, 2), None);
+        assert_eq!(button_at(Rect::new(0, 0, 10, 5), 9, 0), None, "too narrow for buttons");
+    }
+
+    #[test]
+    fn pinned_split_keeps_the_pinned_pane_on_its_side() {
+        let m = main(120);
+        let a = split_pinned(m, Side::Right, 40, false).unwrap();
+        assert_eq!((a.side.x, a.side.width, a.shell.x), (72, 48, 0), "pinned on the right, active on the left");
+        let b = split_pinned(m, Side::Right, 40, true).unwrap();
+        assert_eq!((b.shell.x, b.shell.width, b.side.x), (72, 48, 0), "active is the pinned one: it stays on the right");
+        assert_eq!(b.divider, a.divider);
+        let l = split_pinned(m, Side::Left, 40, true).unwrap();
+        assert_eq!((l.shell.x, l.shell.width), (0, 48));
+        assert!(split_pinned(main(100), Side::Right, 40, false).is_none());
     }
 
     #[test]

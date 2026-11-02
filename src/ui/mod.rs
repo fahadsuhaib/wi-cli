@@ -36,8 +36,15 @@ pub enum Action {
     Scroll,
     /// Move the keyboard between the shell and the side preview.
     SwitchPane,
-    /// Close the side preview and give the shell the full width back.
+    /// Close the side preview (or unpin the pinned tab) and give the shell the full width back.
     ClosePreview,
+    /// Pin the active tab to a pane on the right (or left) beside the next tab.
+    PinRight,
+    PinLeft,
+    /// Move the pinned pane to the other side.
+    SwapSides,
+    /// Back to one pane; a pinned tab stays a normal tab.
+    Unsplit,
     /// Search text in the files under the active folder (shows the last results first).
     SearchText,
     /// Fuzzy find a file by name.
@@ -89,6 +96,9 @@ pub fn menu_items_for(remote: bool, tmux: bool) -> Vec<&'static MenuItem> {
     items
 }
 
+/// Hotkey of a menu entry that has none.
+pub const NO_KEY: char = '\0';
+
 const fn mi(label: &'static str, key: char, action: Action, remote_only: bool, section: &'static str, keywords: &'static [&'static str]) -> MenuItem {
     MenuItem { label, key, action, remote_only, section, keywords }
 }
@@ -109,6 +119,11 @@ pub const MENU: &[MenuItem] = &[
     mi("Close tab", 'c', Action::CloseTab, false, "TABS", &["kill", "end", "remove"]),
     mi("Switch pane", 'w', Action::SwitchPane, false, "TABS", &["focus", "split", "side"]),
     mi("Close preview", 'v', Action::ClosePreview, false, "TABS", &["side", "pane", "hide"]),
+    // No hotkey (NO_KEY): the letters are used up; these are found with Space and a few letters.
+    mi("Pin tab right", NO_KEY, Action::PinRight, false, "TABS", &["pane", "split", "side", "beside", "pin"]),
+    mi("Pin tab left", NO_KEY, Action::PinLeft, false, "TABS", &["pane", "split", "side", "beside", "pin"]),
+    mi("Swap pane sides", NO_KEY, Action::SwapSides, false, "TABS", &["pane", "split", "flip", "left", "right", "move"]),
+    mi("Unsplit (unpin)", NO_KEY, Action::Unsplit, false, "TABS", &["pane", "split", "single", "pin", "close"]),
     mi("Scroll", 's', Action::Scroll, false, "VIEW", &["history", "back", "up", "scrollback"]),
     mi("Theme dark / light", 'y', Action::Theme, false, "VIEW", &["dark", "light", "colour", "color"]),
     mi("Mouse on/off", 'm', Action::Mouse, false, "VIEW", &["select", "copy", "click"]),
@@ -444,7 +459,26 @@ pub fn hint_labels(n: usize) -> Vec<String> {
     out
 }
 
+/// What the pane beside the active tab shows.
+#[derive(Clone, Copy)]
+pub enum Partner<'a> {
+    Screen(&'a vt100::Screen),
+    Preview(&'a crate::preview::Preview),
+}
+
+/// A pinned tab is on screen beside the active one.
+#[derive(Clone, Copy)]
+pub struct PinView {
+    /// The side the pinned tab is on.
+    pub side: crate::tab::Side,
+    /// The active tab is the pinned one (the pane beside it is the other tab).
+    pub active_is_pinned: bool,
+}
+
 pub struct View<'a> {
+    /// With `pin`: the tab in the other pane (the active tab is drawn as usual).
+    pub partner: Option<Partner<'a>>,
+    pub pin: Option<PinView>,
     pub confirm: Option<&'a Confirm>,
     pub hints: Option<(&'a [Hint], &'a str)>,
     /// Selected cells and the pane they are in, relative to that pane (or the preview body).
@@ -573,13 +607,36 @@ fn draw_frame(f: &mut Frame, v: &View) {
         f.render_widget(Paragraph::new(Line::from(spans)).style(bar), strip);
     }
 
-    let split = v.side.and_then(|_| crate::tab::split_main(main, v.split.0, v.split.1));
+    let split = match (v.pin, v.partner) {
+        (Some(pin), Some(_)) => crate::tab::split_pinned(main, pin.side, v.split.1, pin.active_is_pinned),
+        _ => v.side.and_then(|_| crate::tab::split_main(main, v.split.0, v.split.1)),
+    };
     let sel_in = |pane| v.selection.filter(|(p, _)| *p == pane).map(|(_, s)| s);
     let mut preview_rows = 0usize;
     let mut shell_area = main;
     let mut active_prev = v.preview;
-    if let (Some(sp), Some(side)) = (&split, v.side) {
-        preview_rows = draw_preview(f, sp.side, side, sel_in(crate::tab::Pane::Side));
+    if let Some(sp) = &split {
+        let other = match (v.pin, v.partner, v.side) {
+            (Some(_), Some(p), _) => Some(p),
+            (_, _, Some(side)) => Some(Partner::Preview(side)),
+            _ => None,
+        };
+        let mut other_rows = 0;
+        match other {
+            Some(Partner::Preview(p)) => other_rows = draw_preview(f, sp.side, p, sel_in(crate::tab::Pane::Side)),
+            Some(Partner::Screen(s)) => f.render_widget(ScreenWidget(s, None), sp.side),
+            None => {}
+        }
+        shell_area = sp.shell;
+        if v.pin.is_none() {
+            preview_rows = other_rows;
+            active_prev = v.focus_side.then_some(v.side).flatten();
+            f.render_widget(ScreenWidget(v.screen, sel_in(crate::tab::Pane::Shell)), shell_area);
+        } else if let Some(p) = v.preview {
+            preview_rows = draw_preview(f, shell_area, p, sel_in(crate::tab::Pane::Shell));
+        } else {
+            f.render_widget(ScreenWidget(v.screen, sel_in(crate::tab::Pane::Shell)), shell_area);
+        }
         let accent = Style::default().fg(t.divider_focus).add_modifier(Modifier::BOLD);
         let div = sp.divider;
         for y in 0..div.height {
@@ -592,19 +649,19 @@ fn draw_frame(f: &mut Frame, v: &View) {
         let c = &mut f.buffer_mut()[(div.x, div.y)];
         c.set_symbol(if v.focus_side == side_is_right { "▶" } else { "◀" });
         c.set_style(accent);
-        // A close button in the preview's top corner.
-        let r = sp.side;
-        if r.width >= crate::tab::CLOSE_W * 2 {
+        // Buttons in the top corner of the preview or pinned pane: swap sides and close.
+        let r = match v.pin {
+            Some(pin) if pin.active_is_pinned => sp.shell,
+            _ => sp.side,
+        };
+        if r.width >= (crate::tab::CLOSE_W + crate::tab::SWAP_W) * 2 {
             let btn = Style::default().fg(t.bar_fg).bg(t.bar_bg).add_modifier(Modifier::BOLD);
-            for (i, sym) in [" ", "✕", " "].into_iter().enumerate() {
-                let c = &mut f.buffer_mut()[(r.x + r.width - crate::tab::CLOSE_W + i as u16, r.y)];
+            for (i, sym) in [" ", "⇄", " ", " ", "✕", " "].into_iter().enumerate() {
+                let c = &mut f.buffer_mut()[(r.x + r.width - crate::tab::CLOSE_W - crate::tab::SWAP_W + i as u16, r.y)];
                 c.set_symbol(sym);
                 c.set_style(btn);
             }
         }
-        shell_area = sp.shell;
-        active_prev = v.focus_side.then_some(side);
-        f.render_widget(ScreenWidget(v.screen, sel_in(crate::tab::Pane::Shell)), shell_area);
     } else if let Some(p) = v.preview {
         preview_rows = draw_preview(f, main, p, sel_in(crate::tab::Pane::Shell));
     } else {
@@ -657,7 +714,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
             (false, true) => "N/B match · ",
             (false, false) => "",
         };
-        let back = if split.is_some() { "Esc to the shell · Q closes" } else { "Esc back · Q closes" };
+        let back = if split.is_some() && v.pin.is_none() { "Esc to the shell · Q closes" } else { "Esc back · Q closes" };
         let md = p.md_hint().map(|h| format!("{h} · ")).unwrap_or_default();
         let wrap = if p.md_rendered() { "" } else { "W wrap · " };
         format!(" lines {}-{} of {}  ·  arrows scroll · {files}F find · {md}{wrap}R reload · {back}", (p.top + 1).min(total), last, total)
@@ -676,6 +733,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
         (Some(_), _) => " arrows + Enter, a letter, or a tab number · Space searches · Esc closes".to_string(),
         (None, Some(m)) if preview_hint.is_some() => format!(" {m} ·{}", preview_hint.unwrap_or_default()),
         (None, Some(m)) => format!(" {m}"),
+        (None, None) if split.is_some() && v.pin.is_some() => format!(" {}  menu · click a pane or menu W to switch · ⇄ swaps sides · menu V unsplits", v.menu_label),
         (None, None) if split.is_some() => format!(" {}  menu · click a pane or menu W to switch · menu V closes the preview", v.menu_label),
         (None, None) => format!(" {}  menu", v.menu_label),
     };
@@ -779,17 +837,21 @@ fn draw_menu(f: &mut Frame, main: Rect, st: &MenuState, remote: bool) {
                 let hot_style = if sel { base } else { base.fg(t.menu_hotkey) };
                 // Underline the hotkey letter wherever it first appears in the label.
                 let label = item.label;
-                let pos = label.to_lowercase().find(item.key).unwrap_or(0);
-                let (a, rest) = label.split_at(pos);
+                let pos = if item.key == NO_KEY { None } else { Some(label.to_lowercase().find(item.key).unwrap_or(0)) };
+                let (a, rest) = label.split_at(pos.unwrap_or(0));
                 let mut rest_chars = rest.chars();
                 let hot = rest_chars.next().unwrap_or(' ');
                 let tail = rest_chars.as_str();
                 let used = 1 + label.chars().count();
+                if pos.is_none() {
+                    Line::from(Span::styled(format!(" {label}{}", pad(used)), base))
+                } else {
                 Line::from(vec![
                     Span::styled(format!(" {a}"), base),
                     Span::styled(hot.to_string(), hot_style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD)),
                     Span::styled(format!("{tail}{}", pad(used)), base),
                 ])
+                }
             }
         };
         lines.push(line);
@@ -1037,7 +1099,7 @@ mod tests {
 
     #[test]
     fn menu_keys_are_unique() {
-        let mut keys: Vec<char> = MENU.iter().map(|m| m.key).collect();
+        let mut keys: Vec<char> = MENU.iter().map(|m| m.key).filter(|&k| k != NO_KEY).collect();
         keys.push(END_ITEM.key);
         let set: std::collections::HashSet<_> = keys.iter().collect();
         assert_eq!(set.len(), keys.len(), "{keys:?}");

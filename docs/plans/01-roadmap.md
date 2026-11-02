@@ -67,7 +67,7 @@ Why terminals cannot do it: Enter and Shift+Enter send the same byte (CR) in the
 1. Compose box (works in every terminal): a menu action opens a multi-line editor overlay (arrows, Home/End, PgUp/PgDn, mouse click to place the cursor, drag select, copy/cut/paste, undo, Enter = newline). A send key delivers the text to the active tab as ONE bracketed paste so an agent receives it as a single multi-line prompt; nothing is submitted unless the user chooses "send and press Enter". Saves drafts; later links to bins/snippets.
 2. Shift+Enter translation: ask the host terminal for enhanced key reporting where supported and translate Shift+Enter into what the program in the tab expects (e.g. ESC+CR or a newline sequence), so multi-line input in agent tabs behaves the same on macOS and Linux; terminals without support fall back to the compose box.
 
-## Phase A8: Pinned panes (user decisions 2026-11-03)
+## Phase A8: Pinned panes (user decisions 2026-11-03) - built on unit/panes, see 05-pinned-panes.md (explorer-as-tab not yet)
 Any tab can be pinned to a left or right pane, so e.g. Claude Code stays in one pane while an explorer, preview, git view, search results or another shell sits in the other. Independent of tmux: panes are wi's own layout, local and remote alike.
 - Panes show tabs (at most two: left and right). The current side preview becomes a special case. The explorer becomes a tab type so it can be pinned (it still opens full screen by default from the menu).
 - Default pane for a pinned tab is the RIGHT. A clickable swap icon in the pane's title bar (next to the close button) switches left/right; also a menu entry. Menu actions: Pin right, Pin left, Swap panes, Unsplit; `V` close preview and `W` switch pane keep working.

@@ -78,6 +78,24 @@ pub struct State {
     /// Folders recently opened as a tab, most recent first, per workspace (`recents_key`).
     #[serde(default)]
     pub recent: BTreeMap<String, Vec<String>>,
+    /// Pinned-pane layout per workspace (`workspace_key`).
+    #[serde(default)]
+    pub panes: BTreeMap<String, PaneLayout>,
+}
+
+/// What is remembered about a workspace's pinned pane.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneLayout {
+    /// `left` or `right`.
+    pub side: String,
+    /// Width of the pinned pane in percent.
+    pub pct: u16,
+    /// What was pinned: `shell`, `agent` or `preview`; empty when nothing was.
+    #[serde(default)]
+    pub kind: String,
+    /// Folder (shell), agent name (agent) or file path (preview).
+    #[serde(default)]
+    pub target: String,
 }
 
 /// How many recent folders are kept per workspace.

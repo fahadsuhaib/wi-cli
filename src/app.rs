@@ -5,7 +5,7 @@ use crate::keys::{EnterMap, KeyDecoder};
 use crate::scroll::{self, ScrollKey};
 use crate::config::{Config, parse_prefix_key, prefix_label};
 use crate::explorer::{self, Act as ExAct, ExJob, ExMouse, ExplorerState};
-use crate::tab::{Pane, Side, Split, Tab, pct_for_col, split_main};
+use crate::tab::{Btn, Pane, Side, Split, Tab, button_at, pct_for_col, split_main, split_pinned};
 use crate::files::complete;
 use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
 use crate::mouse::{self, Button, Kind, MouseEvent, Piece};
@@ -169,6 +169,12 @@ struct App {
     pct: u16,
     /// The divider is being dragged.
     div_drag: bool,
+    /// The pinned tab (by id): always shown in a pane beside the other tab on screen.
+    pinned: Option<usize>,
+    /// Side of the pinned pane (Left or Right).
+    pin_side: Side,
+    /// The last tab that had the keyboard other than the pinned one (by id).
+    last_main: usize,
 }
 
 /// Where an agent choice made in the Ask dialog applies.
@@ -190,7 +196,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
 
     let (events_tx, mut events) = mpsc::channel::<Event>(8);
     let (cols, rows) = shell_size(1)?;
-    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)), sessions: Default::default(), side: Side::parse(&cfg.defaults.preview_side), pct: cfg.defaults.preview_width_pct, div_drag: false, root: backend.resolve("").await.unwrap_or_else(|_| "/".into()), };
+    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)), sessions: Default::default(), side: Side::parse(&cfg.defaults.preview_side), pct: cfg.defaults.preview_width_pct, div_drag: false, pinned: None, pin_side: Side::Right, last_main: 0, root: backend.resolve("").await.unwrap_or_else(|_| "/".into()), };
     // Reattach to sessions left running on the box; otherwise start one fresh shell.
     let restored = backend.restored_sessions();
     let (cols, rows) = if restored.len() > 1 { shell_size(restored.len())? } else { (cols, rows) };
@@ -218,6 +224,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut agent_state = agents::State::load();
     let mut ask_ctx = AskCtx { key: agents::workspace_key(ws, &app.root), dir: app.root.clone(), tab: None };
     let rkey = agents::recents_key(ws);
+    let pane_key = agents::workspace_key(ws, &app.root);
     let mut branches: std::collections::HashMap<String, Option<String>> = Default::default();
     let mut detail_key: Option<(usize, String)> = None;
     let mut splitter = mouse::Splitter::default();
@@ -278,6 +285,44 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
         Decision::Ask(list) => mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key)),
     }
 
+    // The pinned-pane layout remembered for this workspace.
+    if let Some(l) = agent_state.panes.get(&pane_key).cloned() {
+        app.pin_side = if l.side == "left" { Side::Left } else { Side::Right };
+        if (crate::tab::PCT_MIN..=crate::tab::PCT_MAX).contains(&l.pct) { app.pct = l.pct; }
+        let pinned = match l.kind.as_str() {
+            "agent" => app.tabs.iter().find(|t| t.agent.as_deref() == Some(l.target.as_str())).map(|t| t.id),
+            "shell" if !l.target.is_empty() => {
+                let (c, r) = shell_size(app.tabs.len() + 1)?;
+                match open_tab_in(&mut app, backend, &events_tx, c, r, None, Some(&l.target)).await {
+                    Ok(()) => app.tabs.last().map(|t| t.id),
+                    Err(_) => None,
+                }
+            }
+            "preview" if !l.target.is_empty() => match backend.read_prefix(&l.target, read_cap).await {
+                Ok((bytes, total)) => {
+                    let p = Preview::build(&l.target, &bytes, total, &opts);
+                    let id = app.next_id;
+                    app.next_id += 1;
+                    app.tabs.push(Tab::new_preview(id, p));
+                    Some(id)
+                }
+                Err(_) => None,
+            },
+            _ => None,
+        };
+        if let Some(id) = pinned {
+            let keep = app.tabs[app.active].id;
+            let ps = app.pin_side;
+            match pin_tab(&mut app, backend, &events_tx, id, ps).await {
+                Ok(()) => {
+                    // Start with the keyboard where it was (the pinned tab was just added at the end).
+                    if keep != id && let Some(i) = app.tabs.iter().position(|t| t.id == keep) { app.active = i; sync_pin(&mut app); }
+                }
+                Err(e) => message = Some(format!("pinned pane not restored: {e}")),
+            }
+        }
+    }
+
     loop {
         // Keep the header on the active tab's folder and that folder's branch.
         if let Some(fi) = folder_tab(&app) {
@@ -336,9 +381,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     _ => None,
                 };
                 let (pcols, prows) = shell_size(app.tabs.len())?;
-                if let Some(p) = app.tabs[app.active].preview.as_mut() {
-                    let h = prows as usize - usize::from(p.banner.is_some() && prows > 1);
-                    p.layout(pcols, h);
+                if app.pinned.is_some() {
+                    // The two tabs on screen follow the pane they are in (cheap when nothing changed).
+                    sync_pin(&mut app);
+                    resize_all(&mut app)?;
+                }
+                for (i, r) in displayed(&app, Rect::new(0, 0, pcols, prows)) {
+                    if let Some(p) = app.tabs[i].preview.as_mut() {
+                        let h = r.height as usize - usize::from(p.banner.is_some() && r.height > 1);
+                        p.layout(r.width, h);
+                    }
                 }
                 let (pside, ppct) = (app.side, app.pct);
                 if let Some(sp) = split_main(Rect::new(0, 0, pcols, prows), pside, ppct)
@@ -347,8 +399,17 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     let h = sp.side.height as usize - usize::from(p.banner.is_some() && sp.side.height > 1);
                     p.layout(sp.side.width, h);
                 }
-                let strip: Vec<(String, bool, crate::tab::TabState)> = app.tabs.iter().enumerate()
-                    .map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
+                let strip = strip_of(&app);
+                let pin_split = pin_split(&app, Rect::new(0, 0, pcols, prows));
+                let (pin_view, partner) = match (pin_split, partner_idx(&app)) {
+                    (Some(_), Some(pi)) => {
+                        let pt = &app.tabs[pi];
+                        let content = match &pt.preview { Some(p) => ui::Partner::Preview(p), None => ui::Partner::Screen(pt.parser.screen()) };
+                        let pinned_active = pinned_idx(&app) == Some(app.active);
+                        (Some(ui::PinView { side: app.pin_side, active_is_pinned: pinned_active }), Some(content))
+                    }
+                    _ => (None, None),
+                };
                 let selection = sel.as_ref().filter(|s| s.tab == app.tabs[app.active].id).map(|s| (s.pane, select::normalize(s.anchor, s.end)));
                 let progress_dlg = fetching.as_ref().map(|f| f.dialog());
                 if let Ok(mr) = main_rect(&app) {
@@ -385,6 +446,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 let confirm_ref = match &mode { Mode::Confirm(c) => Some(c), Mode::Fetch => progress_dlg.as_ref(), _ => None };
                 let hints_ref = match &mode { Mode::Hints(h) => Some((&h.hints[..], h.typed.as_str())), _ => None };
                 let view = View {
+                    partner,
+                    pin: pin_view,
                     selection,
                     preview: app.tabs[app.active].preview.as_ref(),
                     side: app.tabs[app.active].side.as_ref(),
@@ -496,33 +559,50 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             let (tc, tr) = crossterm::terminal::size()?;
                             let strip_h = u16::from(app.tabs.len() > 1);
                             let main = Rect::new(0, 1 + strip_h, tc, tr.saturating_sub(2 + strip_h).max(1));
-                            if matches!(mode, Mode::Shell | Mode::Scroll) && matches!(m.kind, Kind::Down(_))
+                            if matches!(mode, Mode::Shell | Mode::Scroll) && matches!(m.kind, Kind::Down(_) | Kind::WheelUp | Kind::WheelDown)
                                 && let Some(sp) = split_of(&app, &app.tabs[app.active], main)
                             {
-                                // Clicking in a pane gives it the keyboard.
-                                let t = &mut app.tabs[app.active];
-                                if inside(sp.side, m.col, m.row) { t.focus = Pane::Side; dirty = true; }
-                                else if inside(sp.shell, m.col, m.row) { t.focus = Pane::Shell; dirty = true; }
+                                if let Some(pi) = pin_partner(&app) {
+                                    // Pinned panes: the pane under the pointer becomes the active tab.
+                                    let on_btn = button_at(pinned_rect(&app, &sp), m.col, m.row).is_some();
+                                    if inside(sp.side, m.col, m.row) && !on_btn {
+                                        if matches!(mode, Mode::Scroll) { mode = Mode::Shell; }
+                                        sel = None;
+                                        switch_to(&mut app, pi);
+                                        dirty = true;
+                                    }
+                                } else if matches!(m.kind, Kind::Down(_)) {
+                                    // Clicking in a pane gives it the keyboard.
+                                    let t = &mut app.tabs[app.active];
+                                    if inside(sp.side, m.col, m.row) { t.focus = Pane::Side; dirty = true; }
+                                    else if inside(sp.shell, m.col, m.row) { t.focus = Pane::Shell; dirty = true; }
+                                }
                             }
                             match mouse_intent(&m, &mode, &app, &items, main, sel.as_ref().filter(|s| s.dragging).map(|s| s.pane), &link_click) {
                                 Intent::None => {}
                                 Intent::Synth(bytes) => out.extend(bytes),
                                 Intent::SwitchTab(i) => { sel = None; switch_to(&mut app, i); dirty = true; }
                                 Intent::ClosePreview => {
-                                    let t = &mut app.tabs[app.active];
-                                    t.side = None;
-                                    t.focus = Pane::Shell;
+                                    unsplit(&mut app);
                                     sel = None;
                                     resize_all(&mut app)?;
+                                    save_layout(&app, &mut agent_state, &pane_key);
+                                    dirty = true;
+                                }
+                                Intent::SwapSides => {
+                                    swap_sides(&mut app);
+                                    sel = None;
+                                    resize_all(&mut app)?;
+                                    save_layout(&app, &mut agent_state, &pane_key);
                                     dirty = true;
                                 }
                                 Intent::DividerDown => { app.div_drag = true; sel = None; }
                                 Intent::DividerDrag(col) => {
-                                    app.pct = pct_for_col(main, app.side, col);
+                                    app.pct = pct_for_col(main, if app.pinned.is_some() { app.pin_side } else { app.side }, col);
                                     resize_all(&mut app)?;
                                     dirty = true;
                                 }
-                                Intent::DividerUp => { app.div_drag = false; dirty = true; }
+                                Intent::DividerUp => { app.div_drag = false; save_layout(&app, &mut agent_state, &pane_key); dirty = true; }
                                 Intent::OpenLink(l, pane) => {
                                     sel = None;
                                     if matches!(mode, Mode::Scroll) { mode = Mode::Shell; }
@@ -1375,14 +1455,44 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     }
                                     Action::SwitchPane => {
                                         let main = main_rect(&app)?;
-                                        if split_of(&app, &app.tabs[app.active], main).is_some() {
+                                        if let (Some(pi), Some(_)) = (pin_partner(&app), pin_split(&app, main)) {
+                                            switch_to(&mut app, pi);
+                                            sel_reset = true;
+                                        } else if split_of(&app, &app.tabs[app.active], main).is_some() {
                                             let t = &mut app.tabs[app.active];
                                             t.focus = if t.focus == Pane::Side { Pane::Shell } else { Pane::Side };
                                         } else {
                                             message = Some("no preview pane open".into());
                                         }
                                     }
-                                    Action::ClosePreview => {
+                                    Action::PinRight | Action::PinLeft => {
+                                        let side = if matches!(a, Action::PinLeft) { Side::Left } else { Side::Right };
+                                        match pin_active(&mut app, backend, &events_tx, side).await {
+                                            Ok(()) => {
+                                                sel_reset = true;
+                                                save_layout(&app, &mut agent_state, &pane_key);
+                                                message = Some(format!("pinned {}: menu, then Swap pane sides or Unsplit", if side == Side::Left { "left" } else { "right" }));
+                                            }
+                                            Err(e) => message = Some(e),
+                                        }
+                                    }
+                                    Action::SwapSides => {
+                                        if app.pinned.is_some() || app.tabs[app.active].side.is_some() {
+                                            swap_sides(&mut app);
+                                            sel_reset = true;
+                                            resize_all(&mut app)?;
+                                            save_layout(&app, &mut agent_state, &pane_key);
+                                        } else {
+                                            message = Some("no pane to swap: pin a tab first (menu, Space, \"pin\")".into());
+                                        }
+                                    }
+                                    Action::Unsplit | Action::ClosePreview if app.pinned.is_some() => {
+                                        unsplit(&mut app);
+                                        sel_reset = true;
+                                        resize_all(&mut app)?;
+                                        save_layout(&app, &mut agent_state, &pane_key);
+                                    }
+                                    Action::Unsplit | Action::ClosePreview => {
                                         if app.tabs[app.active].side.is_some() {
                                             let t = &mut app.tabs[app.active];
                                             t.side = None;
@@ -1540,7 +1650,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             message = Some("new output: find closed".into());
                         }
                         app.tabs[i].output(&data);
-                        if i != app.active { app.tabs[i].note_background_output(); }
+                        if i != app.active && Some(i) != pin_partner(&app) { app.tabs[i].note_background_output(); }
                         dirty = true;
                     }
                 }
@@ -1707,20 +1817,167 @@ async fn commit_folder(
 fn switch_to(app: &mut App, i: usize) {
     app.active = i;
     app.tabs[i].mark_seen();
+    sync_pin(app);
+    if app.pinned.is_some() {
+        let _ = resize_all(app); // the pair on screen may have changed
+    }
+}
+
+/// Back to one pane: the pinned tab stays a tab; a side preview closes.
+fn unsplit(app: &mut App) {
+    app.pinned = None;
+    app.div_drag = false;
+    let t = &mut app.tabs[app.active];
+    t.side = None;
+    t.focus = Pane::Shell;
+}
+
+/// Move the pinned pane (or the side preview) to the other side.
+fn swap_sides(app: &mut App) {
+    let flip = |s: Side| if s == Side::Left { Side::Right } else { Side::Left };
+    if app.pinned.is_some() {
+        app.pin_side = flip(app.pin_side);
+    } else if app.side != Side::Tab {
+        app.side = flip(app.side);
+        app.pin_side = app.side;
+    }
+}
+
+/// Remember the pinned-pane layout for this workspace.
+fn save_layout(app: &App, state: &mut agents::State, key: &str) {
+    let (kind, target) = match pinned_idx(app).map(|i| &app.tabs[i]) {
+        Some(t) if t.preview.as_ref().is_some_and(|p| p.kind != crate::preview::Kind::Diff) => ("preview", t.preview.as_ref().map(|p| p.path.clone()).unwrap_or_default()),
+        Some(t) if t.preview.is_some() => ("", String::new()),
+        Some(t) if t.agent.is_some() => ("agent", t.agent.clone().unwrap_or_default()),
+        Some(t) => ("shell", t.dir.clone()),
+        None => ("", String::new()),
+    };
+    let layout = agents::PaneLayout {
+        side: if app.pin_side == Side::Left { "left" } else { "right" }.into(),
+        pct: app.pct,
+        kind: kind.into(),
+        target,
+    };
+    if state.panes.get(key) != Some(&layout) {
+        state.panes.insert(key.to_string(), layout);
+        let _ = state.save();
+    }
+}
+
+/// Pin tab `id` on `side`. The tab that was active moves on to another tab (a new shell when
+/// there is none), so the pinned tab is shown beside it.
+async fn pin_tab(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, id: usize, side: Side) -> Result<(), String> {
+    let (c, r) = shell_size(app.tabs.len() + 1).map_err(|e| e.to_string())?;
+    if split_main(Rect::new(0, 0, c, r), side, app.pct).is_none() {
+        return Err(format!("window too narrow for two panes (needs {} columns)", crate::tab::SHELL_MIN + crate::tab::PREVIEW_MIN + 1));
+    }
+    let Some(pi) = app.tabs.iter().position(|t| t.id == id) else { return Err("that tab is gone".into()) };
+    if app.pinned != Some(id) && !app.tabs.iter().any(|t| t.id != id) {
+        let dir = if app.tabs[pi].dir.is_empty() { None } else { Some(app.tabs[pi].dir.clone()) };
+        open_tab_in(app, backend, tx, c, r, None, dir.as_deref()).await.map_err(|e| format!("could not open shell: {e}"))?;
+    }
+    for t in &mut app.tabs {
+        t.side = None;
+        t.focus = Pane::Shell;
+    }
+    app.pinned = Some(id);
+    app.pin_side = side;
+    let pi = app.tabs.iter().position(|t| t.id == id).unwrap_or(pi);
+    if app.active == pi {
+        // Next tab, else the one before.
+        let other = (pi + 1..app.tabs.len()).chain((0..pi).rev()).next().unwrap_or(0);
+        app.active = other;
+    }
+    app.last_main = app.tabs[app.active].id;
+    app.tabs[app.active].mark_seen();
+    resize_all(app).map_err(|e| e.to_string())
+}
+
+/// Pin the active tab.
+async fn pin_active(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, side: Side) -> Result<(), String> {
+    let id = app.tabs[app.active].id;
+    pin_tab(app, backend, tx, id, side).await
+}
+
+/// Index of the pinned tab.
+fn pinned_idx(app: &App) -> Option<usize> {
+    let id = app.pinned?;
+    app.tabs.iter().position(|t| t.id == id)
+}
+
+/// The tab in the other pane while a tab is pinned: the pinned tab beside the active one, or, when
+/// the pinned tab is active, the last other tab you were in. Whether it fits on screen is a
+/// separate question (`pin_split`).
+fn partner_idx(app: &App) -> Option<usize> {
+    let pi = pinned_idx(app)?;
+    if pi != app.active {
+        return Some(pi);
+    }
+    app.tabs.iter().position(|t| t.id == app.last_main && t.id != app.pinned.unwrap_or(usize::MAX))
+        .or_else(|| app.tabs.iter().position(|t| Some(t.id) != app.pinned))
+}
+
+/// Remember the other-than-pinned tab that has the keyboard, and mark the tabs on screen as seen.
+fn sync_pin(app: &mut App) {
+    let Some(pid) = app.pinned else { return };
+    let id = app.tabs[app.active].id;
+    if id != pid {
+        app.last_main = id;
+    }
+    if let Some(pi) = partner_idx(app) {
+        app.tabs[pi].mark_seen();
+    }
+}
+
+/// The two panes while a tab is pinned and the window has room: `shell` is the active tab's
+/// rectangle, `side` the other tab's.
+fn pin_split(app: &App, main: Rect) -> Option<Split> {
+    let pi = pinned_idx(app)?;
+    partner_idx(app)?;
+    split_pinned(main, app.pin_side, app.pct, pi == app.active)
+}
+
+/// The tabs on screen and the area each fills.
+fn displayed(app: &App, main: Rect) -> Vec<(usize, Rect)> {
+    match (pin_split(app, main), partner_idx(app)) {
+        (Some(sp), Some(pi)) => vec![(app.active, sp.shell), (pi, sp.side)],
+        _ => vec![(app.active, main)],
+    }
+}
+
+/// (label, active, state) per tab for the strip; the tab beside the active one counts as seen.
+fn strip_of(app: &App) -> Vec<(String, bool, crate::tab::TabState)> {
+    let shown = pin_split(app, main_area(app)).and_then(|_| partner_idx(app));
+    app.tabs.iter().enumerate()
+        .map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active || Some(i) == shown))).collect()
+}
+
+/// `main_rect` without a terminal size: only the proportions that matter for fitting panes.
+fn main_area(app: &App) -> Rect {
+    let (c, r) = shell_size(app.tabs.len()).unwrap_or((80, 24));
+    Rect::new(0, 0, c, r)
 }
 
 fn resize_all(app: &mut App) -> Result<()> {
     refresh_labels(app);
     let (c, r) = shell_size(app.tabs.len())?;
-    let split = split_main(Rect::new(0, 0, c, r), app.side, app.pct);
-    for t in &mut app.tabs {
+    let main = Rect::new(0, 0, c, r);
+    let split = split_main(main, app.side, app.pct);
+    let pin = pin_split(app, main);
+    let partner = partner_idx(app);
+    let active = app.active;
+    for (i, t) in app.tabs.iter_mut().enumerate() {
         // The shell is narrower while a side preview fits beside it; without room the pane hides.
-        let shell_c = match (&t.side, &split) {
-            (Some(_), Some(sp)) => sp.shell.width,
+        let shell_c = match (&pin, &t.side, &split) {
+            (Some(sp), _, _) if i == active => sp.shell.width,
+            (Some(sp), _, _) if Some(i) == partner => sp.side.width,
+            (None, Some(_), Some(sp)) => sp.shell.width,
             _ => c,
         };
         if t.side.is_some() && split.is_none() { t.focus = Pane::Shell; }
-        t.resize(shell_c, r);
+        if t.is_preview() || t.parser.screen().size() != (crate::tab::nz(r), crate::tab::nz(shell_c)) {
+            t.resize(shell_c, r);
+        }
     }
     Ok(())
 }
@@ -1729,6 +1986,9 @@ fn resize_all(app: &mut App) -> Result<()> {
 fn remove_tab(app: &mut App, id: usize) -> Result<bool> {
     let Some(i) = app.tabs.iter().position(|t| t.id == id) else { return Ok(app.tabs.is_empty()) };
     app.tabs.remove(i);
+    if app.pinned == Some(id) {
+        app.pinned = None;
+    }
     if app.tabs.is_empty() {
         return Ok(true);
     }
@@ -1736,6 +1996,7 @@ fn remove_tab(app: &mut App, id: usize) -> Result<bool> {
         app.active = app.active.saturating_sub(1).min(app.tabs.len() - 1);
     }
     app.tabs[app.active].mark_seen();
+    sync_pin(app);
     resize_all(app)?;
     Ok(false)
 }
@@ -1784,7 +2045,7 @@ enum Placement {
 /// Put `p` in the active shell tab's side pane when the setting and the window allow it.
 /// Otherwise hand it back, with whether the window was too narrow.
 fn attach_side(app: &mut App, p: Preview) -> Result<Result<(), (Preview, bool)>> {
-    if app.tabs[app.active].is_preview() || app.side == Side::Tab {
+    if app.tabs[app.active].is_preview() || app.side == Side::Tab || app.pinned.is_some() {
         return Ok(Err((p, false)));
     }
     let (c, r) = shell_size(app.tabs.len())?;
@@ -1876,8 +2137,24 @@ fn focused_slot(app: &mut App) -> &mut Option<Preview> {
     if t.side_focused() { &mut t.side } else { &mut t.preview }
 }
 
+/// The tab that fills a pane: the active tab, or beside it the pinned tab (or the other tab).
+fn pane_tab(app: &App, pane: Pane) -> &Tab {
+    if pane == Pane::Side && let Some(pi) = pin_partner(app) {
+        return &app.tabs[pi];
+    }
+    &app.tabs[app.active]
+}
+
+/// The tab in the other pane, while a pinned tab is in use.
+fn pin_partner(app: &App) -> Option<usize> {
+    app.pinned.and(partner_idx(app))
+}
+
 /// The preview shown in a pane of the active tab (a preview tab's own preview counts as `Shell`).
 fn pane_preview(app: &App, pane: Pane) -> Option<&Preview> {
+    if app.pinned.is_some() {
+        return pane_tab(app, pane).preview.as_ref();
+    }
     let t = &app.tabs[app.active];
     match pane {
         Pane::Side => t.side.as_ref(),
@@ -1886,10 +2163,11 @@ fn pane_preview(app: &App, pane: Pane) -> Option<&Preview> {
 }
 
 fn pane_preview_mut(app: &mut App, pane: Pane) -> Option<&mut Preview> {
-    let t = &mut app.tabs[app.active];
-    match pane {
-        Pane::Side => t.side.as_mut(),
-        Pane::Shell => t.preview.as_mut(),
+    let idx = if app.pinned.is_some() && pane == Pane::Side { pin_partner(app).unwrap_or(app.active) } else { app.active };
+    let t = &mut app.tabs[idx];
+    match (app.pinned.is_some(), pane) {
+        (false, Pane::Side) => t.side.as_mut(),
+        _ => t.preview.as_mut(),
     }
 }
 
@@ -1897,9 +2175,18 @@ fn inside(r: Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
-/// The pane rectangles of a tab with a side preview, when the window has room for both.
+/// The pane rectangles while two panes are showing (a side preview, or a pinned tab), when the
+/// window has room for both. `shell` is the active tab's, `side` the other one's.
 fn split_of(app: &App, tab: &Tab, main: Rect) -> Option<Split> {
+    if app.pinned.is_some() {
+        return pin_split(app, main);
+    }
     tab.side.as_ref().and_then(|_| split_main(main, app.side, app.pct))
+}
+
+/// The pane holding the pinned tab, when two panes show.
+fn pinned_rect(app: &App, sp: &Split) -> Rect {
+    if app.pinned.is_some() && pinned_idx(app) == Some(app.active) { sp.shell } else { sp.side }
 }
 
 /// The area a pane occupies in the active tab.
@@ -2013,6 +2300,8 @@ struct SelState {
 enum Intent {
     /// Click on the preview pane's ✕ button.
     ClosePreview,
+    /// Click on the ⇄ button: move the pane to the other side.
+    SwapSides,
     None,
     /// Ctrl/Alt+click (or right-click) on a path or URL.
     OpenLink(Link, Pane),
@@ -2085,7 +2374,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
         Mode::Scroll | Mode::OutFind(_) => pane_mouse(m, app, main, selecting, link_click, true),
         Mode::Shell => {
             if app.tabs.len() > 1 && m.row == 1 {
-                let strip: Vec<_> = app.tabs.iter().enumerate().map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
+                let strip = strip_of(app);
                 return match m.kind {
                     Kind::Down(mouse::Button::Left) => ui::tab_at(&strip, m.col).map_or(Intent::None, Intent::SwitchTab),
                     _ => Intent::None,
@@ -2111,8 +2400,12 @@ fn pane_mouse(m: &MouseEvent, app: &App, main: Rect, selecting: Option<Pane>, li
                 _ => {}
             }
         }
-        if matches!(m.kind, Kind::Down(Button::Left)) && sp.on_close(m.col, m.row) {
-            return Intent::ClosePreview;
+        if matches!(m.kind, Kind::Down(Button::Left)) {
+            match button_at(pinned_rect(app, sp), m.col, m.row) {
+                Some(Btn::Close) => return Intent::ClosePreview,
+                Some(Btn::Swap) => return Intent::SwapSides,
+                None => {}
+            }
         }
         if matches!(m.kind, Kind::Down(Button::Left)) && sp.on_divider(m.col, m.row) {
             return Intent::DividerDown;
@@ -2133,6 +2426,9 @@ fn pane_mouse(m: &MouseEvent, app: &App, main: Rect, selecting: Option<Pane>, li
         (Some(sp), Pane::Shell) => sp.shell,
         (None, _) => main,
     };
+    if app.pinned.is_some() && pane == Pane::Side {
+        return Intent::None; // a click there first moves the keyboard (handled before this)
+    }
     let sel = selecting.is_some();
     let link_or_select = || link_intent(m, app, area, pane, link_click).unwrap_or_else(|| select_intent(m, app, area, pane, sel));
     if pane_preview(app, pane).is_some() {
@@ -2197,7 +2493,7 @@ fn area_rows(app: &App, area: Rect, pane: Pane) -> (Vec<Vec<String>>, Vec<bool>)
             let wrapped = vec![false; rows.len()];
             (rows, wrapped)
         }
-        None => select::screen_rows(app.tabs[app.active].parser.screen()),
+        None => select::screen_rows(pane_tab(app, pane).parser.screen()),
     }
 }
 
@@ -2254,7 +2550,7 @@ fn link_intent(m: &MouseEvent, app: &App, area: Rect, pane: Pane, link_click: &s
 /// Where relative paths in the active tab's output point: a preview's own folder, else the
 /// shell's working directory.
 async fn link_cwd(app: &App, backend: &Backend, pane: Pane) -> Option<String> {
-    let tab = &app.tabs[app.active];
+    let tab = pane_tab(app, pane);
     if let Some(p) = pane_preview(app, pane) {
         return std::path::Path::new(&p.path).parent().filter(|_| p.path.starts_with('/')).map(|d| d.to_string_lossy().into_owned());
     }
@@ -2440,5 +2736,61 @@ fn open_url_hooked(u: &str) -> Result<(), String> {
     match std::env::var("WICLI_OPEN_LOG") {
         Ok(log) => append_log(&log, format!("url {u}\n")),
         Err(_) => opener::open_url(u),
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    fn app(n: usize) -> App {
+        let tabs = (0..n).map(|i| Tab::new(i, format!("shell {i}"), crate::workspace::ShellHandle::dummy(), 80, 24, 10)).collect();
+        App { tabs, active: 0, next_id: n, shell_count: n, scrollback: 10, quiet: Duration::from_secs(5), sessions: Default::default(), root: "/".into(), side: Side::Right, pct: 50, div_drag: false, pinned: None, pin_side: Side::Right, last_main: 0 }
+    }
+
+    #[test]
+    fn partner_is_the_pinned_tab_or_the_last_other_tab() {
+        let mut a = app(3);
+        assert_eq!(partner_idx(&a), None);
+        a.pinned = Some(2);
+        a.active = 0;
+        assert_eq!(partner_idx(&a), Some(2));
+        a.active = 2;
+        a.last_main = 1;
+        assert_eq!(partner_idx(&a), Some(1), "pinned is active: the other pane shows the last other tab");
+        a.last_main = 99;
+        assert_eq!(partner_idx(&a), Some(0), "a vanished tab falls back to the first other tab");
+        let mut one = app(1);
+        one.pinned = Some(0);
+        assert_eq!(partner_idx(&one), None, "a lone pinned tab has no pane beside it");
+    }
+
+    #[test]
+    fn pinned_pane_stays_on_its_side_whoever_is_active() {
+        let mut a = app(2);
+        a.pinned = Some(1);
+        let main = Rect::new(0, 0, 120, 26);
+        let beside = pin_split(&a, main).unwrap();
+        assert!(beside.side.x > beside.shell.x, "pinned right, active left");
+        assert_eq!(pinned_rect(&a, &beside), beside.side);
+        a.active = 1;
+        a.last_main = 0;
+        let pinned_active = pin_split(&a, main).unwrap();
+        assert_eq!(pinned_rect(&a, &pinned_active), pinned_active.shell);
+        assert_eq!(pinned_active.shell, beside.side, "same rectangle for the pinned tab");
+        assert!(pin_split(&a, Rect::new(0, 0, 90, 26)).is_none(), "narrow: one pane");
+    }
+
+    #[test]
+    fn swap_and_unsplit() {
+        let mut a = app(2);
+        a.pinned = Some(1);
+        swap_sides(&mut a);
+        assert_eq!(a.pin_side, Side::Left);
+        swap_sides(&mut a);
+        assert_eq!(a.pin_side, Side::Right);
+        unsplit(&mut a);
+        assert_eq!(a.pinned, None);
+        assert_eq!(a.tabs.len(), 2, "the pinned tab stays a tab");
     }
 }
