@@ -6,7 +6,9 @@ REMOTE = "--remote" in sys.argv
 HERE = os.path.dirname(os.path.abspath(__file__))
 WI = os.path.join(HERE, "..", "target/release/wi")
 MENU = b"\x00"
-BUDGET = dict(rss=50.0, idle=1.0, cpu=30.0, fps=30.0)
+# CPU while output floods in is judged per megabyte processed (agreed 2026-11-02): a % of one core
+# only measures how fast the output arrives, not how efficiently wi handles it.
+BUDGET = dict(rss=50.0, idle=1.0, cpu_ms_per_mb=120.0, fps=30.0)
 TOL = 1.2
 
 def ps(pid, field):
@@ -75,6 +77,7 @@ def scenario(remote):
     wall = time.time() - t0; cpu = cputime(r.pid) - c0
     res["ok"] = ok
     res["cpu"] = 100 * cpu / wall
+    res["cpu_ms_per_mb"] = cpu * 1000 / 100  # the flood is 100 MB
     res["peak_rss"] = max(peak[0], res["idle_rss"])
     res["fps"] = len(bursts) / wall
     res["wall"] = wall
@@ -98,7 +101,7 @@ for remote in ([False, True] if REMOTE else [False]):
         print(f"{tag}: WARNING 100 MB command did not finish within 180 s"); fail = True
     row(f"{tag} RSS, 10 tabs idle (max of 20 s)", res["idle_rss"], BUDGET["rss"], "MB")
     row(f"{tag} idle CPU, 10 tabs, 20 s", res["idle"], BUDGET["idle"], "%")
-    row(f"{tag} CPU during 100 MB output ({res['wall']:.1f} s wall)", res["cpu"], BUDGET["cpu"], "%")
+    row(f"{tag} CPU per MB of output (100 MB in {res['wall']:.1f} s, {res['cpu']:.0f}% of a core)", res["cpu_ms_per_mb"], BUDGET["cpu_ms_per_mb"], "ms/MB")
     row(f"{tag} peak RSS during 100 MB output", res["peak_rss"], BUDGET["rss"], "MB")
     row(f"{tag} redraw rate (approx: write bursts/s at pty)", res["fps"], BUDGET["fps"], "fps")
 w = max(len(r[0]) for r in rows)

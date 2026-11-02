@@ -13,7 +13,7 @@ script mentions it and the box answers on port 2222. Prints a summary and exits 
 
 ## Benchmarks
 `cargo build --release && python dev/bench.py <scratch-dir> [--remote]`
-Measures wi's own RSS and CPU (ps on the wi pid; child shells excluded) with 10 tabs idle for 20 s, and while
+Measures wi's own RSS and CPU (the flood is judged in CPU milliseconds per MB of output, budget 120) (ps on the wi pid; child shells excluded) with 10 tabs idle for 20 s, and while
 a tab prints 100 MB. Redraw rate is approximate (write bursts at the pty master). Prints measured vs budget,
 FAIL when over budget by more than 20%, and exits non-zero on FAIL.
 
