@@ -6,6 +6,7 @@ mod config;
 mod cwd;
 mod exec;
 mod input;
+mod keys;
 mod links;
 mod link;
 mod mouse;

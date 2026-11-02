@@ -32,6 +32,12 @@ pub struct Defaults {
     pub preview_side: String,
     /// Width of the side preview pane as a percentage of the window (clamped to 25..75).
     pub preview_width_pct: u16,
+    /// Ask the host terminal for enhanced key reporting (kitty protocol, modifyOtherKeys) and
+    /// translate it back to classic bytes: `auto` (default) or `off`.
+    pub key_protocol: String,
+    /// What Shift+Enter sends: `auto` (newline in agent tabs, Enter elsewhere), `newline`,
+    /// `esc-cr` or `enter`.
+    pub shift_enter: String,
 }
 
 impl Default for Defaults {
@@ -52,6 +58,8 @@ impl Default for Defaults {
             confirm_open: "always".into(),
             preview_side: "right".into(),
             preview_width_pct: 50,
+            key_protocol: "auto".into(),
+            shift_enter: "auto".into(),
         }
     }
 }
@@ -284,6 +292,7 @@ mod tests {
         let c: Config = toml::from_str("[[box]]\nname=\"a\"\nhost=\"h\"\nuser=\"u\"\n").unwrap();
         assert_eq!(c.boxes[0].port, 22);
         assert_eq!(c.defaults.prefix_key, "ctrl-space");
+        assert_eq!((c.defaults.key_protocol.as_str(), c.defaults.shift_enter.as_str()), ("auto", "auto"));
     }
 
     const SSH: &str = "# comment\nHost dev devbox\n  HostName 10.0.0.5\n  User fahad\n  Port 2200\n  IdentityFile ~/.ssh/id_dev\n\nHost jump\n  HostName j.example.com\n  ProxyJump bastion\n\nHost web-*\n  User www\n\nHost *\n  User fallback\n  Port 22\n  IdentityFile ~/.ssh/id_any\n";

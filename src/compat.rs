@@ -13,6 +13,8 @@ pub struct Compat {
     pub cwd: Option<String>,
     /// Latest window title set by the program (OSC 0/2), if any.
     pub title: Option<String>,
+    /// Kitty keyboard flags the program pushed (stack, newest last). Empty: protocol not in use.
+    kitty: Vec<u32>,
 }
 
 impl Compat {
@@ -34,6 +36,9 @@ impl Compat {
                     Csi::Incomplete => break,
                     Csi::Done { len, prefix, params, inter, fin } => {
                         let end = i + 2 + len;
+                        if fin == b'u' && inter.is_empty() {
+                            self.kitty_op(prefix, &params, &mut reply); // the parser ignores these
+                        }
                         if is_query(prefix, &params, &inter, fin) {
                             parser.process(&buf[done.min(end)..end]);
                             done = done.max(end);
@@ -57,6 +62,48 @@ impl Compat {
         }
         parser.process(&buf[done.min(buf.len())..]);
         reply
+    }
+
+    /// Flags currently in effect for the program (0: it does not use the protocol).
+    pub fn kitty_flags(&self) -> u32 {
+        self.kitty.last().copied().unwrap_or(0)
+    }
+
+    /// Track `CSI > flags u` (push), `CSI < n u` (pop), `CSI = flags ; mode u` (set) and answer
+    /// `CSI ? u` (query).
+    fn kitty_op(&mut self, prefix: Option<u8>, params: &[u8], reply: &mut Vec<u8>) {
+        let text = String::from_utf8_lossy(params);
+        let mut nums = text.split(';').map(|p| p.parse::<u32>().ok());
+        let first = nums.next().flatten();
+        match prefix {
+            Some(b'>') => {
+                if self.kitty.len() >= 16 {
+                    self.kitty.remove(0);
+                }
+                self.kitty.push(first.unwrap_or(0));
+            }
+            Some(b'<') => {
+                let n = (first.unwrap_or(1) as usize).max(1);
+                self.kitty.truncate(self.kitty.len().saturating_sub(n));
+            }
+            Some(b'=') => {
+                let mode = nums.next().flatten().unwrap_or(1);
+                let f = first.unwrap_or(0);
+                if self.kitty.is_empty() {
+                    self.kitty.push(0);
+                }
+                let top = self.kitty.last_mut().expect("pushed above");
+                *top = match mode {
+                    2 => *top | f,
+                    3 => *top & !f,
+                    _ => f,
+                };
+            }
+            Some(b'?') if params.is_empty() => {
+                reply.extend_from_slice(format!("\x1b[?{}u", self.kitty_flags()).as_bytes());
+            }
+            _ => {}
+        }
     }
 
     fn set_title(&mut self, body: &[u8]) {
@@ -196,6 +243,46 @@ mod tests {
         let (out, _, p) = run(&[b"hi\x1b[", b"6", b"n!"]);
         assert_eq!(out, b"\x1b[1;3R");
         assert!(p.screen().contents().starts_with("hi!"));
+    }
+    #[test]
+    fn kitty_push_pop_stack() {
+        let (_, c, _) = run(&[b"\x1b[>1u"]);
+        assert_eq!(c.kitty_flags(), 1);
+        let (_, c, _) = run(&[b"\x1b[>1u\x1b[>5u"]);
+        assert_eq!(c.kitty_flags(), 5);
+        let (_, c, _) = run(&[b"\x1b[>1u\x1b[>5u\x1b[<u"]);
+        assert_eq!(c.kitty_flags(), 1);
+        let (_, c, _) = run(&[b"\x1b[>1u\x1b[>5u\x1b[<2u"]);
+        assert_eq!(c.kitty_flags(), 0);
+        let (_, c, _) = run(&[b"\x1b[<3u"]);
+        assert_eq!(c.kitty_flags(), 0);
+        let (_, c, _) = run(&[b"\x1b[>u"]);
+        assert_eq!(c.kitty_flags(), 0);
+    }
+    #[test]
+    fn kitty_set_modes() {
+        assert_eq!(run(&[b"\x1b[=3;1u"]).1.kitty_flags(), 3);
+        assert_eq!(run(&[b"\x1b[=3u\x1b[=4;2u"]).1.kitty_flags(), 7);
+        assert_eq!(run(&[b"\x1b[=7u\x1b[=2;3u"]).1.kitty_flags(), 5);
+        assert_eq!(run(&[b"\x1b[>1u\x1b[=8;2u"]).1.kitty_flags(), 9);
+    }
+    #[test]
+    fn kitty_stack_is_bounded() {
+        let mut s = Vec::new();
+        for _ in 0..40 { s.extend_from_slice(b"\x1b[>1u"); }
+        let (_, c, _) = run(&[&s]);
+        assert_eq!(c.kitty.len(), 16);
+    }
+    #[test]
+    fn kitty_query_answers_current_flags() {
+        assert_eq!(run(&[b"\x1b[?u"]).0, b"\x1b[?0u");
+        assert_eq!(run(&[b"\x1b[>3u\x1b[?u"]).0, b"\x1b[?3u");
+        assert_eq!(run(&[b"\x1b[>3u\x1b[<u\x1b[?u"]).0, b"\x1b[?0u");
+    }
+    #[test]
+    fn kitty_split_across_chunks() {
+        let (_, c, _) = run(&[b"\x1b[>", b"1", b"u"]);
+        assert_eq!(c.kitty_flags(), 1);
     }
     #[test]
     fn decrqm() {

@@ -187,6 +187,15 @@ impl Tab {
         self.title = tab_title(self.number, self.agent.as_deref(), &self.dir, self.show_dir, self.compat.title.as_deref());
     }
 
+    /// The program in this tab is an AI agent: started as one, or its title says claude/codex.
+    pub fn is_agent(&self) -> bool {
+        self.agent.is_some()
+            || self.compat.title.as_deref().is_some_and(|t| {
+                let t = t.to_ascii_lowercase();
+                t.contains("claude") || t.contains("codex")
+            })
+    }
+
     /// Feed shell output: updates the screen, answers terminal queries, tracks the title.
     pub fn output(&mut self, data: &[u8]) {
         let reply = self.compat.feed(&mut self.parser, data);
@@ -404,5 +413,21 @@ mod tests {
         t.quiet = true;
         t.note_background_output();
         assert_eq!(t.state(false), TabState::Streaming);
+    }
+
+    #[test]
+    fn agent_detection_by_start_or_title() {
+        let mut t = Tab::new(0, "shell 1".into(), handle(), 80, 24, 100);
+        assert!(!t.is_agent());
+        t.output(b"\x1b]0;vim x\x07");
+        assert!(!t.is_agent());
+        t.output(b"\x1b]0;\xe2\x9c\xb3 Claude Code\x07");
+        assert!(t.is_agent());
+        t.output(b"\x1b]0;codex\x07");
+        assert!(t.is_agent());
+        t.output(b"\x1b]0;bash\x07");
+        assert!(!t.is_agent());
+        t.agent = Some("claude".into());
+        assert!(t.is_agent());
     }
 }

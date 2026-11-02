@@ -4,6 +4,7 @@ use anyhow::Result;
 use crossterm::event::EnableBracketedPaste;
 use crossterm::{execute, terminal};
 use std::io::stdout;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct TermGuard;
 impl TermGuard {
@@ -24,6 +25,18 @@ impl Drop for TermGuard {
     }
 }
 
+static KEYS_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Ask the host terminal for enhanced key reports: kitty keyboard flags (disambiguate) and
+/// xterm modifyOtherKeys level 2. Terminals that know neither ignore the requests.
+pub fn enable_key_protocol() {
+    use std::io::Write;
+    KEYS_REQUESTED.store(true, Ordering::SeqCst);
+    let mut out = stdout();
+    let _ = out.write_all(KEYS_ON);
+    let _ = out.flush();
+}
+
 /// Put the host terminal back: mouse/paste modes off, cursor shown, alternate
 /// screen left, raw mode off. Safe to call any number of times, from a panic
 /// hook or a signal path as well as from `TermGuard::drop`.
@@ -32,11 +45,17 @@ pub fn restore_terminal() {
     let mut out = stdout();
     // Disable mouse reporting (1000/1002/1003/1006) and bracketed paste (2004),
     // show the cursor, then leave the alternate screen.
+    if KEYS_REQUESTED.swap(false, Ordering::SeqCst) {
+        // Pop what enable_key_protocol pushed while still on the alternate screen.
+        let _ = out.write_all(KEYS_OFF);
+    }
     let _ = out.write_all(RESTORE_SEQ);
     let _ = out.flush();
     let _ = terminal::disable_raw_mode();
 }
 
+const KEYS_ON: &[u8] = b"\x1b[>1u\x1b[>4;2m";
+const KEYS_OFF: &[u8] = b"\x1b[<u\x1b[>4;0m";
 const RESTORE_SEQ: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l";
 
 /// Panic hook: restore the terminal before the message is printed, exit 1.
@@ -66,6 +85,12 @@ mod tests {
     fn restore_is_idempotent() {
         restore_terminal();
         restore_terminal();
+    }
+
+    #[test]
+    fn key_protocol_sequences() {
+        assert_eq!(KEYS_ON, b"\x1b[>1u\x1b[>4;2m");
+        assert_eq!(KEYS_OFF, b"\x1b[<u\x1b[>4;0m");
     }
 
     #[test]

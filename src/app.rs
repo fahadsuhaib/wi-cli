@@ -1,6 +1,7 @@
 //! Event loop: input, resize, shell output from every tab, coalesced redraw.
 
 use crate::input::{InEv, PasteFilter};
+use crate::keys::{EnterMap, KeyDecoder};
 use crate::scroll::{self, ScrollKey};
 use crate::config::{Config, parse_prefix_key, prefix_label};
 use crate::tab::{Pane, Side, Split, Tab, pct_for_col, split_main};
@@ -129,6 +130,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     }
 
     let _guard = TermGuard::enter(cfg.defaults.mouse)?;
+    let keys_on = !cfg.defaults.key_protocol.trim().eq_ignore_ascii_case("off");
+    if keys_on { crate::term::enable_key_protocol(); }
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut stdin = tokio::io::stdin();
     let mut winch = signal(SignalKind::window_change())?;
@@ -154,6 +157,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut fetching: Option<Fetching<'_>> = None;
     let mut filter = PasteFilter::default();
     let mut flush_at: Option<Instant> = None;
+    let mut decoder = KeyDecoder::default();
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
     let mut pasting: Option<(bool, bool)> = None;
     let mut message: Option<String> = None;
@@ -294,15 +298,47 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     None => Some(stdin.read(&mut buf).await),
                 }
             } => {
-                let in_events = match read {
-                    None => filter.flush(),
+                let timed_out = read.is_none();
+                let mut in_events = match read {
+                    None => {
+                        // Held-back bytes were real keys: an unfinished report first, then a lone Esc.
+                        let mut v = Vec::new();
+                        let held = decoder.flush();
+                        if !held.is_empty() { v.push(InEv::Keys(held)); }
+                        v.extend(filter.flush());
+                        v
+                    }
                     Some(r) => {
                         let n = r?;
                         if n == 0 { return finish(&app, backend).await; }
                         filter.feed(&buf[..n])
                     }
                 };
-                flush_at = filter.has_pending().then(|| Instant::now() + Duration::from_millis(50));
+                if keys_on && !timed_out {
+                    // Enhanced key reports become the legacy bytes everything below parses. Paste
+                    // text is never decoded. Shift+Enter depends on what the active tab runs.
+                    let t = &app.tabs[app.active];
+                    let to_shell = matches!(mode, Mode::Shell) && !t.is_preview() && !t.side_focused();
+                    let map = if to_shell { EnterMap::for_tab(&cfg.defaults.shift_enter, t.is_agent()) } else { EnterMap::PLAIN };
+                    let pass = (to_shell && t.compat.kitty_flags() != 0).then_some(menu_key);
+                    let mut decoded = Vec::with_capacity(in_events.len());
+                    for ev in in_events {
+                        match ev {
+                            InEv::Keys(b) => {
+                                let d = decoder.decode(&b, &map, pass);
+                                if !d.is_empty() { decoded.push(InEv::Keys(d)); }
+                            }
+                            InEv::PasteStart => {
+                                let held = decoder.flush();
+                                if !held.is_empty() { decoded.push(InEv::Keys(held)); }
+                                decoded.push(InEv::PasteStart);
+                            }
+                            other => decoded.push(other),
+                        }
+                    }
+                    in_events = decoded;
+                }
+                flush_at = (filter.has_pending() || decoder.has_pending()).then(|| Instant::now() + Duration::from_millis(50));
                 for ev in in_events {
                   let bytes = match ev {
                     InEv::Keys(b) => {
@@ -796,11 +832,14 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         backend.end_all_sessions().await;
                                         return finish(&app, backend).await;
                                     }
-                                    Action::Info => message = Some(if remote {
-                                        format!("{name} · {detail} · connected · {} tab(s)", app.tabs.len())
-                                    } else {
-                                        format!("local workspace · {detail} · {} tab(s)", app.tabs.len())
-                                    }),
+                                    Action::Info => {
+                                        let keys = if decoder.enhanced { "keys: enhanced keyboard active" } else { "keys: standard (Shift+Enter looks like Enter to wi)" };
+                                        message = Some(if remote {
+                                            format!("{keys} · {name} · {detail} · connected · {} tab(s)", app.tabs.len())
+                                        } else {
+                                            format!("{keys} · local workspace · {detail} · {} tab(s)", app.tabs.len())
+                                        });
+                                    }
                                     Action::OpenLink => {
                                         let main = main_rect(&app)?;
                                         let mut ls: Vec<(Link, Pane, Rect)> = Vec::new();
