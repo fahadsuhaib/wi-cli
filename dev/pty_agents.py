@@ -54,6 +54,7 @@ r.quit()
 # 2. second time: starts without asking
 r = Run(proj)
 check("starts remembered agent without asking", "start an agent" not in r.text() and "FAKE_CLAUDE_STARTED" in r.text())
+check("says what it ran and how to change it", "started: echo FAKE_CLAUDE_STARTED" in r.text() and "then A, changes it" in r.text())
 r.quit()
 
 # 3. edit the command: change and remember it

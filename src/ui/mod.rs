@@ -49,7 +49,7 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Close tab", key: 'c', action: Action::CloseTab, remote_only: false },
     MenuItem { label: "Reconnect", key: 'r', action: Action::Reconnect, remote_only: true },
     MenuItem { label: "Scroll", key: 's', action: Action::Scroll, remote_only: false },
-    MenuItem { label: "Start an agent", key: 'a', action: Action::Agent, remote_only: false },
+    MenuItem { label: "Start / change agent", key: 'a', action: Action::Agent, remote_only: false },
     MenuItem { label: "Mouse on/off", key: 'm', action: Action::Mouse, remote_only: false },
     MenuItem { label: "Info", key: 'i', action: Action::Info, remote_only: false },
     MenuItem { label: "Quit", key: 'q', action: Action::Quit, remote_only: false },
@@ -334,7 +334,7 @@ fn draw_ask(f: &mut Frame, main: Rect, a: &Ask) {
     let h = (a.agents.len() as u16 + 5).min(main.height);
     let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
     let dim = Style::default().add_modifier(Modifier::DIM);
-    let mut lines = vec![Line::from(Span::styled(" Agent workspace detected. Start one here?", dim)), Line::from("")];
+    let mut lines = vec![Line::from(Span::styled(" Start an agent here. Your choice is remembered for this workspace.", dim)), Line::from("")];
     for (i, ag) in a.agents.iter().enumerate() {
         let sel = i == a.sel;
         let base = if sel { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };

@@ -119,9 +119,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
         Decision::Nothing => {}
         Decision::Start(ag) => {
             let cmd = agents::command_for(ag, cfg, &agent_state, &wkey);
-            if let Err(e) = start_agent(&mut app, backend, &events_tx, ag, &cmd).await {
-                message = Some(format!("could not start {}: {e}", ag.key()));
-            }
+            message = Some(match start_agent(&mut app, backend, &events_tx, ag, &cmd).await {
+                Ok(()) => format!("started: {cmd}   ({menu_label}, then A, changes it)"),
+                Err(e) => format!("could not start {}: {e}", ag.key()),
+            });
         }
         Decision::Ask(list) => mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &wkey)),
     }
