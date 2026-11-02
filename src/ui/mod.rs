@@ -1,5 +1,7 @@
 //! Rendering: header, status bar, shell screen, menu overlay.
 
+pub mod search;
+
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -35,6 +37,12 @@ pub enum Action {
     SwitchPane,
     /// Close the side preview and give the shell the full width back.
     ClosePreview,
+    /// Search text in the files under the active folder (shows the last results first).
+    SearchText,
+    /// Fuzzy find a file by name.
+    FindFile,
+    /// Find text in the active shell tab's scrollback.
+    FindOutput,
     Info,
     Quit,
     EndAndQuit,
@@ -89,6 +97,9 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Scroll", key: 's', action: Action::Scroll, remote_only: false },
     MenuItem { label: "Switch pane", key: 'w', action: Action::SwitchPane, remote_only: false },
     MenuItem { label: "Close preview", key: 'v', action: Action::ClosePreview, remote_only: false },
+    MenuItem { label: "Search in files", key: 'l', action: Action::SearchText, remote_only: false },
+    MenuItem { label: "Find file", key: 'k', action: Action::FindFile, remote_only: false },
+    MenuItem { label: "Find in output", key: 'u', action: Action::FindOutput, remote_only: false },
     MenuItem { label: "Start / change agent", key: 'a', action: Action::Agent, remote_only: false },
     MenuItem { label: "Mouse on/off", key: 'm', action: Action::Mouse, remote_only: false },
     MenuItem { label: "Theme dark / light", key: 'y', action: Action::Theme, remote_only: false },
@@ -276,6 +287,13 @@ pub struct View<'a> {
     pub menu: Option<usize>,
     /// Some((offset, total)) while scrolling back through history.
     pub scroll: Option<(usize, usize)>,
+    /// A search screen (prompt, results, file finder, find prompt) covering the main area.
+    pub search: Option<search::SearchView<'a>>,
+    /// Matches to light up in the shell pane (row, start col, end col, is current) and the
+    /// status text that goes with find-in-output.
+    pub find_hl: &'a [(u16, u16, u16, bool)],
+    /// Replaces the status bar text when set.
+    pub status: Option<&'a str>,
 }
 
 fn vt_color(c: vt100::Color) -> Color {
@@ -396,6 +414,17 @@ fn draw_frame(f: &mut Frame, v: &View) {
         f.render_widget(ScreenWidget(v.screen, sel_in(crate::tab::Pane::Shell)), main);
     }
 
+    for &(row, s, e, cur) in v.find_hl {
+        let buf = f.buffer_mut();
+        for c in s..e {
+            let (x, y) = (shell_area.x + c, shell_area.y + row);
+            if x < shell_area.x + shell_area.width && y < shell_area.y + shell_area.height {
+                let st = if cur { Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Black).bg(Color::Yellow) };
+                buf[(x, y)].set_style(st);
+            }
+        }
+    }
+
     if let Some((hints, typed)) = v.hints {
         let buf = f.buffer_mut();
         let area = buf.area;
@@ -423,11 +452,19 @@ fn draw_frame(f: &mut Frame, v: &View) {
     let preview_hint = active_prev.map(|p| {
         let total = p.display_len();
         let last = (p.top + preview_rows).min(total);
-        let files = if p.kind == crate::preview::Kind::Diff { "N/P file · " } else { "" };
+        let diff = p.kind == crate::preview::Kind::Diff;
+        let files = match (diff, p.find.is_some()) {
+            (true, true) => "N/P file · Enter/B match · ",
+            (true, false) => "N/P file · ",
+            (false, true) => "N/B match · ",
+            (false, false) => "",
+        };
         let back = if split.is_some() { "Esc to the shell" } else { "Esc back" };
-        format!(" arrows scroll · {files}W wrap · R reload · {back}   lines {}-{} of {}", (p.top + 1).min(total), last, total)
+        format!(" arrows scroll · {files}F find · W wrap · R reload · {back}   lines {}-{} of {}", (p.top + 1).min(total), last, total)
     });
+    let status_text = v.status.map(|t| format!(" {t}"));
     let hint = match (v.menu, v.message) {
+        _ if status_text.is_some() => status_text.unwrap_or_default(),
         _ if v.confirm.is_some_and(|c| c.yes.is_empty()) => " Esc cancels the download".to_string(),
         _ if v.confirm.is_some() => " Y or Enter to continue · N or Esc to cancel".to_string(),
         _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
@@ -450,6 +487,10 @@ fn draw_frame(f: &mut Frame, v: &View) {
     }
     if let Some(a) = v.ask {
         draw_ask(f, main, a);
+        return;
+    }
+    if let Some(sv) = &v.search {
+        search::draw(f, main, sv);
         return;
     }
     if let Some(pr) = v.prompt {

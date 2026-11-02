@@ -3400,6 +3400,7 @@ dependencies = [
  "portable-pty",
  "pulldown-cmark",
  "ratatui",
+ "regex",
  "russh",
  "russh-sftp",
  "serde",

@@ -16,6 +16,11 @@ pub enum PvKey {
     NextFile,
     PrevFile,
     Back,
+    /// Open the find prompt.
+    Find,
+    /// Step to the next / previous find match.
+    MatchNext,
+    MatchPrev,
 }
 
 pub fn parse(buf: &[u8]) -> Vec<PvKey> {
@@ -54,6 +59,9 @@ pub fn parse(buf: &[u8]) -> Vec<PvKey> {
                 b'r' | b'R' => keys.push(PvKey::Reload),
                 b'n' | b'N' => keys.push(PvKey::NextFile),
                 b'p' | b'P' => keys.push(PvKey::PrevFile),
+                b'f' | b'F' => keys.push(PvKey::Find),
+                b'b' | b'B' => keys.push(PvKey::MatchPrev),
+                b'\r' | b'\n' => keys.push(PvKey::MatchNext),
                 _ => {}
             }
         }
@@ -72,6 +80,7 @@ mod tests {
         assert_eq!(parse(b"\x1b[5~\x1b[6~\x1b[H\x1b[F"), vec![PvKey::PageUp, PvKey::PageDown, PvKey::Top, PvKey::Bottom]);
         assert_eq!(parse(b"wR"), vec![PvKey::Wrap, PvKey::Reload]);
         assert_eq!(parse(b"nP"), vec![PvKey::NextFile, PvKey::PrevFile]);
+        assert_eq!(parse(b"fB\r"), vec![PvKey::Find, PvKey::MatchPrev, PvKey::MatchNext]);
     }
 
     #[test]

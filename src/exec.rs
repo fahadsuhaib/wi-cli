@@ -18,6 +18,8 @@ pub struct Output {
     pub stderr: String,
     pub code: i32,
     pub truncated: bool,
+    /// The deadline passed: `stdout` holds what arrived before it.
+    pub timed_out: bool,
 }
 
 /// Quote one argument for a POSIX shell (single quotes; embedded quotes become `'\''`).
@@ -96,7 +98,7 @@ impl Backend {
                 let status = child.wait().await?;
                 // Anything still holding stderr open (a grandchild) must not hold us up.
                 let e = tokio::time::timeout(Duration::from_millis(200), err_task).await.ok().and_then(|r| r.ok()).unwrap_or_default();
-                Ok(Output { stdout: bytes, stderr: String::from_utf8_lossy(&e).trim().to_string(), code: status.code().unwrap_or(-1), truncated })
+                Ok(Output { stdout: bytes, stderr: String::from_utf8_lossy(&e).trim().to_string(), code: status.code().unwrap_or(-1), truncated, timed_out: false })
             }
             Backend::Remote(s) => {
                 let mut ch = s.handle.channel_open_session().await?;
@@ -123,9 +125,91 @@ impl Backend {
                     let _ = ch.close().await;
                     code = 0;
                 }
-                Ok(Output { stdout, stderr: String::from_utf8_lossy(&stderr).trim().to_string(), code, truncated })
+                Ok(Output { stdout, stderr: String::from_utf8_lossy(&stderr).trim().to_string(), code, truncated, timed_out: false })
             }
         }
+    }
+
+    /// Run a shell script in folder `dir` (on the box, or locally) for a search or a file list.
+    /// Output is capped at `cap` bytes and the call at `timeout`; unlike `run`, what arrived
+    /// before the cap or the deadline is returned (flagged), so a slow search still shows hits.
+    /// `script` is trusted shell text; build it with `sq` for anything the user typed.
+    pub async fn run_script(&self, dir: &str, script: &str, cap: usize, timeout: Duration) -> Result<Output> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let (mut code, mut truncated, mut timed_out) = (-1, false, false);
+        match self {
+            Backend::Local(_) => {
+                let mut child = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(script)
+                    .current_dir(dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .context("cannot run sh")?;
+                let mut out = child.stdout.take().context("no stdout")?;
+                let mut err = child.stderr.take().context("no stderr")?;
+                let err_task = tokio::spawn(async move { read_capped(&mut err, ERR_CAP).await.map(|r| r.0).unwrap_or_default() });
+                let mut buf = [0u8; 16384];
+                loop {
+                    match tokio::time::timeout_at(deadline, out.read(&mut buf)).await {
+                        Err(_) => {
+                            timed_out = true;
+                            break;
+                        }
+                        Ok(Err(e)) => return Err(e.into()),
+                        Ok(Ok(0)) => break,
+                        Ok(Ok(n)) => {
+                            if push_capped(&mut stdout, &buf[..n], cap) {
+                                truncated = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if truncated || timed_out {
+                    let _ = child.kill().await;
+                }
+                drop(out);
+                if let Ok(Ok(st)) = tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
+                    code = st.code().unwrap_or(-1);
+                }
+                let e = tokio::time::timeout(Duration::from_millis(200), err_task).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+                stderr = e;
+            }
+            Backend::Remote(s) => {
+                let mut ch = s.handle.channel_open_session().await?;
+                ch.exec(true, format!("cd {} && {script}", sq(dir))).await?;
+                loop {
+                    match tokio::time::timeout_at(deadline, ch.wait()).await {
+                        Err(_) => {
+                            timed_out = true;
+                            break;
+                        }
+                        Ok(None) => break,
+                        Ok(Some(ChannelMsg::Data { data })) => {
+                            if push_capped(&mut stdout, &data, cap) {
+                                truncated = true;
+                                break;
+                            }
+                        }
+                        Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                            push_capped(&mut stderr, &data, ERR_CAP);
+                        }
+                        Ok(Some(ChannelMsg::ExitStatus { exit_status })) => code = exit_status as i32,
+                        Ok(Some(ChannelMsg::Close)) => break,
+                        Ok(Some(_)) => {}
+                    }
+                }
+                if truncated || timed_out {
+                    let _ = ch.close().await;
+                }
+            }
+        }
+        Ok(Output { stdout, stderr: String::from_utf8_lossy(&stderr).trim().to_string(), code, truncated, timed_out })
     }
 
     async fn git(&self, dir: &str, args: &[&str]) -> Result<Output> {
@@ -245,6 +329,21 @@ mod tests {
         assert_eq!(b, b"abcdef");
         assert!(push_capped(&mut b, b"z", 6));
         assert_eq!(b.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn run_script_runs_in_the_folder_and_keeps_partial_output() {
+        let b = Backend::Local(std::env::temp_dir());
+        let dir = std::env::temp_dir();
+        let d = dir.to_string_lossy().into_owned();
+        let o = b.run_script(&d, "pwd; echo 'a b' | cat; exit 4", 1000, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(o.code, 4);
+        assert!(String::from_utf8_lossy(&o.stdout).contains("a b"));
+        let o = b.run_script(&d, "echo early; sleep 5; echo late", 1000, Duration::from_millis(400)).await.unwrap();
+        assert!(o.timed_out);
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "early\n");
+        let o = b.run_script(&d, "yes | head -c 100000", 500, Duration::from_secs(5)).await.unwrap();
+        assert!(o.truncated && o.stdout.len() == 500);
     }
 
     #[tokio::test]
