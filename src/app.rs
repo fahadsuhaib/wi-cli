@@ -1,5 +1,7 @@
 //! Event loop: input, resize, shell output from every tab, coalesced redraw.
 
+use crate::input::{InEv, PasteFilter};
+use crate::scroll::{self, ScrollKey};
 use crate::config::{Config, parse_prefix_key, prefix_label};
 use crate::tab::Tab;
 use crate::ui::{self, Action, View, menu_items};
@@ -17,6 +19,8 @@ use tokio::time::sleep_until;
 enum Mode {
     Shell,
     Menu(usize),
+    /// Browsing scrollback of the active tab.
+    Scroll,
 }
 
 enum Key {
@@ -79,6 +83,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut winch = signal(SignalKind::window_change())?;
     let mut buf = [0u8; 8192];
     let mut mode = Mode::Shell;
+    let mut filter = PasteFilter::default();
+    let mut flush_at: Option<Instant> = None;
+    // While a paste is in flight: (forward it to the shell, wrap it in markers).
+    let mut pasting: Option<(bool, bool)> = None;
     let mut message: Option<String> = None;
     let (name, detail) = ws.title();
     let remote = ws.is_remote();
@@ -91,7 +99,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
         let due = last_draw + frame;
         tokio::select! {
             _ = sleep_until(due.into()), if dirty => {
-                let menu = match mode { Mode::Menu(i) => Some(i), Mode::Shell => None };
+                let menu = match mode { Mode::Menu(i) => Some(i), _ => None };
+                let scroll = match mode {
+                    Mode::Scroll => { let s = app.tabs[app.active].parser.screen(); Some((s.scrollback(), s.scrollback_len())) }
+                    _ => None,
+                };
                 let strip: Vec<(String, bool, bool)> = app.tabs.iter().enumerate()
                     .map(|(i, t)| (t.title.clone(), i == app.active, t.activity)).collect();
                 let view = View {
@@ -103,18 +115,68 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     tabs: &strip,
                     message: message.as_deref(),
                     menu,
+                    scroll,
                 };
                 term.draw(|f| ui::draw(f, &view))?;
                 last_draw = Instant::now();
                 dirty = false;
             }
-            n = stdin.read(&mut buf) => {
-                let n = n?;
-                if n == 0 { return finish(&app, backend).await; }
-                let mut chunk = &buf[..n];
+            read = async {
+                // A held-back Esc is a real key if nothing follows it soon.
+                match flush_at {
+                    Some(d) => tokio::select! {
+                        r = stdin.read(&mut buf) => Some(r),
+                        _ = sleep_until(d.into()) => None,
+                    },
+                    None => Some(stdin.read(&mut buf).await),
+                }
+            } => {
+                let in_events = match read {
+                    None => filter.flush(),
+                    Some(r) => {
+                        let n = r?;
+                        if n == 0 { return finish(&app, backend).await; }
+                        filter.feed(&buf[..n])
+                    }
+                };
+                flush_at = filter.has_pending().then(|| Instant::now() + Duration::from_millis(50));
+                for ev in in_events {
+                  let bytes = match ev {
+                    InEv::Keys(b) => b,
+                    InEv::PasteStart => {
+                        let fwd = matches!(mode, Mode::Shell);
+                        let wrap = app.tabs[app.active].parser.screen().bracketed_paste();
+                        if fwd && wrap { app.tabs[app.active].handle.write(b"\x1b[200~".to_vec()); }
+                        pasting = Some((fwd, wrap));
+                        continue;
+                    }
+                    InEv::PasteData(b) => {
+                        if matches!(pasting, Some((true, _))) { app.tabs[app.active].handle.write(b); }
+                        continue;
+                    }
+                    InEv::PasteEnd => {
+                        if pasting == Some((true, true)) { app.tabs[app.active].handle.write(b"\x1b[201~".to_vec()); }
+                        pasting = None;
+                        continue;
+                    }
+                  };
+                let mut chunk = &bytes[..];
                 // Keys typed right after the menu key in the same read still belong to the menu.
                 while !chunk.is_empty() {
                     match mode {
+                        Mode::Scroll => {
+                            let t = &mut app.tabs[app.active];
+                            let page = (t.parser.screen().size().0.get() as usize).saturating_sub(1);
+                            let mut off = t.parser.screen().scrollback();
+                            let max = t.parser.screen().scrollback_len();
+                            for k in scroll::parse(chunk, menu_key) {
+                                if k == ScrollKey::Exit { mode = Mode::Shell; off = 0; break; }
+                                off = scroll::apply(off, max, page, k);
+                            }
+                            t.parser.screen_mut().set_scrollback(off);
+                            dirty = true;
+                            chunk = &[];
+                        }
                         Mode::Shell => {
                             if let Some(pos) = chunk.iter().position(|&x| x == menu_key) {
                                 if pos > 0 { app.tabs[app.active].handle.write(chunk[..pos].to_vec()); }
@@ -159,6 +221,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     } else {
                                         format!("local workspace · {detail} · {} tab(s)", app.tabs.len())
                                     }),
+                                    Action::Scroll => mode = Mode::Scroll,
                                     Action::NewTab => {
                                         let (c, r) = shell_size(app.tabs.len() + 1)?;
                                         let had_strip = app.tabs.len() > 1;
@@ -187,6 +250,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         }
                     }
                 }
+                }
             }
             _ = winch.recv() => {
                 resize_all(&mut app)?;
@@ -201,6 +265,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     }
                 }
                 Some(Event::Exited(id)) => {
+                    if app.tabs.get(app.active).is_some_and(|t| t.id == id) && matches!(mode, Mode::Scroll) { mode = Mode::Shell; }
                     if remove_tab(&mut app, id)? { return finish(&app, backend).await; }
                     dirty = true;
                 }

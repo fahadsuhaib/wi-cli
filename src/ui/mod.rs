@@ -19,6 +19,7 @@ pub enum Action {
     PrevTab,
     CloseTab,
     Reconnect,
+    Scroll,
     Info,
     Quit,
 }
@@ -45,6 +46,7 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Previous tab", key: 'b', action: Action::PrevTab, remote_only: false },
     MenuItem { label: "Close tab", key: 'c', action: Action::CloseTab, remote_only: false },
     MenuItem { label: "Reconnect", key: 'r', action: Action::Reconnect, remote_only: true },
+    MenuItem { label: "Scroll", key: 's', action: Action::Scroll, remote_only: false },
     MenuItem { label: "Info", key: 'i', action: Action::Info, remote_only: false },
     MenuItem { label: "Quit", key: 'q', action: Action::Quit, remote_only: false },
 ];
@@ -60,6 +62,8 @@ pub struct View<'a> {
     pub message: Option<&'a str>,
     /// Some(selected index) when the menu is open.
     pub menu: Option<usize>,
+    /// Some((offset, total)) while scrolling back through history.
+    pub scroll: Option<(usize, usize)>,
 }
 
 fn vt_color(c: vt100::Color) -> Color {
@@ -136,7 +140,9 @@ pub fn draw(f: &mut Frame, v: &View) {
 
     f.render_widget(ScreenWidget(v.screen), main);
 
+    let scroll_hint = v.scroll.map(|(n, m)| format!(" scroll: arrows, PgUp/PgDn, Home/End   Esc exits   scrollback {n}/{m}"));
     let hint = match (v.menu, v.message) {
+        _ if scroll_hint.is_some() => scroll_hint.unwrap_or_default(),
         (Some(_), _) => " arrows + Enter, a letter, or a tab number   Esc closes".to_string(),
         (None, Some(m)) => format!(" {m}"),
         (None, None) => format!(" {}  menu", v.menu_label),
@@ -145,7 +151,7 @@ pub fn draw(f: &mut Frame, v: &View) {
 
     match v.menu {
         Some(sel) => draw_menu(f, main, sel, v.remote),
-        None if !v.screen.hide_cursor() => {
+        None if !v.screen.hide_cursor() && v.scroll.is_none() => {
             let (r, c) = v.screen.cursor_position();
             if r < main.height && c < main.width {
                 f.set_cursor_position((main.x + c, main.y + r));

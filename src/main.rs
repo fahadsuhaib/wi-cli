@@ -1,7 +1,9 @@
 mod app;
 mod config;
+mod input;
 mod link;
 mod preview;
+mod scroll;
 mod session;
 mod tab;
 mod term;

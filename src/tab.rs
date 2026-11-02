@@ -2,6 +2,9 @@
 
 use crate::workspace::ShellHandle;
 
+/// Lines of history kept per tab.
+pub const SCROLLBACK_LINES: usize = 10_000;
+
 pub struct Tab {
     pub id: usize,
     pub title: String,
@@ -17,7 +20,7 @@ pub fn nz(n: u16) -> std::num::NonZeroU16 {
 
 impl Tab {
     pub fn new(id: usize, title: String, handle: ShellHandle, cols: u16, rows: u16) -> Self {
-        Self { id, title, parser: vt100::Parser::new(nz(rows), nz(cols), 0), handle, activity: false }
+        Self { id, title, parser: vt100::Parser::new(nz(rows), nz(cols), SCROLLBACK_LINES), handle, activity: false }
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
