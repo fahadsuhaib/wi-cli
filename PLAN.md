@@ -28,6 +28,15 @@ Done when: Claude Code runs in one tab, `cargo test` in another, you can scroll 
 1. Agent workspaces: wi recognises Claude Code workspaces (`CLAUDE.md`, `.claude/`) and Codex workspaces (`AGENTS.md`, `.codex/`), local or remote, with a bounded check at startup. Config `[agents.<name>]` holds the user's usual command and flags (for example `claude --continue`). Behaviour per workspace: `ask` (default, first time), `always`, `never`; the answer and the chosen command are remembered in a small state file, changeable from the menu. Starting an agent opens it in its own shell tab.
 2. Mouse: click a tab, menu entry or completion; wheel scrolls previews and shell scrollback; events are passed to apps that ask for the mouse (vim, htop). Mouse capture blocks native text selection, so add a menu toggle (Mouse on/off) and document Shift-drag; config `mouse = true|false`.
 
+## Phase A3: Unified look on macOS and Linux (added 2026-11-02)
+Goal: the same experience in any terminal app. Fonts belong to the terminal, so wi unifies what it controls.
+1. Theme system: fixed RGB palette with 256-colour fallback; `theme = dark | light | terminal`; all colours in ui, previews, diffs go through the theme.
+2. Remap ANSI 0-15 inside shell tabs to the theme palette (config switch, default on) so agent output looks the same everywhere.
+3. Glyph set with ASCII fallback for non-UTF-8 / console terminals.
+4. `wi --print-terminal-config <app>` for Terminal.app, iTerm2, Ghostty, Kitty, WezTerm, Alacritty, GNOME Terminal (font, size, Option-as-Meta); short docs on Ctrl-Space capture.
+5. Linux verified in a container: build, unit tests and pty suite (dev/linux/).
+Out of scope for now: a standalone GUI window with a bundled font.
+
 ## Phase B: Remote M1 completion
 1. tmux-backed detach/reattach (`tmux new -A -s wicli`, tmux status/keys disabled so it is invisible; plain session if tmux missing).
 2. ssh-agent auth, passphrase-protected keys, `~/.ssh/config` host aliases (HostName, User, Port, IdentityFile).
