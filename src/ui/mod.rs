@@ -147,6 +147,8 @@ pub fn prompt_rect(main: Rect, p: &Prompt) -> Rect {
 }
 
 pub struct View<'a> {
+    /// Selected cells, relative to the shell area (or the preview body).
+    pub selection: Option<crate::select::Sel>,
     pub ask: Option<&'a Ask>,
     pub preview: Option<&'a crate::preview::Preview>,
     pub prompt: Option<&'a Prompt>,
@@ -172,11 +174,12 @@ fn vt_color(c: vt100::Color) -> Color {
     }
 }
 
-struct ScreenWidget<'a>(&'a vt100::Screen);
+struct ScreenWidget<'a>(&'a vt100::Screen, Option<crate::select::Sel>);
 
 impl Widget for ScreenWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let screen = self.0;
+        let sel = self.1;
         for row in 0..area.height {
             for col in 0..area.width {
                 let Some(cell) = screen.cell(row, col) else { continue };
@@ -188,7 +191,8 @@ impl Widget for ScreenWidget<'_> {
                 if cell.bold() { m |= Modifier::BOLD; }
                 if cell.italic() { m |= Modifier::ITALIC; }
                 if cell.underline() { m |= Modifier::UNDERLINED; }
-                if cell.inverse() { m |= Modifier::REVERSED; }
+                let selected = sel.is_some_and(|s| crate::select::contains(s, row, col));
+                if cell.inverse() != selected { m |= Modifier::REVERSED; }
                 style = style.add_modifier(m);
                 let out = &mut buf[(area.x + col, area.y + row)];
                 let text = cell.contents();
@@ -250,9 +254,15 @@ pub fn draw(f: &mut Frame, v: &View) {
             f.render_widget(Paragraph::new(format!(" {text}")).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)), b);
         }
         preview_rows = body.height as usize;
-        f.render_widget(Paragraph::new(p.visible(body.height as usize, body.width as usize)), body);
+        let mut vis = p.visible(body.height as usize, body.width as usize);
+        if let Some(sel) = v.selection {
+            for (r, line) in vis.iter_mut().enumerate() {
+                *line = crate::preview::highlight_line(line, r as u16, sel);
+            }
+        }
+        f.render_widget(Paragraph::new(vis), body);
     } else {
-        f.render_widget(ScreenWidget(v.screen), main);
+        f.render_widget(ScreenWidget(v.screen, v.selection), main);
     }
 
     let scroll_hint = v.scroll.map(|(n, m)| format!(" scroll: arrows, PgUp/PgDn, Home/End   Esc exits   scrollback {n}/{m}"));

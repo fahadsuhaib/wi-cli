@@ -6,7 +6,8 @@ use crate::config::{Config, parse_prefix_key, prefix_label};
 use crate::tab::Tab;
 use crate::files::complete;
 use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
-use crate::mouse::{self, Kind, MouseEvent, Piece};
+use crate::mouse::{self, Button, Kind, MouseEvent, Piece};
+use crate::select::{self, Pos};
 use crate::agents::{self, Agent, Decision};
 use crate::ui::{self, Action, Ask, MenuItem, Prompt, View, menu_items_for};
 use ratatui::layout::Rect;
@@ -109,6 +110,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut agent_state = agents::State::load();
     let wkey = agents::workspace_key(ws);
     let mut splitter = mouse::Splitter::default();
+    let mut sel: Option<SelState> = None;
+    let mut last_click: Option<(Instant, Pos, u8)> = None;
     let mut filter = PasteFilter::default();
     let mut flush_at: Option<Instant> = None;
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
@@ -188,7 +191,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 }
                 let strip: Vec<(String, bool, crate::tab::TabState)> = app.tabs.iter().enumerate()
                     .map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
+                let selection = sel.as_ref().filter(|s| s.tab == app.tabs[app.active].id).map(|s| select::normalize(s.anchor, s.end));
                 let view = View {
+                    selection,
                     preview: app.tabs[app.active].preview.as_ref(),
                     prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
                     ask: match &mode { Mode::Ask(x) => Some(x), _ => None },
@@ -233,17 +238,62 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         let mut out: Vec<u8> = Vec::new();
                         for piece in splitter.split(&b) {
                             let m = match piece {
-                                Piece::Bytes(x) => { out.extend(x); continue; }
+                                Piece::Bytes(x) => { if sel.take().is_some() { dirty = true; } out.extend(x); continue; }
                                 Piece::Mouse(m) => m,
                             };
                             let (tc, tr) = crossterm::terminal::size()?;
                             let strip_h = u16::from(app.tabs.len() > 1);
                             let main = Rect::new(0, 1 + strip_h, tc, tr.saturating_sub(2 + strip_h).max(1));
-                            match mouse_intent(&m, &mode, &app, &items, main) {
+                            match mouse_intent(&m, &mode, &app, &items, main, sel.as_ref().is_some_and(|s| s.dragging)) {
                                 Intent::None => {}
                                 Intent::Synth(bytes) => out.extend(bytes),
-                                Intent::SwitchTab(i) => { switch_to(&mut app, i); dirty = true; }
+                                Intent::SwitchTab(i) => { sel = None; switch_to(&mut app, i); dirty = true; }
+                                Intent::Select(phase, pos) => {
+                                    let tab_id = app.tabs[app.active].id;
+                                    let (rows, wrapped) = area_rows(&app, main);
+                                    let width = rows.first().map_or(0, |r| r.len()) as u16;
+                                    match phase {
+                                        Phase::Down => {
+                                            let now = Instant::now();
+                                            let clicks = match last_click {
+                                                Some((t, p, n)) if p == pos && now.duration_since(t) < Duration::from_millis(400) => n % 3 + 1,
+                                                _ => 1,
+                                            };
+                                            last_click = Some((now, pos, clicks));
+                                            let (a, b) = match clicks {
+                                                2 => {
+                                                    let (c1, c2) = rows.get(pos.0 as usize).map_or((pos.1, pos.1), |r| select::word_bounds(r, pos.1 as usize));
+                                                    ((pos.0, c1), (pos.0, c2))
+                                                }
+                                                3 => ((pos.0, 0), (pos.0, width.saturating_sub(1))),
+                                                _ => (pos, pos),
+                                            };
+                                            sel = Some(SelState { tab: tab_id, anchor: a, end: b, dragging: true, clicks });
+                                        }
+                                        Phase::Drag => {
+                                            if let Some(s) = sel.as_mut().filter(|s| s.dragging && s.clicks == 1) { s.end = pos; }
+                                        }
+                                        Phase::Up => {
+                                            if let Some(s) = sel.as_mut().filter(|s| s.dragging) {
+                                                s.dragging = false;
+                                                if s.clicks == 1 { s.end = pos; }
+                                                let range = select::normalize(s.anchor, s.end);
+                                                if s.clicks >= 2 || range.0 != range.1 {
+                                                    let text = select::join_rows(range, &rows, &wrapped, 0);
+                                                    message = Some(match crate::clip::copy(&text) {
+                                                        Ok(how) => format!("copied {} characters to the {how}", text.chars().count()),
+                                                        Err(e) => format!("could not copy: {e}"),
+                                                    });
+                                                } else {
+                                                    sel = None;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    dirty = true;
+                                }
                                 Intent::PreviewScroll(n) => {
+                                    sel = None;
                                     let page = main.height as usize;
                                     if let Some(p) = app.tabs[app.active].preview.as_mut() {
                                         let key = if n < 0 { PvKey::Up } else { PvKey::Down };
@@ -252,10 +302,18 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     dirty = true;
                                 }
                                 Intent::EnterScroll => {
+                                    sel = None;
                                     mode = Mode::Scroll;
-                                    out.extend(b"\x1b[A".repeat(3));
+                                    scroll_by(&mut app, 3);
+                                    dirty = true;
                                 }
-                                Intent::ExitScroll => { mode = Mode::Shell; dirty = true; }
+                                Intent::ScrollWheel(n) => {
+                                    sel = None;
+                                    // Applied right away, so a burst of wheel events in one read sees the
+                                    // position left by the previous one.
+                                    if scroll_by(&mut app, n) && n < 0 { mode = Mode::Shell; }
+                                    dirty = true;
+                                }
                                 Intent::PickCandidate(i) => {
                                     if let Mode::Prompt(pr) = &mut mode
                                         && let Some(c) = pr.shown.get(i).cloned()
@@ -740,19 +798,48 @@ fn go_back(app: &mut App) {
     switch_to(app, target);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Down,
+    Drag,
+    Up,
+}
+
+/// Move the active tab's scrollback view by `n` lines (positive = further back). Returns true
+/// when the view is at the live bottom afterwards.
+fn scroll_by(app: &mut App, n: isize) -> bool {
+    let t = &mut app.tabs[app.active];
+    let (cur, max) = (t.parser.screen().scrollback(), t.parser.screen().scrollback_len());
+    let new = if n >= 0 { (cur + n as usize).min(max) } else { cur.saturating_sub(n.unsigned_abs()) };
+    t.parser.screen_mut().set_scrollback(new);
+    new == 0
+}
+
+/// An in-progress or finished text selection.
+struct SelState {
+    tab: usize,
+    anchor: Pos,
+    end: Pos,
+    dragging: bool,
+    /// 1 = drag, 2 = word, 3 = line
+    clicks: u8,
+}
+
 enum Intent {
     None,
+    Select(Phase, Pos),
     /// Handle as if these bytes had been typed (or, in a shell tab, send them to the app).
     Synth(Vec<u8>),
     SwitchTab(usize),
     PreviewScroll(isize),
+    /// Mouse wheel in scrollback: positive looks further back, negative returns toward the live view.
+    ScrollWheel(isize),
     EnterScroll,
-    ExitScroll,
     PickCandidate(usize),
 }
 
 /// What a mouse event means right now. Pure so it can be tested without a terminal.
-fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], main: Rect) -> Intent {
+fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], main: Rect, selecting: bool) -> Intent {
     let inside = |r: Rect| m.col >= r.x && m.col < r.x + r.width && m.row >= r.y && m.row < r.y + r.height;
     let up3 = || Intent::Synth(b"\x1b[A".repeat(3));
     let down3 = || Intent::Synth(b"\x1b[B".repeat(3));
@@ -783,10 +870,9 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
             }
         }
         Mode::Scroll => match m.kind {
-            Kind::WheelUp => up3(),
-            Kind::WheelDown if app.tabs[app.active].parser.screen().scrollback() == 0 => Intent::ExitScroll,
-            Kind::WheelDown => down3(),
-            _ => Intent::None,
+            Kind::WheelUp => Intent::ScrollWheel(3),
+            Kind::WheelDown => Intent::ScrollWheel(-3),
+            _ => select_intent(m, app, main, selecting),
         },
         Mode::Shell => {
             if app.tabs.len() > 1 && m.row == 1 {
@@ -804,7 +890,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 return match m.kind {
                     Kind::WheelUp => Intent::PreviewScroll(-3),
                     Kind::WheelDown => Intent::PreviewScroll(3),
-                    _ => Intent::None,
+                    _ => select_intent(m, app, main, selecting),
                 };
             }
             let scr = tab.parser.screen();
@@ -824,10 +910,41 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                     Kind::WheelUp if scr.alternate_screen() => up3(),
                     Kind::WheelDown if scr.alternate_screen() => down3(),
                     Kind::WheelUp => Intent::EnterScroll,
-                    _ => Intent::None,
+                    _ => select_intent(m, app, main, selecting),
                 },
             }
         }
+    }
+}
+
+/// Left button down/drag/up selects text. Drag and release keep working outside the area so a
+/// selection can be dragged past the edge.
+fn select_intent(m: &MouseEvent, app: &App, main: Rect, selecting: bool) -> Intent {
+    let banner = app.tabs[app.active].preview.as_ref().is_some_and(|p| p.banner.is_some()) && main.height > 1;
+    let origin = main.y + u16::from(banner);
+    let height = main.height - u16::from(banner);
+    let clamped = (m.row.saturating_sub(origin).min(height.saturating_sub(1)), m.col.min(main.width.saturating_sub(1)));
+    let in_area = m.row >= origin && m.row < origin + height && m.col < main.width;
+    match m.kind {
+        Kind::Down(Button::Left) if in_area => Intent::Select(Phase::Down, clamped),
+        Kind::Drag(Button::Left) if selecting => Intent::Select(Phase::Drag, clamped),
+        Kind::Up(Button::Left) if selecting => Intent::Select(Phase::Up, clamped),
+        _ => Intent::None,
+    }
+}
+
+/// Cell text of every row in the area being selected in, and which rows soft-wrap.
+fn area_rows(app: &App, main: Rect) -> (Vec<Vec<String>>, Vec<bool>) {
+    let tab = &app.tabs[app.active];
+    match tab.preview.as_ref() {
+        Some(p) => {
+            let banner = p.banner.is_some() && main.height > 1;
+            let h = (main.height - u16::from(banner)) as usize;
+            let rows: Vec<Vec<String>> = p.visible(h, main.width as usize).iter().map(|l| crate::preview::row_cells(l, p.gutter, main.width as usize)).collect();
+            let wrapped = vec![false; rows.len()];
+            (rows, wrapped)
+        }
+        None => select::screen_rows(tab.parser.screen()),
     }
 }
 

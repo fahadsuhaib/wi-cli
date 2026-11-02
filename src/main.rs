@@ -1,5 +1,6 @@
 mod agents;
 mod app;
+mod clip;
 mod compat;
 mod config;
 mod exec;
@@ -8,6 +9,7 @@ mod link;
 mod mouse;
 mod preview;
 mod scroll;
+mod select;
 mod files;
 mod session;
 mod tab;

@@ -262,6 +262,44 @@ fn stub_lines(path: &str, total: u64, kind: &str) -> Vec<Line<'static>> {
     ]
 }
 
+/// One string per screen column for a rendered line: the character, or a zero-width marker for
+/// the right half of a wide character. The first `gutter` columns (line numbers) are marked so
+/// they are never copied.
+pub fn row_cells(line: &Line<'_>, gutter: usize, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (i, (c, _)) in cells(line).into_iter().enumerate() {
+        if i < gutter {
+            out.push("\u{0}".to_string());
+            continue;
+        }
+        out.push(c.to_string());
+        if c.width().unwrap_or(1) == 2 {
+            out.push("\u{0}".to_string());
+        }
+    }
+    out.resize(width.max(out.len()), String::new());
+    out
+}
+
+/// Draw a selection on one rendered row by flipping reverse video on the selected columns.
+pub fn highlight_line(line: &Line<'_>, row: u16, sel: crate::select::Sel) -> Line<'static> {
+    let mut col = 0u16;
+    let flipped: Vec<Cell> = cells(line)
+        .into_iter()
+        .map(|(c, st)| {
+            let here = col;
+            col += c.width().unwrap_or(0) as u16;
+            if crate::select::contains(sel, row, here) {
+                let st = if st.add_modifier.contains(Modifier::REVERSED) { st.remove_modifier(Modifier::REVERSED) } else { st.add_modifier(Modifier::REVERSED) };
+                (c, st)
+            } else {
+                (c, st)
+            }
+        })
+        .collect();
+    from_cells(&flipped)
+}
+
 type Cell = (char, Style);
 
 fn cells(line: &Line<'_>) -> Vec<Cell> {
