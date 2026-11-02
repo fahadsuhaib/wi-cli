@@ -197,6 +197,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     preview: app.tabs[app.active].preview.as_ref(),
                     prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
                     ask: match &mode { Mode::Ask(x) => Some(x), _ => None },
+                    confirm: None,
+                    hints: None,
                     screen: app.tabs[app.active].parser.screen(),
                     name: &name,
                     detail: &detail,

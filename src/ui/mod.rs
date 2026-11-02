@@ -14,7 +14,8 @@ pub enum Action {
     Preview,
     Git,
     Download,
-    OpenLocal,
+    /// Label every file path and URL on screen so one keypress opens it.
+    OpenLink,
     NewTab,
     NextTab,
     PrevTab,
@@ -66,7 +67,7 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Preview a file", key: 'p', action: Action::Preview, remote_only: false },
     MenuItem { label: "Git changes", key: 'g', action: Action::Git, remote_only: false },
     MenuItem { label: "Download", key: 'd', action: Action::Download, remote_only: true },
-    MenuItem { label: "Open local copy", key: 'o', action: Action::OpenLocal, remote_only: false },
+    MenuItem { label: "Open path on screen", key: 'o', action: Action::OpenLink, remote_only: false },
     MenuItem { label: "New shell tab", key: 'n', action: Action::NewTab, remote_only: false },
     MenuItem { label: "Next tab", key: 't', action: Action::NextTab, remote_only: false },
     MenuItem { label: "Previous tab", key: 'b', action: Action::PrevTab, remote_only: false },
@@ -146,7 +147,58 @@ pub fn prompt_rect(main: Rect, p: &Prompt) -> Rect {
     Rect::new(main.x, main.y + main.height - h, main.width, h)
 }
 
+/// A yes/no question shown before anything is opened or downloaded.
+#[derive(Clone)]
+pub struct Confirm {
+    pub title: String,
+    pub lines: Vec<String>,
+    /// What "yes" does, e.g. "Open".
+    pub yes: String,
+}
+
+/// A label drawn over a link on screen (position relative to the whole terminal screen).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hint {
+    pub label: String,
+    pub row: u16,
+    pub col: u16,
+    pub width: u16,
+}
+
+/// Make text safe to show in a dialog: control characters and the bidirectional overrides that
+/// can make a name read differently from what it is are replaced.
+pub fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' => '·',
+            c if c.is_control() => '·',
+            c => c,
+        })
+        .collect()
+}
+
+/// Short labels for `n` links: single letters from the home row first, then pairs.
+pub fn hint_labels(n: usize) -> Vec<String> {
+    const KEYS: &str = "asdfghjklqwertyuiopzxcvbnm";
+    let keys: Vec<char> = KEYS.chars().collect();
+    if n <= keys.len() {
+        return keys.iter().take(n).map(|c| c.to_string()).collect();
+    }
+    let mut out = Vec::with_capacity(n);
+    'outer: for a in &keys {
+        for b in &keys {
+            out.push(format!("{a}{b}"));
+            if out.len() == n {
+                break 'outer;
+            }
+        }
+    }
+    out
+}
+
 pub struct View<'a> {
+    pub confirm: Option<&'a Confirm>,
+    pub hints: Option<(&'a [Hint], &'a str)>,
     /// Selected cells, relative to the shell area (or the preview body).
     pub selection: Option<crate::select::Sel>,
     pub ask: Option<&'a Ask>,
@@ -265,6 +317,29 @@ pub fn draw(f: &mut Frame, v: &View) {
         f.render_widget(ScreenWidget(v.screen, v.selection), main);
     }
 
+    if let Some((hints, typed)) = v.hints {
+        let buf = f.buffer_mut();
+        let area = buf.area;
+        for h in hints.iter().filter(|h| h.label.starts_with(typed)) {
+            for i in 0..h.width {
+                let (x, y) = (h.col + i, h.row);
+                if x < area.width && y < area.height {
+                    let cell = &mut buf[(x, y)];
+                    let st = cell.style().add_modifier(Modifier::UNDERLINED);
+                    cell.set_style(st);
+                }
+            }
+            for (i, ch) in h.label.chars().enumerate() {
+                let (x, y) = (h.col + i as u16, h.row);
+                if x < area.width && y < area.height {
+                    let cell = &mut buf[(x, y)];
+                    cell.set_char(ch);
+                    cell.set_style(Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD));
+                }
+            }
+        }
+    }
+
     let scroll_hint = v.scroll.map(|(n, m)| format!(" scroll: arrows, PgUp/PgDn, Home/End   Esc exits   scrollback {n}/{m}"));
     let preview_hint = v.preview.map(|p| {
         let total = p.display_len();
@@ -273,6 +348,8 @@ pub fn draw(f: &mut Frame, v: &View) {
         format!(" arrows scroll · {files}W wrap · R reload · Esc back   lines {}-{} of {}", (p.top + 1).min(total), last, total)
     });
     let hint = match (v.menu, v.message) {
+        _ if v.confirm.is_some() => " Y or Enter to continue · N or Esc to cancel".to_string(),
+        _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
         _ if v.ask.is_some() => " Enter starts · E edits the command · N not now · X never here".to_string(),
         _ if v.prompt.is_some() => " Tab completes · Enter opens · Esc cancels".to_string(),
         _ if scroll_hint.is_some() => scroll_hint.unwrap_or_default(),
@@ -283,6 +360,10 @@ pub fn draw(f: &mut Frame, v: &View) {
     };
     f.render_widget(Paragraph::new(hint).style(bar), status);
 
+    if let Some(c) = v.confirm {
+        draw_confirm(f, main, c);
+        return;
+    }
     if let Some(a) = v.ask {
         draw_ask(f, main, a);
         return;
@@ -388,4 +469,50 @@ fn draw_ask(f: &mut Frame, main: Rect, a: &Ask) {
     lines.push(Line::from(Span::styled(hint, dim)));
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" start an agent ")), area);
+}
+
+fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {
+    let w = 78.min(main.width);
+    let h = (c.lines.len() as u16 + 5).min(main.height);
+    let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for l in &c.lines {
+        lines.push(Line::from(format!(" {}", sanitize(l))));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!(" {} ", c.yes), Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(" Cancel ", Style::default().add_modifier(Modifier::REVERSED)),
+        Span::styled("   Y / Enter  ·  N / Esc", dim),
+    ]));
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(" {} ", sanitize(&c.title)))), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_removes_control_and_bidi_tricks() {
+        assert_eq!(sanitize("a\x1b[31mb\n"), "a·[31mb·");
+        assert_eq!(sanitize("evil\u{202E}gpj.exe"), "evil·gpj.exe");
+        assert_eq!(sanitize("日本語 ok"), "日本語 ok");
+    }
+
+    #[test]
+    fn hint_labels_are_unique_and_prefix_free() {
+        for n in [1, 5, 26, 27, 100, 600] {
+            let l = hint_labels(n);
+            assert_eq!(l.len(), n);
+            let set: std::collections::HashSet<_> = l.iter().collect();
+            assert_eq!(set.len(), n);
+            if n > 26 {
+                assert!(l.iter().all(|x| x.chars().count() == 2), "pairs only, so no label is a prefix of another");
+            }
+        }
+        assert_eq!(hint_labels(3), vec!["a", "s", "d"]);
+    }
 }
