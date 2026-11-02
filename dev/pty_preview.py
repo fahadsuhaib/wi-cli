@@ -114,7 +114,7 @@ check(f"500 MB CSV opens in under 1 s ({dt:.2f}s)", ok and dt < 1.0)
 check("csv banner says 200 of ~N rows", re.search(r"200 of ~[\d,]+ rows", text()) is not None)
 os.write(fd, b"\x1b"); pump(0.3)
 
-os.write(fd, MENU + b"q"); pump(1.5)
+os.write(fd, MENU + (b"e" if mode == "remote" else b"q")); pump(1.5)  # remote: End sessions and quit, so no tmux session leaks into the next test
 p, _ = os.waitpid(pid, os.WNOHANG)
 check("quit exits", p != 0)
 sys.exit(1 if fails else 0)

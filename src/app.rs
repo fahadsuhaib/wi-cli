@@ -8,7 +8,7 @@ use crate::files::complete;
 use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
 use crate::mouse::{self, Kind, MouseEvent, Piece};
 use crate::agents::{self, Agent, Decision};
-use crate::ui::{self, Action, Ask, MenuItem, Prompt, View, menu_items};
+use crate::ui::{self, Action, Ask, MenuItem, Prompt, View, menu_items_for};
 use ratatui::layout::Rect;
 use crate::workspace::{Backend, Event, Workspace, spawn_shell};
 use anyhow::{Result, bail};
@@ -72,6 +72,8 @@ struct App {
     shell_count: usize,
     scrollback: usize,
     quiet: Duration,
+    /// tmux session behind each shell tab (by tab id), on remote boxes with tmux.
+    sessions: std::collections::HashMap<usize, String>,
 }
 
 pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> {
@@ -83,8 +85,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
 
     let (events_tx, mut events) = mpsc::channel::<Event>(8);
     let (cols, rows) = shell_size(1)?;
-    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)) };
-    open_tab(&mut app, backend, &events_tx, cols, rows).await?;
+    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)), sessions: Default::default() };
+    // Reattach to sessions left running on the box; otherwise start one fresh shell.
+    let restored = backend.restored_sessions();
+    let (cols, rows) = if restored.len() > 1 { shell_size(restored.len())? } else { (cols, rows) };
+    for name in &restored {
+        open_tab_in(&mut app, backend, &events_tx, cols, rows, Some(name)).await?;
+    }
+    if app.tabs.is_empty() {
+        open_tab(&mut app, backend, &events_tx, cols, rows).await?;
+    }
 
     let _guard = TermGuard::enter(cfg.defaults.mouse)?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
@@ -104,9 +114,15 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
     let mut pasting: Option<(bool, bool)> = None;
     let mut message: Option<String> = None;
+    if ws.is_remote() && !backend.has_tmux() {
+        message = Some("no tmux on this box (or use_tmux = false): plain shells, quitting ends them".into());
+    } else if !restored.is_empty() {
+        message = Some(format!("reattached {} running session(s)", restored.len()));
+    }
     let (name, detail) = ws.title();
     let remote = ws.is_remote();
-    let items = menu_items(remote);
+    let items = menu_items_for(remote, backend.has_tmux());
+    ui::set_tmux_menu(backend.has_tmux());
     let opts = Opts { csv_rows: cfg.defaults.csv_rows };
     let read_cap = cfg.defaults.preview_read_kb as usize * 1024;
     let frame = Duration::from_secs_f64(1.0 / fps.clamp(1, 120) as f64);
@@ -484,6 +500,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 mode = Mode::Shell;
                                 match a {
                                     Action::Quit => return finish(&app, backend).await,
+                                    Action::EndAndQuit => {
+                                        backend.end_all_sessions().await;
+                                        return finish(&app, backend).await;
+                                    }
                                     Action::Info => message = Some(if remote {
                                         format!("{name} · {detail} · connected · {} tab(s)", app.tabs.len())
                                     } else {
@@ -519,6 +539,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     Action::PrevTab => { let n = (app.active + app.tabs.len() - 1) % app.tabs.len(); switch_to(&mut app, n); }
                                     Action::CloseTab => {
                                         let id = app.tabs[app.active].id;
+                                        if let Some(name) = app.sessions.get(&id) { backend.end_session(name).await; }
                                         app.tabs[app.active].close();
                                         if remove_tab(&mut app, id)? { return finish(&app, backend).await; }
                                     }
@@ -565,8 +586,14 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
 }
 
 async fn open_tab(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, cols: u16, rows: u16) -> Result<()> {
-    let shell = backend.open_shell(cols, rows).await?;
+    open_tab_in(app, backend, tx, cols, rows, None).await
+}
+
+/// Open a shell tab; `attach` names an existing tmux session to reattach.
+async fn open_tab_in(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, cols: u16, rows: u16, attach: Option<&str>) -> Result<()> {
+    let (shell, session) = backend.open_session_shell(cols, rows, attach).await?;
     let id = app.next_id;
+    if let Some(s) = session { app.sessions.insert(id, s); }
     app.next_id += 1;
     app.shell_count += 1;
     let handle = spawn_shell(id, shell, tx.clone());

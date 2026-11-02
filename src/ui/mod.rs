@@ -24,6 +24,7 @@ pub enum Action {
     Scroll,
     Info,
     Quit,
+    EndAndQuit,
 }
 
 pub struct MenuItem {
@@ -37,6 +38,27 @@ pub struct MenuItem {
 /// Menu entries that apply to this kind of workspace.
 pub fn menu_items(remote: bool) -> Vec<&'static MenuItem> {
     MENU.iter().filter(|m| remote || !m.remote_only).collect()
+}
+
+/// On a remote box with tmux, "Quit" only detaches: the shells keep running there.
+pub const DETACH_ITEM: MenuItem = MenuItem { label: "Detach (keep sessions)", key: 'q', action: Action::Quit, remote_only: true };
+pub const END_ITEM: MenuItem = MenuItem { label: "End sessions and quit", key: 'e', action: Action::EndAndQuit, remote_only: true };
+
+static TMUX_MENU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tell the menu that shells live in tmux (set once after connecting).
+pub fn set_tmux_menu(on: bool) {
+    TMUX_MENU.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Menu entries for a workspace, with the Quit entry replaced by Detach / End for tmux boxes.
+pub fn menu_items_for(remote: bool, tmux: bool) -> Vec<&'static MenuItem> {
+    let mut items = menu_items(remote);
+    if tmux && let Some(i) = items.iter().position(|m| m.action == Action::Quit) {
+        items[i] = &DETACH_ITEM;
+        items.insert(i + 1, &END_ITEM);
+    }
+    items
 }
 
 pub const MENU: &[MenuItem] = &[
@@ -270,7 +292,7 @@ pub fn draw(f: &mut Frame, v: &View) {
 }
 
 fn draw_menu(f: &mut Frame, main: Rect, selected: usize, remote: bool) {
-    let items = menu_items(remote);
+    let items = menu_items_for(remote, TMUX_MENU.load(std::sync::atomic::Ordering::Relaxed));
     let area = menu_rect(main, items.len());
     let lines: Vec<Line> = items
         .iter()

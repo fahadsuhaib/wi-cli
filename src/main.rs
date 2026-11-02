@@ -40,10 +40,12 @@ async fn real_main() -> Result<()> {
         Some(arg) => {
             if let Some(b) = cfg.find_box(&arg) {
                 workspace::Workspace::Remote(b.clone())
+            } else if let Some(b) = config::Config::ssh_config_box(&arg)? {
+                workspace::Workspace::Remote(b)
             } else if std::path::Path::new(&arg).is_dir() {
                 workspace::Workspace::Local(std::fs::canonicalize(&arg)?)
             } else {
-                bail!("'{arg}' is neither a box in {} nor a directory", config::config_path().display());
+                bail!("'{arg}' is not a box in {}, a Host in {}, or a directory", config::config_path().display(), config::ssh_config_path().display());
             }
         }
     };

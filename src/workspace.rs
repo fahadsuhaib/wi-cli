@@ -51,10 +51,42 @@ pub enum Backend {
 }
 
 impl Backend {
-    pub async fn open_shell(&self, cols: u16, rows: u16) -> Result<Shell> {
+    /// Open a shell; on a remote box with tmux it runs in a tmux session, returned by name.
+    /// `attach` reattaches an existing session, otherwise a fresh name is picked.
+    pub async fn open_session_shell(&self, cols: u16, rows: u16, attach: Option<&str>) -> Result<(Shell, Option<String>)> {
         match self {
-            Backend::Local(dir) => Ok(Shell::Local(LocalPty::spawn(dir, cols, rows)?)),
-            Backend::Remote(session) => Ok(Shell::Remote(session.open_shell(cols, rows).await?)),
+            Backend::Local(dir) => Ok((Shell::Local(LocalPty::spawn(dir, cols, rows)?), None)),
+            Backend::Remote(session) if session.has_tmux() => {
+                let name = attach.map(str::to_string).unwrap_or_else(|| session.new_session_name());
+                let ch = session.open_shell(cols, rows, Some(&name)).await?;
+                Ok((Shell::Remote(ch), Some(name)))
+            }
+            Backend::Remote(session) => Ok((Shell::Remote(session.open_shell(cols, rows, None).await?), None)),
+        }
+    }
+
+    /// True when shells live in tmux on the box, so quitting can detach.
+    pub fn has_tmux(&self) -> bool {
+        matches!(self, Backend::Remote(s) if s.has_tmux())
+    }
+
+    /// tmux sessions that already exist on the box, to reattach.
+    pub fn restored_sessions(&self) -> Vec<String> {
+        match self {
+            Backend::Remote(s) => s.restored_sessions(),
+            Backend::Local(_) => Vec::new(),
+        }
+    }
+
+    pub async fn end_session(&self, name: &str) {
+        if let Backend::Remote(s) = self {
+            s.end_session(name).await;
+        }
+    }
+
+    pub async fn end_all_sessions(&self) {
+        if let Backend::Remote(s) = self {
+            s.end_all_sessions().await;
         }
     }
 
