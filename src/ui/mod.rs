@@ -372,6 +372,7 @@ pub fn draw(f: &mut Frame, v: &View) {
         _ if scroll_hint.is_some() => scroll_hint.unwrap_or_default(),
         (None, None) if preview_hint.is_some() => preview_hint.unwrap_or_default(),
         (Some(_), _) => " arrows + Enter, a letter, or a tab number   Esc closes".to_string(),
+        (None, Some(m)) if preview_hint.is_some() => format!(" {m} ·{}", preview_hint.unwrap_or_default()),
         (None, Some(m)) => format!(" {m}"),
         (None, None) if split.is_some() => format!(" {}  menu · click a pane or menu W to switch · menu V closes the preview", v.menu_label),
         (None, None) => format!(" {}  menu", v.menu_label),
