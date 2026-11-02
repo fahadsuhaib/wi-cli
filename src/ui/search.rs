@@ -6,7 +6,8 @@ use crate::search::grep::{self, Results, Row};
 use crate::search::{Finder, FindPrompt, FindTarget, GrepPrompt, fuzzy};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use crate::theme::theme;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -64,17 +65,37 @@ pub fn grep_chip_at(main: Rect, p: &GrepPrompt, col: u16, row: u16) -> Option<&'
     grep_chips(p).into_iter().find(|(_, _, x, w)| col >= r.x + x && col < r.x + x + w).map(|(_, k, _, _)| k)
 }
 
-fn dim() -> Style {
-    Style::default().add_modifier(Modifier::DIM)
+/// Normal text on the theme's canvas (these screens cover the whole area).
+fn canvas() -> Style {
+    let t = theme();
+    Style::default().fg(t.fg).bg(t.bg)
 }
 
+fn dim() -> Style {
+    canvas().fg(theme().dim)
+}
+
+/// The one-line titles above the lists.
 fn label_style() -> Style {
-    Style::default().add_modifier(Modifier::BOLD)
+    let t = theme();
+    Style::default().fg(t.bar_fg).bg(t.bar_bg).add_modifier(Modifier::BOLD)
+}
+
+/// The selected row.
+fn sel_style() -> Style {
+    let t = theme();
+    Style::default().fg(t.menu_sel_fg).bg(t.menu_sel_bg)
+}
+
+/// Matched text in results and previews.
+fn lit_style() -> Style {
+    let t = theme();
+    Style::default().fg(t.hint_fg).bg(t.hint_bg)
 }
 
 fn input_line(f: &mut Frame, area: Rect, label: &str, text: &str) {
-    let line = Line::from(vec![Span::styled(label.to_string(), label_style()), Span::raw(text.to_string())]);
-    f.render_widget(Paragraph::new(line), area);
+    let line = Line::from(vec![Span::styled(label.to_string(), canvas().add_modifier(Modifier::BOLD)), Span::raw(text.to_string())]);
+    f.render_widget(Paragraph::new(line).style(canvas()), area);
     let x = area.x + (label.width() + text.width()) as u16;
     f.set_cursor_position((x.min(area.x + area.width.saturating_sub(1)), area.y));
 }
@@ -105,10 +126,10 @@ fn draw_grep_prompt(f: &mut Frame, main: Rect, p: &GrepPrompt) {
     }
     let mut spans = vec![Span::raw(" ")];
     for (t, _, _, _) in grep_chips(p) {
-        spans.push(Span::styled(t, Style::default().add_modifier(Modifier::REVERSED)));
+        spans.push(Span::styled(t, sel_style()));
         spans.push(Span::raw(" "));
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), Rect::new(area.x, area.y, area.width, 1));
+    f.render_widget(Paragraph::new(Line::from(spans)).style(canvas()), Rect::new(area.x, area.y, area.width, 1));
     input_line(f, Rect::new(area.x, area.y + 1, area.width, 1), " search in files: ", &p.query.text);
 }
 
@@ -139,7 +160,7 @@ fn draw_results(f: &mut Frame, main: Rect, r: &Results) {
     f.render_widget(Paragraph::new(head).style(label_style()), Rect::new(main.x, main.y, main.width, 1.min(main.height)));
     let list = results_list_rect(main);
     let width = list.width as usize;
-    let lit = Style::default().fg(Color::Black).bg(Color::Yellow);
+    let lit = lit_style();
     let mut lines: Vec<Line> = Vec::new();
     for i in r.list.top..(r.list.top + list.height as usize).min(r.rows.len()) {
         let selected = i == r.list.sel;
@@ -147,7 +168,7 @@ fn draw_results(f: &mut Frame, main: Rect, r: &Results) {
             Row::Header(fi) => {
                 let (path, n) = &r.files[fi];
                 Line::from(vec![
-                    Span::styled(format!(" {}", crate::ui::sanitize(path)), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!(" {}", crate::ui::sanitize(path)), canvas().fg(theme().diff_file).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("  ({n})"), dim()),
                 ])
             }
@@ -156,7 +177,7 @@ fn draw_results(f: &mut Frame, main: Rect, r: &Results) {
                 let ranges = r.re.as_ref().map(|re| grep::highlight_ranges(re, &m.text)).unwrap_or_default();
                 let prefix = format!(" {:>6}  ", m.line);
                 let (snip, rs) = grep::snippet(&m.text, &ranges, width.saturating_sub(prefix.chars().count()));
-                let (base, hi) = if selected { (Style::default().add_modifier(Modifier::REVERSED), lit.add_modifier(Modifier::BOLD)) } else { (Style::default(), lit) };
+                let (base, hi) = if selected { (sel_style(), lit.add_modifier(Modifier::BOLD)) } else { (canvas(), lit) };
                 let mut spans = vec![Span::styled(prefix, if selected { base } else { dim() })];
                 spans.extend(hl_spans(&snip, &rs, base, hi));
                 if selected {
@@ -175,7 +196,7 @@ fn draw_results(f: &mut Frame, main: Rect, r: &Results) {
         };
         lines.push(Line::from(Span::styled(msg, dim())));
     }
-    f.render_widget(Paragraph::new(lines), list);
+    f.render_widget(Paragraph::new(lines).style(canvas()), list);
 }
 
 fn draw_finder(f: &mut Frame, main: Rect, fd: &Finder) {
@@ -186,12 +207,12 @@ fn draw_finder(f: &mut Frame, main: Rect, fd: &Finder) {
     }
     f.render_widget(Paragraph::new(title).style(label_style()), Rect::new(main.x, main.y, main.width, 1.min(main.height)));
     let list = finder_list_rect(main);
-    let lit = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let lit = canvas().fg(theme().hint_bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     let mut lines: Vec<Line> = Vec::new();
     for i in fd.list.top..(fd.list.top + list.height as usize).min(fd.hits.len()) {
         let path = &fd.files[fd.hits[i].idx];
         let selected = i == fd.list.sel;
-        let base = if selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+        let base = if selected { sel_style() } else { canvas() };
         let pos = fuzzy::score(&fd.input, path).map(|(_, p)| p).unwrap_or_default();
         let max = (list.width as usize).saturating_sub(2);
         let chars: Vec<char> = path.chars().collect();
@@ -212,7 +233,7 @@ fn draw_finder(f: &mut Frame, main: Rect, fd: &Finder) {
     if fd.hits.is_empty() {
         lines.push(Line::from(Span::styled(" no file matches", dim())));
     }
-    f.render_widget(Paragraph::new(lines), list);
+    f.render_widget(Paragraph::new(lines).style(canvas()), list);
     let input = Rect::new(main.x, main.y + main.height.saturating_sub(1), main.width, 1.min(main.height));
     input_line(f, input, " > ", &fd.input);
 }

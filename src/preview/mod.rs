@@ -323,8 +323,9 @@ impl Preview {
     /// Rebuild the lit copy of the lines and ask the next layout to bring the current match in view.
     fn refresh_find(&mut self) {
         let Some(f) = &self.find else { return };
-        let lit = Style::default().fg(ratatui::style::Color::Black).bg(ratatui::style::Color::Yellow);
-        let cur = Style::default().fg(ratatui::style::Color::Black).bg(ratatui::style::Color::Green).add_modifier(Modifier::BOLD);
+        let t = crate::theme::theme();
+        let lit = Style::default().fg(t.hint_fg).bg(t.hint_bg);
+        let cur = Style::default().fg(t.bg).bg(t.diff_add).add_modifier(Modifier::BOLD);
         let mut by_line: std::collections::BTreeMap<usize, Vec<(usize, usize, bool)>> = Default::default();
         for (i, &(l, s, n)) in f.hits.iter().enumerate() {
             by_line.entry(l).or_default().push((s, n, i == f.cur));
@@ -714,7 +715,7 @@ mod tests {
     }
 
     fn lit(l: &Line<'_>) -> String {
-        l.spans.iter().filter(|s| s.style.bg == Some(ratatui::style::Color::Yellow) || s.style.bg == Some(ratatui::style::Color::Green)).map(|s| s.content.as_ref()).collect()
+        l.spans.iter().filter(|s| s.style.bg == Some(crate::theme::theme().hint_bg) || s.style.bg == Some(crate::theme::theme().diff_add)).map(|s| s.content.as_ref()).collect()
     }
 
     #[test]

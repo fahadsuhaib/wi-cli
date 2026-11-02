@@ -419,7 +419,8 @@ fn draw_frame(f: &mut Frame, v: &View) {
         for c in s..e {
             let (x, y) = (shell_area.x + c, shell_area.y + row);
             if x < shell_area.x + shell_area.width && y < shell_area.y + shell_area.height {
-                let st = if cur { Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Black).bg(Color::Yellow) };
+                let th = theme();
+                let st = if cur { Style::default().fg(th.bg).bg(th.diff_add).add_modifier(Modifier::BOLD) } else { Style::default().fg(th.hint_fg).bg(th.hint_bg) };
                 buf[(x, y)].set_style(st);
             }
         }

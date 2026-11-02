@@ -66,7 +66,8 @@ def check(name, cond):
 
 class Run:
     def __init__(self, extra_env=None):
-        env = dict(os.environ, WICLI_CONFIG=CFG, TERM="xterm-256color", WICLI_TMUX_SOCKET="searchtest", **(extra_env or {}))
+        env = dict(os.environ, WICLI_CONFIG=CFG, TERM="xterm-256color", COLORTERM="truecolor", WICLI_TMUX_SOCKET="searchtest", **(extra_env or {}))
+        env.pop("COLORFGBG", None)   # the dark theme is used, whatever the host terminal says
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(R if not remote else "/")
@@ -110,8 +111,9 @@ class Run:
     def quit(self):
         self.send(MENU + (b"e" if remote else b"q"), 1.5)
 
-LIT = ("brown", "yellow", "cdcd00")   # matches
-CUR = ("green", "00cd00")              # the current match
+LIT = ("f2cc60",)   # matches: the dark theme's hint colour
+CUR = ("8fdc7f",)   # the current match: the dark theme's diff-add colour
+SEL = "7aa2f7"       # the selected row: the dark theme's menu selection colour
 
 def listrow(r, i):
     """Text of candidate row i of the finder (the row after its title line; a tab strip shifts it)."""
@@ -162,8 +164,8 @@ def run_pass(norg):
     pos = r.find(r"ZQXTOKEN_alpha", y0=2)
     hl = pos is not None and r.bg(pos[0] + 2, pos[1]) in LIT
     check(tag + "the matched text is highlighted", hl)
-    # arrows move the selection (the selected row is drawn reversed)
-    sel_rows = lambda: [y for y in range(1, 29) if r.scr.buffer[y][2].reverse]
+    # arrows move the selection (the selected row has the theme's selection background)
+    sel_rows = lambda: [y for y in range(1, 29) if r.scr.buffer[y][2].bg == SEL]
     s0 = sel_rows()
     r.send(b"\x1b[B", 0.4)
     s1 = sel_rows()
