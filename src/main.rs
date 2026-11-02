@@ -5,6 +5,7 @@ mod compat;
 mod config;
 mod exec;
 mod input;
+mod links;
 mod link;
 mod mouse;
 mod preview;
