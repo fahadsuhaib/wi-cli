@@ -15,7 +15,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::agents::{self, Agent, Decision};
-use crate::ui::{self, Action, Ask, Confirm, Hint, MenuItem, Prompt, View, hint_labels, menu_items_for, sanitize};
+use crate::ui::{self, Action, Ask, Confirm, Hint, MenuItem, Prompt, PromptKind, View, hint_labels, menu_items_for, sanitize};
+use crate::cwd::Activity;
+use crate::files::{anchor, complete_dirs};
 use ratatui::layout::Rect;
 use crate::workspace::{Backend, Event, Workspace, spawn_shell};
 use anyhow::{Result, bail};
@@ -87,6 +89,18 @@ struct App {
     quiet: Duration,
     /// tmux session behind each shell tab (by tab id), on remote boxes with tmux.
     sessions: std::collections::HashMap<usize, String>,
+    /// The workspace's own folder (absolute): where the first tab starts.
+    root: String,
+}
+
+/// Where an agent choice made in the Ask dialog applies.
+struct AskCtx {
+    /// Key under which the choice is remembered (per folder).
+    key: String,
+    /// Folder the agent starts in.
+    dir: String,
+    /// Start in this existing tab (by id); None opens a new tab.
+    tab: Option<usize>,
 }
 
 pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> {
@@ -98,12 +112,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
 
     let (events_tx, mut events) = mpsc::channel::<Event>(8);
     let (cols, rows) = shell_size(1)?;
-    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)), sessions: Default::default() };
+    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)), sessions: Default::default(), root: backend.resolve("").await.unwrap_or_else(|_| "/".into()) };
     // Reattach to sessions left running on the box; otherwise start one fresh shell.
     let restored = backend.restored_sessions();
     let (cols, rows) = if restored.len() > 1 { shell_size(restored.len())? } else { (cols, rows) };
     for name in &restored {
-        open_tab_in(&mut app, backend, &events_tx, cols, rows, Some(name)).await?;
+        open_tab_in(&mut app, backend, &events_tx, cols, rows, Some(name), None).await?;
     }
     if app.tabs.is_empty() {
         open_tab(&mut app, backend, &events_tx, cols, rows).await?;
@@ -120,7 +134,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut mode = Mode::Shell;
     let mut mouse_on = cfg.defaults.mouse;
     let mut agent_state = agents::State::load();
-    let wkey = agents::workspace_key(ws);
+    let mut ask_ctx = AskCtx { key: agents::workspace_key(ws, &app.root), dir: app.root.clone(), tab: None };
+    let rkey = agents::recents_key(ws);
+    let mut branches: std::collections::HashMap<String, Option<String>> = Default::default();
+    let mut detail_key: Option<(usize, String)> = None;
     let mut splitter = mouse::Splitter::default();
     let mut sel: Option<SelState> = None;
     let mut last_click: Option<(Instant, Pos, u8)> = None;
@@ -140,11 +157,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
         message = Some(format!("reattached {} running session(s)", restored.len()));
     }
     let (name, base_detail) = ws.title();
-    // Branch for the header: asked once now and again when the Git view opens or reloads; no timers.
+    // Header detail: the active tab's folder and its git branch. The branch of a folder is asked
+    // once (and again when the Git view opens or reloads); no timers.
     let mut detail = base_detail.clone();
-    if let Ok(Some(b)) = tokio::time::timeout(Duration::from_secs(2), backend.git_branch()).await {
-        detail = header_detail(&base_detail, &b);
-    }
     let remote = ws.is_remote();
     let items = menu_items_for(remote, backend.has_tmux());
     ui::set_tmux_menu(backend.has_tmux());
@@ -155,20 +170,39 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut dirty = true;
 
     // Recognise Claude Code / Codex workspaces: start the remembered agent, or ask the first time.
-    let detected = agents::detect(backend).await;
-    match agents::decide(&cfg.defaults.agent_start, &detected, agent_state.workspace.get(&wkey)) {
+    let root = app.root.clone();
+    let detected = agents::detect(backend, &root).await;
+    match agents::decide(&cfg.defaults.agent_start, &detected, agent_state.workspace.get(&ask_ctx.key)) {
         Decision::Nothing => {}
         Decision::Start(ag) => {
-            let cmd = agents::command_for(ag, cfg, &agent_state, &wkey);
-            message = Some(match start_agent(&mut app, backend, &events_tx, ag, &cmd).await {
+            let cmd = agents::command_for(ag, cfg, &agent_state, &ask_ctx.key);
+            message = Some(match start_agent(&mut app, backend, &events_tx, ag, &cmd, &root).await {
                 Ok(()) => format!("started: {cmd}   ({menu_label}, then A, changes it)"),
                 Err(e) => format!("could not start {}: {e}", ag.key()),
             });
         }
-        Decision::Ask(list) => mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &wkey)),
+        Decision::Ask(list) => mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key)),
     }
 
     loop {
+        // Keep the header on the active tab's folder and that folder's branch.
+        if let Some(fi) = folder_tab(&app) {
+            let (fid, fdir) = (app.tabs[fi].id, app.tabs[fi].dir.as_str());
+            if detail_key.as_ref().map(|(i, d)| (*i, d.as_str())) != Some((fid, fdir)) {
+                let dir = fdir.to_string();
+                let branch = match branches.get(&dir) {
+                    Some(b) => b.clone(),
+                    None => {
+                        let b = tokio::time::timeout(Duration::from_secs(2), backend.git_branch(&dir)).await.ok().flatten();
+                        branches.insert(dir.clone(), b.clone());
+                        b
+                    }
+                };
+                detail = folder_detail(ws, &base_detail, &dir, branch.as_deref());
+                detail_key = Some((fid, dir));
+                dirty = true;
+            }
+        }
         let due = last_draw + frame;
         // Earliest moment a still-printing background tab counts as quiet. No tab streaming
         // means no deadline, so an idle wi has no timers running.
@@ -347,10 +381,17 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     if let Mode::Prompt(pr) = &mut mode
                                         && let Some(c) = pr.shown.get(i).cloned()
                                     {
-                                        let dir = crate::files::split_input(&pr.input).0.to_string();
-                                        pr.input = format!("{dir}{c}");
                                         pr.error = None;
-                                        out.extend(if c.ends_with('/') { b"\t".to_vec() } else { b"\r".to_vec() });
+                                        if pr.kind.is_folder() && pr.recent {
+                                            // A recent folder: take it as typed and confirm.
+                                            pr.input = c;
+                                            pr.sel = None;
+                                            out.extend(b"\r");
+                                        } else {
+                                            let dir = crate::files::split_input(&pr.input).0.to_string();
+                                            pr.input = format!("{dir}{c}");
+                                            out.extend(if c.ends_with('/') { b"\t".to_vec() } else { b"\r".to_vec() });
+                                        }
                                     }
                                 }
                             }
@@ -423,7 +464,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 if reload {
                                     let is_git = app.tabs[app.active].preview.as_ref().is_some_and(|p| p.kind == crate::preview::Kind::Diff);
                                     let res = if is_git {
-                                        reload_git(&mut app, backend).await.map(|b| { detail = header_detail(&base_detail, &b); })
+                                        let gdir = active_dir(&app);
+                                        reload_git(&mut app, backend).await.map(|b| { branches.insert(gdir, Some(b)); detail_key = None; })
                                     } else {
                                         reload_preview(&mut app, backend, read_cap, &opts).await
                                     };
@@ -568,14 +610,18 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             if let Some(idx) = start {
                                 let (ag, cmd) = (ask.agents[idx], ask.commands[idx].clone());
                                 mode = Mode::Shell;
-                                agent_state.remember(&wkey, ag.key(), &cmd);
+                                agent_state.remember(&ask_ctx.key, ag.key(), &cmd);
                                 if let Err(e) = agent_state.save() { message = Some(format!("could not save choice: {e}")); }
-                                if let Err(e) = start_agent(&mut app, backend, &events_tx, ag, &cmd).await {
+                                let res = match ask_ctx.tab.and_then(|id| app.tabs.iter().position(|t| t.id == id)) {
+                                    Some(i) => { run_agent_in(&mut app, i, ag, &cmd); app.active = i; Ok(()) }
+                                    None => start_agent(&mut app, backend, &events_tx, ag, &cmd, &ask_ctx.dir).await,
+                                };
+                                if let Err(e) = res {
                                     message = Some(format!("could not start {}: {e}", ag.key()));
                                 }
                             } else if never {
                                 mode = Mode::Shell;
-                                agent_state.remember(&wkey, "none", "");
+                                agent_state.remember(&ask_ctx.key, "none", "");
                                 if let Err(e) = agent_state.save() { message = Some(format!("could not save choice: {e}")); }
                                 else { message = Some("won't ask here again (menu: Start an agent)".into()); }
                             } else if later {
@@ -586,6 +632,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         }
                         Mode::Prompt(ref mut pr) => {
                             let (mut cancel, mut complete_now, mut open_now) = (false, false, false);
+                            let before = pr.input.clone();
+                            let mut arrows: Vec<bool> = Vec::new(); // true = down
                             let mut run: Vec<u8> = Vec::new();
                             let mut i = 0;
                             while i < chunk.len() {
@@ -601,6 +649,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         if matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) {
                                             i += 2;
                                             while i < chunk.len() && !(0x40..=0x7e).contains(&chunk[i]) { i += 1; }
+                                            match chunk.get(i) {
+                                                Some(b'A') => arrows.push(false),
+                                                Some(b'B') => arrows.push(true),
+                                                _ => {}
+                                            }
                                         } else {
                                             cancel = true;
                                         }
@@ -617,11 +670,30 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             }
                             pr.input.push_str(&String::from_utf8_lossy(&run));
                             if !run.is_empty() || i > 0 { pr.error = None; }
+                            // Editing the folder hides the recent list; arrows move through it while it shows.
+                            if pr.recent && pr.input != before { pr.recent = false; pr.sel = None; pr.shown.clear(); pr.total = 0; }
+                            if pr.recent {
+                                let n = pr.shown.len();
+                                for down in arrows {
+                                    pr.sel = match (pr.sel, down) {
+                                        (None, true) => Some(0),
+                                        (None, false) => Some(n - 1),
+                                        (Some(s), true) => Some((s + 1) % n),
+                                        (Some(s), false) => Some((s + n - 1) % n),
+                                    };
+                                }
+                            }
+                            let base = active_dir(&app);
                             if complete_now {
-                                let dir = crate::files::split_input(&pr.input).0.to_string();
+                                if pr.recent && let Some(c) = pr.sel.and_then(|s| pr.shown.get(s)) {
+                                    pr.input = format!("{}/", c.trim_end_matches('/'));
+                                }
+                                pr.recent = false;
+                                pr.sel = None;
+                                let dir = anchor(&base, crate::files::split_input(&pr.input).0);
                                 match backend.list_dir(&dir).await {
                                     Ok(l) => {
-                                        let c = complete(&pr.input, &l.entries);
+                                        let c = if pr.kind.is_folder() { complete_dirs(&pr.input, &l.entries) } else { complete(&pr.input, &l.entries) };
                                         pr.input = c.input;
                                         pr.shown = c.shown;
                                         pr.total = c.total;
@@ -632,14 +704,26 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     Err(e) => pr.error = Some(format!("{e}")),
                                 }
                             }
-                            if open_now && !pr.input.trim().is_empty() {
+                            let mut ask_req = None;
+                            if open_now && pr.kind.is_folder() {
+                                let picked = if pr.recent { pr.sel.and_then(|s| pr.shown.get(s)).cloned() } else { None };
+                                let text = picked.unwrap_or_else(|| pr.input.trim().to_string());
+                                match commit_folder(&mut app, backend, ws, cfg, &events_tx, &mut agent_state, &rkey, pr.kind, &text, &mut message).await {
+                                    Ok(req) => { cancel = true; ask_req = req; }
+                                    Err(e) => pr.error = Some(e),
+                                }
+                            } else if open_now && !pr.input.trim().is_empty() {
                                 let path = pr.input.trim().to_string();
-                                match open_preview(&mut app, backend, &path, read_cap, &opts, None).await {
+                                match open_preview(&mut app, backend, &anchor(&base, &path), read_cap, &opts, None).await {
                                     Ok(()) => cancel = true,
                                     Err(e) => pr.error = Some(format!("{path}: {e}")),
                                 }
                             }
                             if cancel { mode = Mode::Shell; }
+                            if let Some((list, ctx)) = ask_req {
+                                ask_ctx = ctx;
+                                mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key));
+                            }
                             dirty = true;
                             chunk = &[];
                         }
@@ -698,9 +782,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         }
                                     }
                                     Action::Agent => {
-                                        let mut list = agents::detect(backend).await;
+                                        let dir = active_dir(&app);
+                                        let mut list = agents::detect(backend, &dir).await;
                                         if list.is_empty() { list = agents::ALL.to_vec(); }
-                                        mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &wkey));
+                                        ask_ctx = AskCtx { key: agents::workspace_key(ws, &dir), dir, tab: None };
+                                        mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key));
                                     }
                                     Action::Mouse => {
                                         mouse_on = !mouse_on;
@@ -711,20 +797,40 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     }
                                     Action::Scroll if app.tabs[app.active].is_preview() => message = Some("scroll a preview with the arrow keys and PgUp/PgDn".into()),
                                     Action::Scroll => mode = Mode::Scroll,
-                                    Action::Git => match open_git(&mut app, backend).await {
-                                        Ok(b) => detail = header_detail(&base_detail, &b),
-                                        Err(e) => message = Some(format!("Git changes: {e}")),
-                                    },
+                                    Action::Git => {
+                                        let gdir = active_dir(&app);
+                                        match open_git(&mut app, backend).await {
+                                            Ok(b) => { branches.insert(gdir, Some(b)); detail_key = None; }
+                                            Err(e) => message = Some(format!("Git changes: {e}")),
+                                        }
+                                    }
                                     Action::Preview => mode = Mode::Prompt(Prompt::default()),
                                     Action::NewTab => {
                                         let (c, r) = shell_size(app.tabs.len() + 1)?;
                                         let had_strip = app.tabs.len() > 1;
-                                        match open_tab(&mut app, backend, &events_tx, c, r).await {
+                                        let here = active_dir(&app);
+                                        match open_tab_in(&mut app, backend, &events_tx, c, r, None, Some(&here)).await {
                                             Ok(()) => {
                                                 app.active = app.tabs.len() - 1;
                                                 if !had_strip { resize_all(&mut app)?; }
                                             }
                                             Err(e) => message = Some(format!("could not open shell: {e}")),
+                                        }
+                                    }
+                                    Action::NewTabIn => {
+                                        let start = active_dir(&app);
+                                        mode = Mode::Prompt(Prompt::folder(PromptKind::NewFolder, &start, agent_state.recents(&rkey)));
+                                    }
+                                    Action::ChangeDir => {
+                                        let t = &app.tabs[app.active];
+                                        if t.is_preview() {
+                                            message = Some("change folder works on a shell tab; switch to one first".into());
+                                        } else {
+                                            let idle = crate::cwd::tab_idle(backend, t.handle.as_ref(), app.sessions.get(&t.id).map(String::as_str)).await;
+                                            match idle {
+                                                Activity::Ready => mode = Mode::Prompt(Prompt::folder(PromptKind::ChangeFolder, &t.dir, agent_state.recents(&rkey))),
+                                                other => message = Some(busy_message(&other, &menu_label)),
+                                            }
                                         }
                                     }
                                     Action::NextTab => { let n = (app.active + 1) % app.tabs.len(); switch_to(&mut app, n); }
@@ -802,19 +908,148 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
 }
 
 async fn open_tab(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, cols: u16, rows: u16) -> Result<()> {
-    open_tab_in(app, backend, tx, cols, rows, None).await
+    open_tab_in(app, backend, tx, cols, rows, None, None).await
 }
 
-/// Open a shell tab; `attach` names an existing tmux session to reattach.
-async fn open_tab_in(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, cols: u16, rows: u16, attach: Option<&str>) -> Result<()> {
-    let (shell, session) = backend.open_session_shell(cols, rows, attach).await?;
+/// Open a shell tab; `attach` names an existing tmux session to reattach, `dir` is the folder a
+/// new shell starts in (the workspace folder when None).
+async fn open_tab_in(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, cols: u16, rows: u16, attach: Option<&str>, dir: Option<&str>) -> Result<()> {
+    let (shell, session) = backend.open_session_shell(cols, rows, attach, dir).await?;
     let id = app.next_id;
+    // A reattached session keeps whatever folder it is in now.
+    let tab_dir = match (dir, attach) {
+        (Some(d), _) => d.to_string(),
+        (None, Some(name)) => crate::cwd::tab_cwd(backend, None, None, Some(name)).await.unwrap_or_else(|| app.root.clone()),
+        (None, None) => app.root.clone(),
+    };
     if let Some(s) = session { app.sessions.insert(id, s); }
     app.next_id += 1;
     app.shell_count += 1;
     let handle = spawn_shell(id, shell, tx.clone());
-    app.tabs.push(Tab::new(id, format!("shell {}", app.shell_count), handle, cols, rows, app.scrollback));
+    let mut tab = Tab::new(id, format!("shell {}", app.shell_count), handle, cols, rows, app.scrollback);
+    tab.dir = tab_dir;
+    tab.number = app.shell_count;
+    app.tabs.push(tab);
+    refresh_labels(app);
     Ok(())
+}
+
+/// Show folder names in the labels once there are several tabs or a tab is not in the
+/// workspace's own folder; otherwise keep `shell N`.
+fn refresh_labels(app: &mut App) {
+    let several = app.tabs.len() > 1;
+    let root = app.root.clone();
+    for t in app.tabs.iter_mut().filter(|t| !t.is_preview()) {
+        t.show_dir = several || t.dir != root;
+        t.retitle();
+    }
+}
+
+/// The shell tab whose folder applies to the active tab: itself, or for a preview the tab it
+/// was opened from, else the first shell tab.
+fn folder_tab(app: &App) -> Option<usize> {
+    let t = app.tabs.get(app.active)?;
+    if !t.is_preview() {
+        return Some(app.active);
+    }
+    let from = t.preview.as_ref().map(|p| p.from_tab).unwrap_or(0);
+    if app.tabs.get(from).is_some_and(|x| !x.is_preview()) {
+        return Some(from);
+    }
+    app.tabs.iter().position(|t| !t.is_preview())
+}
+
+/// Base folder that previews, git, agents and new tabs use for the active tab.
+fn active_dir(app: &App) -> String {
+    folder_tab(app).map(|i| app.tabs[i].dir.clone()).unwrap_or_else(|| app.root.clone())
+}
+
+/// Header text: where the active tab is (and for a remote box, which box), plus the branch.
+fn folder_detail(ws: &Workspace, base: &str, dir: &str, branch: Option<&str>) -> String {
+    let shown = match ws {
+        Workspace::Local(_) => {
+            let home = dirs::home_dir().unwrap_or_default().to_string_lossy().into_owned();
+            match dir.strip_prefix(home.trim_end_matches('/')) {
+                Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
+                _ => dir.to_string(),
+            }
+        }
+        Workspace::Remote(_) => format!("{base}  {dir}"),
+    };
+    match branch {
+        Some(b) => header_detail(&shown, b),
+        None => shown,
+    }
+}
+
+fn busy_message(idle: &Activity, menu_label: &str) -> String {
+    match idle {
+        Activity::Busy(cmd) => format!("can't change folder: {} is running in this tab. Open a new tab in that folder instead ({menu_label}, then F)", sanitize(cmd)),
+        _ => format!("can't tell whether this tab is idle, so nothing was typed. Open a new tab in that folder instead ({menu_label}, then F)"),
+    }
+}
+
+/// What the folder prompt asked for. On success the prompt closes; an agent question for the
+/// new folder is returned for the caller to show.
+#[allow(clippy::too_many_arguments)]
+async fn commit_folder(
+    app: &mut App,
+    backend: &Backend,
+    ws: &Workspace,
+    cfg: &Config,
+    tx: &mpsc::Sender<Event>,
+    state: &mut agents::State,
+    rkey: &str,
+    kind: PromptKind,
+    text: &str,
+    message: &mut Option<String>,
+) -> Result<Option<(Vec<Agent>, AskCtx)>, String> {
+    let base = active_dir(app);
+    let dir = backend.resolve_folder(&base, text).await?;
+    let mut ask = None;
+    match kind {
+        PromptKind::ChangeFolder => {
+            let t = &app.tabs[app.active];
+            if t.is_preview() {
+                return Err("change folder works on a shell tab".into());
+            }
+            // Re-check: a program may have started since the prompt opened.
+            match crate::cwd::tab_idle(backend, t.handle.as_ref(), app.sessions.get(&t.id).map(String::as_str)).await {
+                Activity::Ready => {}
+                other => return Err(busy_message(&other, "menu")),
+            }
+            // A leading space keeps the command out of history in shells configured for that.
+            t.write(format!(" cd -- {}\r", crate::exec::sq(&dir)).into_bytes());
+            let t = &mut app.tabs[app.active];
+            t.dir = dir.clone();
+            refresh_labels(app);
+            *message = Some(format!("tab is now in {dir}"));
+        }
+        _ => {
+            let (c, r) = shell_size(app.tabs.len() + 1).map_err(|e| e.to_string())?;
+            open_tab_in(app, backend, tx, c, r, None, Some(&dir)).await.map_err(|e| format!("could not open shell: {e}"))?;
+            let last = app.tabs.len() - 1;
+            app.active = last;
+            resize_all(app).map_err(|e| e.to_string())?;
+            // Recognise an agent workspace in this folder, like at startup.
+            let key = agents::workspace_key(ws, &dir);
+            let detected = agents::detect(backend, &dir).await;
+            match agents::decide(&cfg.defaults.agent_start, &detected, state.workspace.get(&key)) {
+                Decision::Nothing => {}
+                Decision::Start(ag) => {
+                    let cmd = agents::command_for(ag, cfg, state, &key);
+                    run_agent_in(app, last, ag, &cmd);
+                    *message = Some(format!("started: {cmd}"));
+                }
+                Decision::Ask(list) => ask = Some((list, AskCtx { key, dir: dir.clone(), tab: Some(app.tabs[last].id) })),
+            }
+        }
+    }
+    state.push_recent(rkey, &dir);
+    if let Err(e) = state.save() {
+        *message = Some(format!("could not save recent folders: {e}"));
+    }
+    Ok(ask)
 }
 
 fn switch_to(app: &mut App, i: usize) {
@@ -823,6 +1058,7 @@ fn switch_to(app: &mut App, i: usize) {
 }
 
 fn resize_all(app: &mut App) -> Result<()> {
+    refresh_labels(app);
     let (c, r) = shell_size(app.tabs.len())?;
     for t in &mut app.tabs {
         t.resize(c, r);
@@ -882,14 +1118,16 @@ fn git_tab(app: &App) -> Option<usize> {
 
 /// Open (or refresh and switch to) the Git changes tab. Returns the branch for the header.
 async fn open_git(app: &mut App, backend: &Backend) -> Result<String> {
-    let snap = backend.git_snapshot().await?;
-    let branch = backend.git_branch().await.unwrap_or_else(|| "?".into());
+    let dir = active_dir(app);
+    let snap = backend.git_snapshot(&dir).await?;
+    let branch = backend.git_branch(&dir).await.unwrap_or_else(|| "?".into());
     let mut p = Preview::from_git(&snap);
     p.from_tab = app.active;
     if let Some(i) = git_tab(app) {
+        // Opened from a shell tab: the view now belongs to that tab's folder.
+        let from = if app.tabs[app.active].is_preview() { app.tabs[i].preview.as_ref().map(|o| o.from_tab) } else { Some(app.active) };
         if i != app.active { switch_to(app, i); }
-        let old = app.tabs[i].preview.as_ref().map(|o| o.from_tab);
-        p.from_tab = old.unwrap_or(p.from_tab);
+        p.from_tab = from.unwrap_or(p.from_tab);
         app.tabs[i].preview = Some(p);
         return Ok(branch);
     }
@@ -903,8 +1141,9 @@ async fn open_git(app: &mut App, backend: &Backend) -> Result<String> {
 
 /// Re-run git for the active Git tab, keeping the scroll position.
 async fn reload_git(app: &mut App, backend: &Backend) -> Result<String> {
-    let snap = backend.git_snapshot().await?;
-    let branch = backend.git_branch().await.unwrap_or_else(|| "?".into());
+    let dir = active_dir(app);
+    let snap = backend.git_snapshot(&dir).await?;
+    let branch = backend.git_branch(&dir).await.unwrap_or_else(|| "?".into());
     let Some(old) = app.tabs[app.active].preview.as_ref() else { return Ok(branch) };
     let (top, left, wrap, from) = (old.top, old.left, old.wrap, old.from_tab);
     let mut p = Preview::from_git(&snap);
@@ -1149,18 +1388,23 @@ fn area_rows(app: &App, main: Rect) -> (Vec<Vec<String>>, Vec<bool>) {
     }
 }
 
-/// Open a shell tab named after the agent and run the user's command in it. The tab stays a
-/// normal shell, so when the agent exits you are left at a prompt.
-async fn start_agent(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, agent: Agent, command: &str) -> Result<()> {
+/// Open a shell tab in `dir` named after the agent and run the user's command in it. The tab
+/// stays a normal shell, so when the agent exits you are left at a prompt.
+async fn start_agent(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, agent: Agent, command: &str, dir: &str) -> Result<()> {
     let (c, r) = shell_size(app.tabs.len() + 1)?;
-    open_tab(app, backend, tx, c, r).await?;
+    open_tab_in(app, backend, tx, c, r, None, Some(dir)).await?;
     let last = app.tabs.len() - 1;
-    let tab = &mut app.tabs[last];
-    tab.fallback = agent.key().to_string();
-    tab.title = agent.key().to_string();
-    tab.write(format!("{command}\n").into_bytes());
+    run_agent_in(app, last, agent, command);
     app.active = last;
     resize_all(app)
+}
+
+/// Run the agent's command in an existing shell tab (it has just been opened, at a prompt).
+fn run_agent_in(app: &mut App, idx: usize, agent: Agent, command: &str) {
+    let tab = &mut app.tabs[idx];
+    tab.agent = Some(agent.key().to_string());
+    tab.retitle();
+    tab.write(format!("{command}\n").into_bytes());
 }
 
 /// The area the shell (or a preview) is drawn in.

@@ -28,6 +28,19 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Quote one argument so a POSIX shell sees exactly `s`: always single quotes, with every
+/// embedded `'` written as `'\''`. Nothing inside single quotes is special, so spaces, `$`,
+/// backticks, newlines and a leading dash all stay literal (put `--` before it for programs).
+pub fn sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// True when a folder name is safe to type into a shell or pass along: no control characters
+/// (a newline or escape typed into a terminal could run commands).
+pub fn folder_name_ok(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(|c| c.is_control())
+}
+
 pub fn shell_join(args: &[&str]) -> String {
     args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
 }
@@ -115,15 +128,15 @@ impl Backend {
         }
     }
 
-    async fn git(&self, args: &[&str]) -> Result<Output> {
-        let mut full = vec!["git", "-c", "core.quotepath=off"];
+    async fn git(&self, dir: &str, args: &[&str]) -> Result<Output> {
+        let mut full = vec!["git", "-c", "core.quotepath=off", "-C", dir];
         full.extend_from_slice(args);
         self.run(&full).await
     }
 
     /// Current branch name, or None when this is not a git repository (or git is missing).
-    pub async fn git_branch(&self) -> Option<String> {
-        let o = self.git(&["branch", "--show-current"]).await.ok()?;
+    pub async fn git_branch(&self, dir: &str) -> Option<String> {
+        let o = self.git(dir, &["branch", "--show-current"]).await.ok()?;
         if o.code != 0 {
             return None;
         }
@@ -132,13 +145,13 @@ impl Backend {
             return Some(name);
         }
         // Detached HEAD: show the short commit, or nothing if there is no commit.
-        let o = self.git(&["rev-parse", "--short", "HEAD"]).await.ok()?;
+        let o = self.git(dir, &["rev-parse", "--short", "HEAD"]).await.ok()?;
         (o.code == 0).then(|| format!("detached {}", String::from_utf8_lossy(&o.stdout).trim()))
     }
 
     /// Everything the Git changes view shows. Errors are worded for the status bar.
-    pub async fn git_snapshot(&self) -> Result<Snapshot> {
-        let status = match self.git(&["status", "--short", "--branch"]).await {
+    pub async fn git_snapshot(&self, dir: &str) -> Result<Snapshot> {
+        let status = match self.git(dir, &["status", "--short", "--branch"]).await {
             Ok(o) if o.code == 0 => o,
             Ok(o) if o.code == 127 => bail!("git is not installed here"),
             Ok(o) if o.stderr.to_lowercase().contains("not a git repository") => bail!("not a git repository"),
@@ -147,16 +160,16 @@ impl Backend {
             Err(e) => bail!("git: {e:#}"),
         };
         let mut truncated = status.truncated;
-        let mut diff = self.git(&["diff", "HEAD", "--no-color", "--no-ext-diff"]).await?;
+        let mut diff = self.git(dir, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).await?;
         if diff.code != 0 {
             // No commit yet: staged and unstaged changes separately.
-            let staged = self.git(&["diff", "--cached", "--no-color", "--no-ext-diff"]).await?;
-            let unstaged = self.git(&["diff", "--no-color", "--no-ext-diff"]).await?;
+            let staged = self.git(dir, &["diff", "--cached", "--no-color", "--no-ext-diff"]).await?;
+            let unstaged = self.git(dir, &["diff", "--no-color", "--no-ext-diff"]).await?;
             diff.stdout = [staged.stdout, unstaged.stdout].concat();
             diff.truncated = staged.truncated || unstaged.truncated;
         }
         truncated |= diff.truncated;
-        let untracked = self.git(&["ls-files", "--others", "--exclude-standard"]).await?;
+        let untracked = self.git(dir, &["ls-files", "--others", "--exclude-standard"]).await?;
         truncated |= untracked.truncated;
         Ok(Snapshot {
             status: String::from_utf8_lossy(&status.stdout).into_owned(),
@@ -170,6 +183,35 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sq_quotes_everything_literally() {
+        assert_eq!(sq("/a/b"), "'/a/b'");
+        assert_eq!(sq("a b"), "'a b'");
+        assert_eq!(sq("it's"), r"'it'\''s'");
+        assert_eq!(sq("$HOME/$(id)"), "'$HOME/$(id)'");
+        assert_eq!(sq("`id`"), "'`id`'");
+        assert_eq!(sq("a\nb"), "'a\nb'");
+        assert_eq!(sq("-rf"), "'-rf'");
+        assert_eq!(sq(""), "''");
+        assert_eq!(sq("a;b|c&d\"e\\f"), "'a;b|c&d\"e\\f'");
+    }
+
+    #[test]
+    fn sq_round_trips_through_a_real_shell() {
+        for s in ["a b", "it's", "''", "$(echo pwned)", "`echo pwned`", "x\ny", "-n", "a\\b", "\"q\"", "; echo pwned"] {
+            let out = std::process::Command::new("sh").arg("-c").arg(format!("printf %s {}", sq(s))).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), s);
+        }
+    }
+
+    #[test]
+    fn folder_names_with_control_characters_are_refused() {
+        assert!(folder_name_ok("/home/dev/my proj"));
+        assert!(!folder_name_ok("/a\nb"));
+        assert!(!folder_name_ok("/a\x1b[31m"));
+        assert!(!folder_name_ok(""));
+    }
 
     #[test]
     fn quotes_safely() {

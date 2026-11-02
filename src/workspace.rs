@@ -52,16 +52,20 @@ pub enum Backend {
 
 impl Backend {
     /// Open a shell; on a remote box with tmux it runs in a tmux session, returned by name.
-    /// `attach` reattaches an existing session, otherwise a fresh name is picked.
-    pub async fn open_session_shell(&self, cols: u16, rows: u16, attach: Option<&str>) -> Result<(Shell, Option<String>)> {
+    /// `attach` reattaches an existing session, otherwise a fresh name is picked. `dir` is the
+    /// folder a new shell starts in (the workspace folder / login directory when None).
+    pub async fn open_session_shell(&self, cols: u16, rows: u16, attach: Option<&str>, dir: Option<&str>) -> Result<(Shell, Option<String>)> {
         match self {
-            Backend::Local(dir) => Ok((Shell::Local(LocalPty::spawn(dir, cols, rows)?), None)),
+            Backend::Local(root) => {
+                let start = dir.map(PathBuf::from).unwrap_or_else(|| root.clone());
+                Ok((Shell::Local(LocalPty::spawn(&start, cols, rows)?), None))
+            }
             Backend::Remote(session) if session.has_tmux() => {
                 let name = attach.map(str::to_string).unwrap_or_else(|| session.new_session_name());
-                let ch = session.open_shell(cols, rows, Some(&name)).await?;
+                let ch = session.open_shell(cols, rows, Some(&name), dir).await?;
                 Ok((Shell::Remote(ch), Some(name)))
             }
-            Backend::Remote(session) => Ok((Shell::Remote(session.open_shell(cols, rows, None).await?), None)),
+            Backend::Remote(session) => Ok((Shell::Remote(session.open_shell(cols, rows, None, dir).await?), None)),
         }
     }
 
@@ -111,6 +115,14 @@ impl Shell {
     fn pid(&self) -> Option<u32> {
         match self {
             Shell::Local(l) => l.child.process_id(),
+            Shell::Remote(_) => None,
+        }
+    }
+
+    /// Process group in the foreground of a local pty (None for remote shells or on error).
+    fn foreground(&self) -> Option<i32> {
+        match self {
+            Shell::Local(l) => l.master.process_group_leader(),
             Shell::Remote(_) => None,
         }
     }
@@ -178,6 +190,8 @@ const COALESCE_MAX: usize = 64 * 1024;
 pub enum Cmd {
     Write(Vec<u8>),
     Resize(u16, u16),
+    /// Ask which process group is in the foreground (local ptys only).
+    Foreground(tokio::sync::oneshot::Sender<Option<i32>>),
     Close,
 }
 
@@ -198,6 +212,12 @@ pub struct ShellHandle {
 impl ShellHandle {
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+    /// Foreground process group of a local shell's pty; None when unknown or remote.
+    pub async fn foreground(&self) -> Option<i32> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.tx.send(Cmd::Foreground(tx)).ok()?;
+        tokio::time::timeout(std::time::Duration::from_secs(1), rx).await.ok()?.ok()?
     }
     pub fn write(&self, data: Vec<u8>) {
         let _ = self.tx.send(Cmd::Write(data));
@@ -228,6 +248,7 @@ pub fn spawn_shell(id: usize, mut shell: Shell, events: mpsc::Sender<Event>) -> 
                 cmd = rx.recv() => match cmd {
                     Some(Cmd::Write(d)) => { if shell.write(&d).await.is_err() { break; } }
                     Some(Cmd::Resize(c, r)) => { let _ = shell.resize(c, r).await; }
+                    Some(Cmd::Foreground(reply)) => { let _ = reply.send(shell.foreground()); }
                     Some(Cmd::Close) | None => { shell.close().await; break; }
                 },
                 out = shell.next_output() => match out {
@@ -274,5 +295,39 @@ impl LocalPty {
             }
         });
         Ok(Self { master: pair.master, writer, child, rx })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A local shell reports itself as the foreground group at a prompt and something else
+    /// while a program runs.
+    #[tokio::test]
+    async fn local_foreground_group_follows_the_running_program() {
+        let dir = std::env::temp_dir();
+        let shell = Shell::Local(LocalPty::spawn(&dir, 80, 24).unwrap());
+        let (tx, mut rx) = mpsc::channel(64);
+        let h = spawn_shell(0, shell, tx);
+        let pid = h.pid().unwrap() as i32;
+        let wait_for = |want_shell: bool| {
+            let h = h.clone();
+            async move {
+                for _ in 0..50 {
+                    let fg = h.foreground().await;
+                    if fg.is_some() && (fg == Some(pid)) == want_shell { return true; }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                false
+            }
+        };
+        assert!(wait_for(true).await, "idle shell is its own foreground group");
+        h.write(b"sleep 5\n".to_vec());
+        assert!(wait_for(false).await, "a running program takes the foreground");
+        h.write(b"\x03".to_vec());
+        assert!(wait_for(true).await, "back at the prompt after it ends");
+        h.close();
+        while rx.recv().await.is_some() {}
     }
 }

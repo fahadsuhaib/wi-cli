@@ -17,6 +17,10 @@ pub enum Action {
     /// Label every file path and URL on screen so one keypress opens it.
     OpenLink,
     NewTab,
+    /// Prompt for a folder and open a shell tab there.
+    NewTabIn,
+    /// Prompt for a folder and move this idle shell tab to it.
+    ChangeDir,
     NextTab,
     PrevTab,
     Mouse,
@@ -69,6 +73,8 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Download", key: 'd', action: Action::Download, remote_only: true },
     MenuItem { label: "Open path on screen", key: 'o', action: Action::OpenLink, remote_only: false },
     MenuItem { label: "New shell tab", key: 'n', action: Action::NewTab, remote_only: false },
+    MenuItem { label: "New tab in folder", key: 'f', action: Action::NewTabIn, remote_only: false },
+    MenuItem { label: "Change folder of this tab", key: 'h', action: Action::ChangeDir, remote_only: false },
     MenuItem { label: "Next tab", key: 't', action: Action::NextTab, remote_only: false },
     MenuItem { label: "Previous tab", key: 'b', action: Action::PrevTab, remote_only: false },
     MenuItem { label: "Close tab", key: 'c', action: Action::CloseTab, remote_only: false },
@@ -97,9 +103,49 @@ impl Ask {
     }
 }
 
-/// State of the "open a file" prompt.
+/// What the prompt is asking for.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PromptKind {
+    /// A file to preview.
+    #[default]
+    File,
+    /// A folder for a new shell tab.
+    NewFolder,
+    /// A folder to move the active (idle) tab to.
+    ChangeFolder,
+}
+
+impl PromptKind {
+    pub fn is_folder(self) -> bool {
+        self != PromptKind::File
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            PromptKind::File => " open file: ",
+            PromptKind::NewFolder => " new tab in folder: ",
+            PromptKind::ChangeFolder => " change folder to: ",
+        }
+    }
+}
+
+impl Prompt {
+    /// The folder prompt: starts as `start` (the active tab's folder, with a trailing slash) and
+    /// lists `recent` folders until the input is edited.
+    pub fn folder(kind: PromptKind, start: &str, recent: Vec<String>) -> Prompt {
+        let total = recent.len();
+        let input = if start.ends_with('/') { start.to_string() } else { format!("{start}/") };
+        Prompt { input, shown: recent, total, kind, recent: total > 0, ..Prompt::default() }
+    }
+}
+
+/// State of the "open a file" / folder prompt.
 #[derive(Default, Clone)]
 pub struct Prompt {
+    pub kind: PromptKind,
+    /// `shown` lists recent folders (the input has not been edited yet) rather than completions.
+    pub recent: bool,
+    /// Highlighted recent folder (arrow keys).
+    pub sel: Option<usize>,
     pub input: String,
     /// Completion candidates to show (directories end in `/`).
     pub shown: Vec<String>,
@@ -352,6 +398,7 @@ pub fn draw(f: &mut Frame, v: &View) {
         _ if v.confirm.is_some() => " Y or Enter to continue · N or Esc to cancel".to_string(),
         _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
         _ if v.ask.is_some() => " Enter starts · E edits the command · N not now · X never here".to_string(),
+        _ if v.prompt.is_some_and(|p| p.kind.is_folder()) => " Tab completes folders · arrows pick a recent one · Enter confirms · Esc cancels".to_string(),
         _ if v.prompt.is_some() => " Tab completes · Enter opens · Esc cancels".to_string(),
         _ if scroll_hint.is_some() => scroll_hint.unwrap_or_default(),
         (None, None) if preview_hint.is_some() => preview_hint.unwrap_or_default(),
@@ -431,14 +478,22 @@ fn draw_prompt(f: &mut Frame, main: Rect, p: &Prompt) {
     let more = p.total.saturating_sub(p.shown.len());
     let area = prompt_rect(main, p);
     let dim = Style::default().add_modifier(Modifier::DIM);
-    let mut lines: Vec<Line> = p.shown.iter().map(|s| Line::from(Span::styled(format!("   {s}"), dim))).collect();
+    let mut lines: Vec<Line> = p
+        .shown
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let st = if p.recent && p.sel == Some(i) { Style::default().add_modifier(Modifier::REVERSED) } else { dim };
+            Line::from(Span::styled(format!("   {s}"), st))
+        })
+        .collect();
     if more > 0 {
         lines.push(Line::from(Span::styled(format!("   … {more} more"), dim)));
     }
     if let Some(e) = &p.error {
         lines.push(Line::from(Span::styled(format!(" {e}"), Style::default().fg(Color::Red))));
     }
-    let label = " open file: ";
+    let label = p.kind.label();
     lines.push(Line::from(vec![Span::styled(label, Style::default().add_modifier(Modifier::BOLD)), Span::raw(p.input.clone())]));
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(Color::Black)), area);
@@ -505,6 +560,25 @@ mod tests {
         assert_eq!(sanitize("a\x1b[31mb\n"), "a·[31mb·");
         assert_eq!(sanitize("evil\u{202E}gpj.exe"), "evil·gpj.exe");
         assert_eq!(sanitize("日本語 ok"), "日本語 ok");
+    }
+
+    #[test]
+    fn folder_prompt_starts_in_the_tab_folder_with_recents() {
+        let p = Prompt::folder(PromptKind::NewFolder, "/p/web", vec!["/p/a".into(), "/p/b".into()]);
+        assert_eq!(p.input, "/p/web/");
+        assert!(p.recent && p.shown.len() == 2 && p.sel.is_none());
+        let p = Prompt::folder(PromptKind::ChangeFolder, "/p/web/", vec![]);
+        assert_eq!(p.input, "/p/web/");
+        assert!(!p.recent);
+        assert!(PromptKind::NewFolder.is_folder() && !PromptKind::File.is_folder());
+    }
+
+    #[test]
+    fn menu_keys_are_unique() {
+        let mut keys: Vec<char> = MENU.iter().map(|m| m.key).collect();
+        keys.push(END_ITEM.key);
+        let set: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(set.len(), keys.len(), "{keys:?}");
     }
 
     #[test]

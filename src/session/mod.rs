@@ -62,7 +62,11 @@ pub struct Session {
 }
 
 /// Our own tmux server (socket `wicli`), so the user's tmux and its config are untouched.
-const TMUX: &str = "tmux -L wicli -f /dev/null -u";
+fn tmux_cmd() -> String {
+    // WICLI_TMUX_SOCKET lets tests that run side by side on one box use separate tmux servers.
+    let sock = std::env::var("WICLI_TMUX_SOCKET").ok().filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    format!("tmux -L {} -f /dev/null -u", sock.as_deref().unwrap_or("wicli"))
+}
 
 pub fn session_name(n: u32) -> String {
     format!("wicli-{n}")
@@ -85,18 +89,34 @@ pub fn next_free(used: &BTreeSet<u32>) -> u32 {
 /// Command that creates (if needed) and attaches the named tmux session with tmux's UI
 /// switched off: no status line, no prefix key, no mouse capture. Runs under `sh -c` so the
 /// user's login shell does not matter. Options are only set when the server starts.
-pub fn attach_command(name: &str, cols: u16, rows: u16) -> String {
-    let t = TMUX;
+/// `dir` is the folder the new session starts in (`new-session -c`); it only matters when the
+/// session is created, an existing session keeps its own.
+pub fn attach_command(name: &str, cols: u16, rows: u16, dir: Option<&str>) -> String {
+    let t = tmux_cmd();
+    let start = dir.map(|d| format!(" -c {}", crate::exec::sq(d))).unwrap_or_default();
     let script = format!(
         "T=\"{t}\"; $T has-session -t ={name} 2>/dev/null || $T start-server \\; \
          set -g status off \\; set -g prefix None \\; set -g prefix2 None \\; set -g mouse off \\; \
          set -g escape-time 10 \\; set -g default-terminal tmux-256color \\; \
          set -g set-titles on \\; set -g set-titles-string \\#T \\; \
-         new-session -d -s {name} -x {cols} -y {rows} \\; \
+         new-session -d -s {name} -x {cols} -y {rows}{start} \\; \
          set -ga terminal-features ,\\*:RGB; \
          exec $T attach-session -d -t ={name}"
     );
-    format!("sh -c '{script}'")
+    // The folder may contain quotes, so the whole script is quoted as one argument.
+    format!("sh -c {}", crate::exec::sq(&script))
+}
+
+/// Command that starts the user's login shell in `dir` without tmux (the folder is quoted, so
+/// no folder name can run anything). If the folder is gone the shell does not start.
+pub fn plain_shell_command(dir: &str) -> String {
+    format!("cd -- {} && exec \"${{SHELL:-/bin/sh}}\" -l", crate::exec::sq(dir))
+}
+
+/// Shells that count as "idle at a prompt" for `#{pane_current_command}` (login shells show a
+/// leading dash).
+pub fn is_shell_name(cmd: &str) -> bool {
+    matches!(cmd.trim().trim_start_matches('-'), "bash" | "zsh" | "sh" | "dash" | "fish" | "ksh")
 }
 
 fn default_identities() -> Vec<PathBuf> {
@@ -165,7 +185,7 @@ impl Session {
     }
 
     async fn list_sessions(&self) -> Vec<u32> {
-        match self.exec(&format!("{TMUX} list-sessions -F '#S' 2>/dev/null")).await {
+        match self.exec(&format!("{} list-sessions -F '#S' 2>/dev/null", tmux_cmd())).await {
             Ok((out, _)) => parse_sessions(&String::from_utf8_lossy(&out)),
             Err(_) => Vec::new(),
         }
@@ -176,10 +196,21 @@ impl Session {
         if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return None;
         }
-        let cmd = format!("{TMUX} display-message -p -t ={name} '#{{pane_current_path}}' 2>/dev/null");
+        let cmd = format!("{} display-message -p -t ={name}: '#{{pane_current_path}}' 2>/dev/null", tmux_cmd());
         let (out, status) = self.exec(&cmd).await.ok()?;
         let p = String::from_utf8_lossy(&out).trim().to_string();
         (status == 0 && p.starts_with('/')).then_some(p)
+    }
+
+    /// Name of the program in the foreground of the tmux pane behind a tab (e.g. `bash`, `node`).
+    pub async fn tmux_pane_command(&self, name: &str) -> Option<String> {
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return None;
+        }
+        let cmd = format!("{} display-message -p -t ={name}: '#{{pane_current_command}}' 2>/dev/null", tmux_cmd());
+        let (out, status) = self.exec(&cmd).await.ok()?;
+        let c = String::from_utf8_lossy(&out).trim().to_string();
+        (status == 0 && !c.is_empty()).then_some(c)
     }
 
     pub fn has_tmux(&self) -> bool {
@@ -204,12 +235,12 @@ impl Session {
         if let Some(n) = name.strip_prefix("wicli-").and_then(|n| n.parse().ok()) {
             self.used.lock().unwrap().remove(&n);
         }
-        let _ = self.exec(&format!("{TMUX} kill-session -t ={name} 2>/dev/null")).await;
+        let _ = self.exec(&format!("{} kill-session -t ={name} 2>/dev/null", tmux_cmd())).await;
     }
 
     /// End every wicli session: the dedicated tmux server goes away with them.
     pub async fn end_all_sessions(&self) {
-        let _ = self.exec(&format!("{TMUX} kill-server 2>/dev/null")).await;
+        let _ = self.exec(&format!("{} kill-server 2>/dev/null", tmux_cmd())).await;
     }
 
     /// SFTP session over the existing connection (no second login, nothing installed on the box).
@@ -226,13 +257,17 @@ impl Session {
 
     /// Open an interactive shell on a PTY of the given size; with `tmux_name`, inside that
     /// tmux session (created if missing, reattached if it exists).
-    pub async fn open_shell(&self, cols: u16, rows: u16, tmux_name: Option<&str>) -> Result<Channel<Msg>> {
+    /// `dir` is where a new shell starts (the login directory when None).
+    pub async fn open_shell(&self, cols: u16, rows: u16, tmux_name: Option<&str>, dir: Option<&str>) -> Result<Channel<Msg>> {
         let ch = self.handle.channel_open_session().await?;
         let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
         ch.request_pty(false, &term, cols as u32, rows as u32, 0, 0, &[]).await?;
         match tmux_name {
-            Some(name) => ch.exec(false, attach_command(name, cols, rows)).await?,
-            None => ch.request_shell(false).await?,
+            Some(name) => ch.exec(false, attach_command(name, cols, rows, dir)).await?,
+            None => match dir {
+                Some(d) => ch.exec(false, plain_shell_command(d)).await?,
+                None => ch.request_shell(false).await?,
+            },
         }
         Ok(ch)
     }
@@ -310,9 +345,41 @@ mod tests {
 
     #[test]
     fn attach_command_hides_tmux() {
-        let c = attach_command("wicli-1", 90, 24);
+        let c = attach_command("wicli-1", 90, 24, None);
         assert!(c.contains("status off") && c.contains("prefix None") && c.contains("-s wicli-1"));
         assert!(c.contains("attach-session -d -t =wicli-1"));
         assert!(!c.contains('\''.to_string().repeat(2).as_str()));
+    }
+
+    #[test]
+    fn attach_command_starts_in_the_folder() {
+        let c = attach_command("wicli-2", 90, 24, Some("/home/dev/web app"));
+        assert!(c.contains("-y 24 -c "), "{c}");
+        // The folder survives two levels of quoting: the outer shell and sh -c.
+        let out = std::process::Command::new("sh").arg("-c").arg(format!("printf %s {c}")).output().unwrap();
+        let echoed = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(echoed.contains("-c '/home/dev/web app' \\;"), "{echoed}");
+        // Let sh unquote the outer layer and print the script it would run.
+        let tricky = attach_command("wicli-2", 90, 24, Some("/tmp/it's $(x)"));
+        let arg = tricky.strip_prefix("sh -c ").unwrap();
+        let out = std::process::Command::new("sh").arg("-c").arg(format!("printf %s {arg}")).output().unwrap();
+        let script = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(script.contains(r"-c '/tmp/it'\''s $(x)' \;"), "{script}");
+    }
+
+    #[test]
+    fn plain_shell_command_quotes_the_folder() {
+        assert_eq!(plain_shell_command("/home/dev/a b"), "cd -- '/home/dev/a b' && exec \"${SHELL:-/bin/sh}\" -l");
+        assert!(plain_shell_command("/x'; rm -rf ~; '").starts_with(r"cd -- '/x'\''; rm -rf ~; '\''' && exec"));
+    }
+
+    #[test]
+    fn recognises_shell_names() {
+        for s in ["bash", "zsh", "sh", "dash", "fish", "ksh", "-bash", "bash\n"] {
+            assert!(is_shell_name(s), "{s}");
+        }
+        for s in ["node", "claude", "sleep", "vim", "ssh", "python3", "", "bashful"] {
+            assert!(!is_shell_name(s), "{s}");
+        }
     }
 }

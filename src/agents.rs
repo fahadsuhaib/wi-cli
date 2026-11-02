@@ -42,12 +42,12 @@ impl Agent {
     }
 }
 
-/// Agents whose markers exist at the workspace root. At most four stat calls.
-pub async fn detect(backend: &Backend) -> Vec<Agent> {
+/// Agents whose markers exist in the folder `dir` (absolute). At most four stat calls.
+pub async fn detect(backend: &Backend, dir: &str) -> Vec<Agent> {
     let mut found = Vec::new();
     for a in ALL {
         for m in a.markers() {
-            if backend.exists(m).await {
+            if backend.exists_in(dir, m).await {
                 found.push(a);
                 break;
             }
@@ -72,7 +72,13 @@ pub struct State {
     /// Last command used per agent, offered as the default in new workspaces.
     #[serde(default)]
     pub last_command: BTreeMap<String, String>,
+    /// Folders recently opened as a tab, most recent first, per workspace (`recents_key`).
+    #[serde(default)]
+    pub recent: BTreeMap<String, Vec<String>>,
 }
+
+/// How many recent folders are kept per workspace.
+pub const RECENT_MAX: usize = 10;
 
 pub fn state_path() -> PathBuf {
     config_path().with_file_name("state.toml")
@@ -94,6 +100,19 @@ impl State {
         std::fs::rename(tmp, path)
     }
 
+    /// Record `dir` as the most recently used folder: moved to the front if already there,
+    /// list capped at `RECENT_MAX`.
+    pub fn push_recent(&mut self, key: &str, dir: &str) {
+        let list = self.recent.entry(key.to_string()).or_default();
+        list.retain(|d| d != dir);
+        list.insert(0, dir.to_string());
+        list.truncate(RECENT_MAX);
+    }
+
+    pub fn recents(&self, key: &str) -> Vec<String> {
+        self.recent.get(key).cloned().unwrap_or_default()
+    }
+
     pub fn remember(&mut self, key: &str, agent: &str, command: &str) {
         self.workspace.insert(key.to_string(), Remembered { agent: agent.to_string(), command: command.to_string() });
         if agent != "none" && !command.is_empty() {
@@ -102,9 +121,19 @@ impl State {
     }
 }
 
-pub fn workspace_key(ws: &Workspace) -> String {
+/// Key for remembered agent choices: one per folder, so projects in different folders of the
+/// same box (or machine) are remembered separately.
+pub fn workspace_key(ws: &Workspace, dir: &str) -> String {
     match ws {
-        Workspace::Local(dir) => format!("local:{}", dir.display()),
+        Workspace::Local(_) => format!("local:{dir}"),
+        Workspace::Remote(b) => format!("box:{}:{dir}", b.name),
+    }
+}
+
+/// Key for the recent-folders list: one per machine / box.
+pub fn recents_key(ws: &Workspace) -> String {
+    match ws {
+        Workspace::Local(_) => "local".to_string(),
         Workspace::Remote(b) => format!("box:{}", b.name),
     }
 }
@@ -194,6 +223,46 @@ mod tests {
         st.remember("k", "claude", "claude --resume");
         assert_eq!(command_for(Agent::Claude, &cfg, &st, "k"), "claude --resume");
         assert_eq!(command_for(Agent::Claude, &cfg, &st, "other"), "claude --model opus");
+    }
+
+    #[test]
+    fn agent_keys_are_per_folder() {
+        let l = Workspace::Local(PathBuf::from("/w"));
+        assert_eq!(workspace_key(&l, "/w"), "local:/w");
+        assert_ne!(workspace_key(&l, "/w/a"), workspace_key(&l, "/w/b"));
+        let b = Workspace::Remote(crate::config::BoxConfig { name: "test".into(), host: "h".into(), port: 22, user: "u".into(), identity: None, known_hosts: None, use_tmux: true });
+        assert_eq!(workspace_key(&b, "/home/dev/a"), "box:test:/home/dev/a");
+        assert_ne!(workspace_key(&b, "/home/dev/a"), workspace_key(&b, "/home/dev/b"));
+        assert_eq!(recents_key(&l), "local");
+        assert_eq!(recents_key(&b), "box:test");
+        let mut st = State::default();
+        st.remember(&workspace_key(&l, "/w/a"), "claude", "claude");
+        assert!(st.workspace.contains_key("local:/w/a") && !st.workspace.contains_key("local:/w/b"));
+    }
+
+    #[test]
+    fn recent_folders_are_most_recent_first_deduped_and_capped() {
+        let mut st = State::default();
+        for i in 0..15 {
+            st.push_recent("local", &format!("/p/{i}"));
+        }
+        let r = st.recents("local");
+        assert_eq!(r.len(), RECENT_MAX);
+        assert_eq!(r[0], "/p/14");
+        assert_eq!(r[9], "/p/5");
+        st.push_recent("local", "/p/10");
+        let r = st.recents("local");
+        assert_eq!(r[0], "/p/10");
+        assert_eq!(r.iter().filter(|d| *d == "/p/10").count(), 1);
+        assert_eq!(r.len(), RECENT_MAX);
+        assert!(st.recents("box:x").is_empty());
+        st.push_recent("box:x", "/h");
+        assert_eq!(st.recents("local").len(), RECENT_MAX, "lists are per workspace");
+        let back: State = toml::from_str(&toml::to_string_pretty(&st).unwrap()).unwrap();
+        assert_eq!(back.recents("local"), st.recents("local"));
+        assert_eq!(back.recents("box:x"), vec!["/h"]);
+        let old: State = toml::from_str("[workspace]\n").unwrap();
+        assert!(old.recent.is_empty(), "state files from before still load");
     }
 
     #[test]

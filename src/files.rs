@@ -61,6 +61,34 @@ impl Backend {
         }
     }
 
+    /// Whether `path` exists inside the folder `dir` (one bounded stat). `dir` is absolute.
+    pub async fn exists_in(&self, dir: &str, name: &str) -> bool {
+        self.exists(&format!("{}/{name}", dir.trim_end_matches('/'))).await
+    }
+
+    /// Resolve `input` (typed in the folder prompt, relative to `base`) to an absolute folder
+    /// that exists. Errors are worded for the prompt.
+    pub async fn resolve_folder(&self, base: &str, input: &str) -> Result<String, String> {
+        if !crate::exec::folder_name_ok(input) {
+            return Err("folder name has control characters".into());
+        }
+        let abs = self.resolve(&anchor(base, input)).await.map_err(|_| format!("no such folder: {input}"))?;
+        let is_dir = match self {
+            Backend::Local(_) => tokio::fs::metadata(&abs).await.map(|m| m.is_dir()).unwrap_or(false),
+            Backend::Remote(s) => match s.sftp().await {
+                Ok(sftp) => sftp.metadata(abs.clone()).await.map(|m| m.is_dir()).unwrap_or(false),
+                Err(_) => false,
+            },
+        };
+        if !is_dir {
+            return Err(format!("not a folder: {input}"));
+        }
+        if !crate::exec::folder_name_ok(&abs) {
+            return Err("folder name has control characters".into());
+        }
+        Ok(abs)
+    }
+
     /// Absolute path with symlinks resolved; fails if it does not exist.
     pub async fn resolve(&self, path: &str) -> Result<String> {
         let p = self.absolutize(path);
@@ -138,6 +166,24 @@ impl Backend {
     }
 }
 
+/// Make typed input relative to a tab's folder: absolute (`/`) and home (`~`) input is kept,
+/// anything else is looked up inside `base`. An empty `base` leaves the input alone.
+pub fn anchor(base: &str, input: &str) -> String {
+    if base.is_empty() || input.starts_with('/') || input.starts_with('~') {
+        return input.to_string();
+    }
+    if input.is_empty() {
+        return base.to_string();
+    }
+    format!("{}/{input}", base.trim_end_matches('/'))
+}
+
+/// Tab completion for the folder prompt: like `complete` but only directories are candidates.
+pub fn complete_dirs(input: &str, entries: &[Entry]) -> Completion {
+    let dirs: Vec<Entry> = entries.iter().filter(|e| e.is_dir).cloned().collect();
+    complete(input, &dirs)
+}
+
 /// Result of a Tab press in the path prompt.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Completion {
@@ -201,6 +247,42 @@ mod tests {
         assert!(complete("", &l).shown.iter().all(|n| !n.starts_with('.')), "hidden files stay hidden");
         assert_eq!(complete(".g", &l).input, ".git/");
         assert_eq!(complete("zzz", &l).input, "zzz");
+    }
+
+    #[test]
+    fn folder_completion_offers_directories_only() {
+        let l = [e("web-app", true), e("web.txt", false), e("webhooks", true), e(".git", true), e("zeta", false)];
+        let c = complete_dirs("/p/we", &l);
+        assert_eq!(c.shown, vec!["web-app/", "webhooks/"]);
+        assert_eq!(c.input, "/p/web");
+        assert_eq!(complete_dirs("/p/web-", &l).input, "/p/web-app/");
+        assert_eq!(complete_dirs("/p/z", &l).total, 0, "files never complete");
+        assert!(complete_dirs("/p/", &l).shown.iter().all(|n| !n.starts_with('.') && n.ends_with('/')), "hidden stays hidden");
+        assert_eq!(complete_dirs("/p/.g", &l).input, "/p/.git/");
+    }
+
+    #[test]
+    fn anchors_relative_input_to_the_tab_folder() {
+        assert_eq!(anchor("/w/proj", "src/a.rs"), "/w/proj/src/a.rs");
+        assert_eq!(anchor("/w/proj/", "a"), "/w/proj/a");
+        assert_eq!(anchor("/w/proj", "/etc/x"), "/etc/x");
+        assert_eq!(anchor("/w/proj", "~/x"), "~/x");
+        assert_eq!(anchor("/w/proj", ""), "/w/proj");
+        assert_eq!(anchor("", "a"), "a");
+    }
+
+    #[tokio::test]
+    async fn resolves_folders_and_rejects_files_and_missing() {
+        let d = std::env::temp_dir().join(format!("wi-folder-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("f.txt"), "x").unwrap();
+        let b = Backend::Local(d.clone());
+        let base = d.to_string_lossy().into_owned();
+        assert!(b.resolve_folder(&base, "sub").await.unwrap().ends_with("/sub"));
+        assert!(b.resolve_folder(&base, "f.txt").await.unwrap_err().starts_with("not a folder"));
+        assert!(b.resolve_folder(&base, "nope").await.unwrap_err().starts_with("no such folder"));
+        assert!(b.exists_in(&base, "f.txt").await && !b.exists_in(&base, "g.txt").await);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

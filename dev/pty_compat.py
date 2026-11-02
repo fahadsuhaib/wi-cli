@@ -55,9 +55,11 @@ send("echo AFTERVIM$((3+4))", 1)
 check("vim opens and quits cleanly, primary screen restored", "AFTERVIM7" in text() and "BEFOREVIM" in text())
 send("printf '\\033]0;mytitle\\007'", 0.5)
 os.write(fd, MENU + b"n"); pump(1.5)
-check("tab strip shows OSC title", "1 mytitle" in text() and "2 shell 2" in text())
+# With several tabs the labels carry the folder name ("ws"), after it the program's own title.
+strip = text().split("\n")[1]
+check("tab strip shows OSC title", "1 ws · mytitle" in strip and "2 ws" in strip)
 send("printf '\\033]2;second\\033\\\\'", 0.8)
-check("OSC title via ST on tab 2", "2 second" in text())
+check("OSC title via ST on tab 2", "2 ws · second" in text().split("\n")[1])
 if os.system("command -v claude >/dev/null") == 0:
     send("claude --version", 4)
     print("claude --version screen tail:", [l for l in text().split("\n") if "Claude Code" in l][-1:])

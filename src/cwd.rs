@@ -14,6 +14,55 @@ pub async fn tab_cwd(backend: &Backend, osc7: Option<&str>, pid: Option<u32>, tm
     }
 }
 
+/// Is a tab's shell idle at its prompt, or is a program running in it?
+#[derive(Debug, PartialEq, Eq)]
+pub enum Activity {
+    Ready,
+    /// A program is running (its name, when known).
+    Busy(String),
+    /// Cannot tell (so nothing may be typed).
+    Unknown,
+}
+
+/// Local decision: the pty's foreground process group is the shell's own when it is idle.
+pub fn local_idle(foreground: Option<i32>, shell_pid: Option<u32>, running: impl FnOnce(i32) -> Option<String>) -> Activity {
+    match (foreground, shell_pid) {
+        (Some(fg), Some(pid)) if fg == pid as i32 => Activity::Ready,
+        (Some(fg), Some(_)) => Activity::Busy(running(fg).unwrap_or_else(|| "a program".into())),
+        _ => Activity::Unknown,
+    }
+}
+
+/// tmux decision: the pane's foreground command is a shell.
+pub fn tmux_idle(command: Option<&str>) -> Activity {
+    match command {
+        Some(c) if crate::session::is_shell_name(c) => Activity::Ready,
+        Some(c) => Activity::Busy(c.trim().to_string()),
+        None => Activity::Unknown,
+    }
+}
+
+/// Name of the process behind a process group id (`ps`; None when it cannot be read).
+fn process_name(pgid: i32) -> Option<String> {
+    let out = std::process::Command::new("ps").args(["-o", "comm=", "-p", &pgid.to_string()]).output().ok()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().rsplit('/').next()?.to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Whether a shell tab is idle at its prompt. Remote shells without tmux cannot be told apart.
+pub async fn tab_idle(backend: &Backend, handle: Option<&crate::workspace::ShellHandle>, tmux_session: Option<&str>) -> Activity {
+    match backend {
+        Backend::Local(_) => match handle {
+            Some(h) => local_idle(h.foreground().await, h.pid(), process_name),
+            None => Activity::Unknown,
+        },
+        Backend::Remote(s) => match tmux_session {
+            Some(name) => tmux_idle(s.tmux_pane_command(name).await.as_deref()),
+            None => Activity::Unknown,
+        },
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn local_cwd(pid: u32) -> Option<String> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned())
@@ -47,6 +96,26 @@ mod tests {
         let here = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
         let got = local_cwd(std::process::id()).expect("cwd of our own process");
         assert_eq!(std::fs::canonicalize(got).unwrap(), here);
+    }
+
+    #[test]
+    fn local_idle_decision() {
+        assert_eq!(local_idle(Some(100), Some(100), |_| None), Activity::Ready);
+        assert_eq!(local_idle(Some(200), Some(100), |p| Some(format!("prog{p}"))), Activity::Busy("prog200".into()));
+        assert_eq!(local_idle(Some(200), Some(100), |_| None), Activity::Busy("a program".into()));
+        assert_eq!(local_idle(None, Some(100), |_| None), Activity::Unknown);
+        assert_eq!(local_idle(Some(100), None, |_| None), Activity::Unknown);
+    }
+
+    #[test]
+    fn tmux_idle_decision() {
+        for sh in ["bash", "zsh", "sh", "dash", "fish", "ksh", "-bash"] {
+            assert_eq!(tmux_idle(Some(sh)), Activity::Ready, "{sh}");
+        }
+        assert_eq!(tmux_idle(Some("node")), Activity::Busy("node".into()));
+        assert_eq!(tmux_idle(Some("claude\n")), Activity::Busy("claude".into()));
+        assert_eq!(tmux_idle(Some("sleep")), Activity::Busy("sleep".into()));
+        assert_eq!(tmux_idle(None), Activity::Unknown);
     }
 
     #[tokio::test]
