@@ -49,6 +49,18 @@ pub struct Preview {
     /// 1-based source line to bring into view and mark (text previews only).
     pub target_line: Option<usize>,
     goto_pending: bool,
+    /// Find-in-preview state (matches, the current one) and a copy of the lines with matches lit.
+    pub find: Option<Find>,
+    hl: Option<Vec<Line<'static>>>,
+    find_pending: bool,
+}
+
+/// Matches of the text typed in the preview's find prompt.
+#[derive(Clone, Debug)]
+pub struct Find {
+    /// (source line, start, length) in characters of the line's text (after the line-number gutter).
+    pub hits: Vec<(usize, usize, usize)>,
+    pub cur: usize,
 }
 
 /// Human-readable size: `256 KB`, `48 MB`.
@@ -97,6 +109,9 @@ impl Preview {
             starts: Vec::new(),
             target_line: None,
             goto_pending: false,
+            find: None,
+            hl: None,
+            find_pending: false,
         };
         // Content wins over the extension: a binary file named notes.txt is never shown as text.
         if sniff_binary(bytes) {
@@ -161,6 +176,9 @@ impl Preview {
             starts: Vec::new(),
             target_line: None,
             goto_pending: false,
+            find: None,
+            hl: None,
+            find_pending: false,
         }
     }
 
@@ -170,7 +188,7 @@ impl Preview {
             (Some((w, _)), true) => {
                 let mut pos = Vec::new();
                 let mut row = 0;
-                for (i, l) in self.lines.iter().enumerate() {
+                for (i, l) in self.src().iter().enumerate() {
                     if self.jumps.contains(&i) {
                         pos.push(row);
                     }
@@ -206,7 +224,7 @@ impl Preview {
                 let g = self.gutter;
                 let mut w: Vec<Line<'static>> = Vec::new();
                 let mut starts = Vec::with_capacity(self.lines.len());
-                for l in &self.lines {
+                for l in self.hl.as_ref().unwrap_or(&self.lines) {
                     starts.push(w.len());
                     w.extend(wrap_line(l, g, width as usize));
                 }
@@ -224,7 +242,105 @@ impl Preview {
                 self.top = first.saturating_sub(height / 3);
             }
         }
+        if std::mem::take(&mut self.find_pending) {
+            self.show_current_match(width as usize, height);
+        }
         self.top = self.top.min(max);
+    }
+
+    fn src(&self) -> &Vec<Line<'static>> {
+        self.hl.as_ref().unwrap_or(&self.lines)
+    }
+
+    /// Scroll (and, unwrapped, pan) so the current find match is on screen.
+    fn show_current_match(&mut self, width: usize, height: usize) {
+        let Some(&(line, start, len)) = self.find.as_ref().and_then(|f| f.hits.get(f.cur)) else { return };
+        let row = self.match_row(line, start, width);
+        let h = height.max(1);
+        if row < self.top || row >= self.top + h {
+            self.top = row.saturating_sub(h / 3);
+        }
+        if !self.wrap {
+            let room = width.saturating_sub(self.gutter).max(1);
+            if start < self.left || start + len > self.left + room {
+                self.left = start.saturating_sub(room / 3);
+            }
+        }
+    }
+
+    /// Display row of character `start` of source line `line` (wrapped rows when wrapping).
+    fn match_row(&self, line: usize, start: usize, width: usize) -> usize {
+        match (&self.wrapped, self.wrap) {
+            (Some(_), true) => self.starts.get(line).copied().unwrap_or(0) + wrap_row_of(&self.lines[line], self.gutter, width, start),
+            _ => line,
+        }
+    }
+
+    /// Light up every match of `needle` (smart case) and make the first one at or below the top of
+    /// the view current. Returns the number of matches.
+    pub fn set_find(&mut self, needle: &str) -> usize {
+        let mut hits = Vec::new();
+        for (i, l) in self.lines.iter().enumerate() {
+            let text: String = cells(l).into_iter().skip(self.gutter).map(|(c, _)| c).collect();
+            hits.extend(crate::search::find_matches(&text, needle).into_iter().map(|(s, n)| (i, s, n)));
+        }
+        let n = hits.len();
+        if n == 0 {
+            self.clear_find();
+            return 0;
+        }
+        let top_line = match (&self.wrapped, self.wrap) {
+            (Some(_), true) => self.starts.partition_point(|&r| r < self.top),
+            _ => self.top,
+        };
+        let cur = hits.iter().position(|h| h.0 >= top_line).unwrap_or(0);
+        self.find = Some(Find { hits, cur });
+        self.refresh_find();
+        n
+    }
+
+    pub fn clear_find(&mut self) {
+        self.find = None;
+        self.hl = None;
+        self.wrapped = None;
+    }
+
+    /// Step to the next (or previous) match, wrapping around.
+    pub fn find_step(&mut self, forward: bool) {
+        if let Some(f) = self.find.as_mut() {
+            let n = f.hits.len();
+            f.cur = if forward { (f.cur + 1) % n } else { (f.cur + n - 1) % n };
+            self.refresh_find();
+        }
+    }
+
+    /// `match 3 of 17`.
+    pub fn find_label(&self) -> Option<String> {
+        self.find.as_ref().map(|f| format!("match {} of {}", f.cur + 1, f.hits.len()))
+    }
+
+    /// Rebuild the lit copy of the lines and ask the next layout to bring the current match in view.
+    fn refresh_find(&mut self) {
+        let Some(f) = &self.find else { return };
+        let lit = Style::default().fg(ratatui::style::Color::Black).bg(ratatui::style::Color::Yellow);
+        let cur = Style::default().fg(ratatui::style::Color::Black).bg(ratatui::style::Color::Green).add_modifier(Modifier::BOLD);
+        let mut by_line: std::collections::BTreeMap<usize, Vec<(usize, usize, bool)>> = Default::default();
+        for (i, &(l, s, n)) in f.hits.iter().enumerate() {
+            by_line.entry(l).or_default().push((s, n, i == f.cur));
+        }
+        let mut out = self.lines.clone();
+        for (l, hs) in by_line {
+            let mut cs = cells(&self.lines[l]);
+            for (s, n, is_cur) in hs {
+                for c in cs.iter_mut().skip(self.gutter + s).take(n) {
+                    c.1 = if is_cur { cur } else { lit };
+                }
+            }
+            out[l] = from_cells(&cs);
+        }
+        self.hl = Some(out);
+        self.wrapped = None;
+        self.find_pending = true;
     }
 
     /// Bring a source line (1-based) into view and mark it. Only text previews have source lines.
@@ -274,9 +390,13 @@ impl Preview {
                 }
             }
             Wrap => self.toggle_wrap(),
+            NextFile if self.find.is_some() && self.kind != Kind::Diff => self.find_step(true),
+            PrevFile if self.find.is_some() && self.kind != Kind::Diff => self.find_step(false),
             NextFile => self.jump_file(true, page),
             PrevFile => self.jump_file(false, page),
-            Reload | Back => return false,
+            MatchNext => self.find_step(true),
+            MatchPrev => self.find_step(false),
+            Reload | Back | Find => return false,
         }
         true
     }
@@ -291,7 +411,7 @@ impl Preview {
     pub fn visible(&self, height: usize, width: usize) -> Vec<Line<'static>> {
         let mut rows: Vec<Line<'static>> = match (&self.wrapped, self.wrap) {
             (Some((_, w)), true) => w.iter().skip(self.top).take(height).cloned().collect(),
-            _ => self.lines.iter().skip(self.top).take(height).map(|l| slice_line(l, self.gutter, self.left, width)).collect(),
+            _ => self.src().iter().skip(self.top).take(height).map(|l| slice_line(l, self.gutter, self.left, width)).collect(),
         };
         if let Some((a, b)) = self.target_rows() {
             for (i, row) in rows.iter_mut().enumerate() {
@@ -408,6 +528,29 @@ pub fn wrap_line(line: &Line<'_>, gutter: usize, width: usize) -> Vec<Line<'stat
     }
     flush(&mut cur, &mut first, &mut out);
     out
+}
+
+/// Which of the rows a line wraps into (0-based) holds character `idx` of its text. Follows the
+/// same breaking rules as `wrap_line`.
+pub fn wrap_row_of(line: &Line<'_>, gutter: usize, width: usize, idx: usize) -> usize {
+    let all = cells(line);
+    let body = &all[gutter.min(all.len())..];
+    let room = width.saturating_sub(gutter).max(1);
+    let (mut row, mut w, mut count) = (0, 0, 0);
+    for (i, &(c, _)) in body.iter().enumerate() {
+        let cw = c.width().unwrap_or(0);
+        if w + cw > room && count > 0 {
+            row += 1;
+            w = 0;
+            count = 0;
+        }
+        if i == idx {
+            return row;
+        }
+        w += cw;
+        count += 1;
+    }
+    row
 }
 
 /// Horizontal window: keep the gutter, drop `left` columns of content, cut at `width`.
@@ -568,6 +711,84 @@ mod tests {
         let mut m = Preview::build("a.md", b"# hi\n", 5, &opts());
         m.goto_line(1);
         assert_eq!(m.target_line, None);
+    }
+
+    fn lit(l: &Line<'_>) -> String {
+        l.spans.iter().filter(|s| s.style.bg == Some(ratatui::style::Color::Yellow) || s.style.bg == Some(ratatui::style::Color::Green)).map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn find_lights_matches_and_steps_through_them() {
+        let body: String = (1..=60).map(|i| if i % 10 == 0 { format!("needle on line {i}\n") } else { format!("plain {i}\n") }).collect();
+        let mut p = Preview::build("a.txt", body.as_bytes(), body.len() as u64, &opts());
+        assert_eq!(p.set_find("NEEDLE"), 0, "capital letters match exactly");
+        assert!(p.find.is_none());
+        assert_eq!(p.set_find("needle"), 6);
+        assert_eq!(p.find_label().as_deref(), Some("match 1 of 6"));
+        p.layout(80, 6);
+        assert_eq!(p.top, 9 - 6 / 3, "the first match is brought into view");
+        let vis = p.visible(6, 80);
+        assert_eq!(vis.iter().map(lit).filter(|s| !s.is_empty()).collect::<Vec<_>>(), vec!["needle"]);
+        p.navigate(keys::PvKey::NextFile, 6);
+        assert_eq!(p.find_label().as_deref(), Some("match 2 of 6"));
+        p.layout(80, 6);
+        assert!(p.visible(6, 80).iter().any(|l| plain(l).contains("line 20")));
+        for _ in 0..5 {
+            p.navigate(keys::PvKey::MatchNext, 6);
+        }
+        assert_eq!(p.find_label().as_deref(), Some("match 1 of 6"), "wraps around");
+        p.navigate(keys::PvKey::MatchPrev, 6);
+        assert_eq!(p.find_label().as_deref(), Some("match 6 of 6"));
+        p.layout(80, 6);
+        assert!(p.visible(6, 80).iter().any(|l| plain(l).contains("line 60")));
+        p.clear_find();
+        assert!(p.visible(6, 80).iter().all(|l| lit(l).is_empty()));
+    }
+
+    #[test]
+    fn in_the_git_view_n_still_means_next_file() {
+        let mut p = git_view();
+        assert!(p.set_find("diff") > 0);
+        let starts = p.jumps.clone();
+        p.navigate(keys::PvKey::NextFile, 3);
+        assert_eq!(p.top, starts[0], "N jumps files");
+        let before = p.find_label();
+        p.navigate(keys::PvKey::MatchNext, 3);
+        assert_ne!(p.find_label(), before, "Enter steps matches");
+    }
+
+    #[test]
+    fn matches_in_wrapped_text_map_to_display_rows() {
+        let long = format!("{}needle{}", "a".repeat(37), "b".repeat(30));
+        let line = Line::from(vec![Span::raw("  1 "), Span::raw(long.clone())]);
+        // width 24, gutter 4: 20 content columns per row: needle starts at char 37 -> row 1, ends in row 2
+        assert_eq!(wrap_row_of(&line, 4, 24, 0), 0);
+        assert_eq!(wrap_row_of(&line, 4, 24, 19), 0);
+        assert_eq!(wrap_row_of(&line, 4, 24, 20), 1);
+        assert_eq!(wrap_row_of(&line, 4, 24, 37), 1);
+        assert_eq!(wrap_row_of(&line, 4, 24, 40), 2);
+        // it agrees with wrap_line: the row that contains the first character of the match
+        let rows = wrap_line(&line, 4, 24);
+        assert!(plain(&rows[wrap_row_of(&line, 4, 24, 37)]).contains(&long[37..40]));
+        // end to end: the marked match is on the display row the preview scrolled to
+        let body: String = (1..=30).map(|i| if i == 25 { format!("{long}\n") } else { format!("{i} {}\n", "word ".repeat(12)) }).collect();
+        let mut p = Preview::build("a.log", body.as_bytes(), body.len() as u64, &opts());
+        p.toggle_wrap();
+        p.layout(30, 6);
+        assert_eq!(p.set_find("needle"), 1);
+        p.layout(30, 6);
+        let vis = p.visible(6, 30);
+        assert_eq!(vis.iter().map(lit).filter(|s| !s.is_empty()).collect::<Vec<_>>().concat(), "needle", "{:?}", vis.iter().map(plain).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn find_pans_unwrapped_text_to_the_match() {
+        let body = format!("{}needle\n", "x".repeat(200));
+        let mut p = Preview::build("a.txt", body.as_bytes(), body.len() as u64, &opts());
+        p.set_find("needle");
+        p.layout(40, 5);
+        assert!(p.left > 0);
+        assert_eq!(p.visible(5, 40).iter().map(lit).collect::<Vec<_>>().concat(), "needle");
     }
 
     #[test]

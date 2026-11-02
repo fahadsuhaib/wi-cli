@@ -12,6 +12,7 @@ mod mouse;
 mod opener;
 mod preview;
 mod scroll;
+mod search;
 mod select;
 mod files;
 mod session;

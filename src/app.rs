@@ -10,6 +10,7 @@ use crate::mouse::{self, Button, Kind, MouseEvent, Piece};
 use crate::links::{self, Link, LinkKind};
 use crate::opener::{self, FetchOpts, FetchResult, Handling, OpenCfg};
 use crate::select::{self, Pos};
+use crate::search::{self, K, FindPrompt, FindTarget, Finder, GrepPrompt, grep::{self, Results}, output::OutFind};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -43,6 +44,51 @@ enum Mode {
     Menu(usize),
     /// Browsing scrollback of the active tab.
     Scroll,
+    /// The "search in files" query prompt.
+    GrepPrompt(GrepPrompt),
+    /// Search results (kept in `last_results` while closed).
+    Results(Box<Results>),
+    /// The fuzzy file finder.
+    Finder(Box<Finder>),
+    /// The find prompt for shell output or a preview.
+    FindPrompt(FindPrompt),
+    /// Stepping through matches in the active tab's scrollback.
+    OutFind(Box<OutFind>),
+    /// A search or file listing is running; Esc cancels.
+    Working(&'static str),
+}
+
+/// A search or file listing in flight (dropped = cancelled; the process is killed with it).
+type Job<'a> = Pin<Box<dyn Future<Output = JobDone> + 'a>>;
+
+enum JobDone {
+    Grep(Results),
+    Files(Result<grep::FileList, String>, String),
+}
+
+fn start_search(backend: &Backend, dir: String, q: grep::Query) -> Job<'_> {
+    Box::pin(async move { JobDone::Grep(grep::search(backend, &dir, q).await) })
+}
+
+fn start_files(backend: &Backend, dir: String) -> Job<'_> {
+    Box::pin(async move {
+        let r = grep::list_files(backend, &dir).await;
+        JobDone::Files(r, dir)
+    })
+}
+
+/// Paste text into whichever search input is open. Returns true when one was.
+fn paste_search(mode: &mut Mode, text: &str) -> bool {
+    match mode {
+        Mode::GrepPrompt(g) => g.query.text.push_str(text),
+        Mode::FindPrompt(f) => f.text.push_str(text),
+        Mode::Finder(f) => {
+            let keys: Vec<K> = text.chars().map(K::Char).collect();
+            f.type_keys(&keys);
+        }
+        _ => return false,
+    }
+    true
 }
 
 enum Key {
@@ -152,6 +198,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut sel_reset = false;
     let mut pending: Option<Pending> = None;
     let mut fetching: Option<Fetching<'_>> = None;
+    let mut job: Option<Job<'_>> = None;
+    let mut last_results: Option<Box<Results>> = None;
     let mut filter = PasteFilter::default();
     let mut flush_at: Option<Instant> = None;
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
@@ -239,7 +287,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 if std::mem::take(&mut sel_reset) { sel = None; }
                 let menu = match mode { Mode::Menu(i) => Some(i), _ => None };
                 let scroll = match mode {
-                    Mode::Scroll => { let s = app.tabs[app.active].parser.screen(); Some((s.scrollback(), s.scrollback_len())) }
+                    Mode::Scroll | Mode::OutFind(_) => { let s = app.tabs[app.active].parser.screen(); Some((s.scrollback(), s.scrollback_len())) }
                     _ => None,
                 };
                 let (pcols, prows) = shell_size(app.tabs.len())?;
@@ -258,6 +306,33 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     .map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
                 let selection = sel.as_ref().filter(|s| s.tab == app.tabs[app.active].id).map(|s| (s.pane, select::normalize(s.anchor, s.end)));
                 let progress_dlg = fetching.as_ref().map(|f| f.dialog());
+                if let Ok(mr) = main_rect(&app) {
+                    match &mut mode {
+                        Mode::Results(r) => r.list.reveal(ui::search::results_list_rect(mr).height as usize),
+                        Mode::Finder(fd) => fd.list.reveal(ui::search::finder_list_rect(mr).height as usize),
+                        _ => {}
+                    }
+                }
+                let find_hl: Vec<(u16, u16, u16, bool)> = match &mode {
+                    Mode::OutFind(f) => f.in_view(app.tabs[app.active].parser.screen().scrollback()),
+                    _ => Vec::new(),
+                };
+                let status_s: Option<String> = match &mode {
+                    Mode::Working(what) => Some(format!("{what}... Esc cancels")),
+                    Mode::GrepPrompt(_) => Some("type the text · Enter searches · Esc cancels (Tab, Up, Down or a click change the options)".into()),
+                    Mode::Results(_) => Some(message.clone().unwrap_or_else(|| "arrows, PgUp/PgDn · Enter opens · S new search · R run again · Esc closes".into())),
+                    Mode::Finder(_) => Some("type to narrow · arrows pick · Enter opens · Esc closes".into()),
+                    Mode::FindPrompt(_) => Some("Enter finds · Esc cancels".into()),
+                    Mode::OutFind(f) => Some(format!("{}   N older · B newer · Esc leaves", f.label())),
+                    _ => None,
+                };
+                let search_view = match &mode {
+                    Mode::GrepPrompt(p) => Some(ui::search::SearchView::Grep(p)),
+                    Mode::Results(r) => Some(ui::search::SearchView::Results(r)),
+                    Mode::Finder(fd) => Some(ui::search::SearchView::Finder(fd)),
+                    Mode::FindPrompt(p) => Some(ui::search::SearchView::Find(p)),
+                    _ => None,
+                };
                 let confirm_ref = match &mode { Mode::Confirm(c) => Some(c), Mode::Fetch => progress_dlg.as_ref(), _ => None };
                 let hints_ref = match &mode { Mode::Hints(h) => Some((&h.hints[..], h.typed.as_str())), _ => None };
                 let view = View {
@@ -279,6 +354,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     message: message.as_deref(),
                     menu,
                     scroll,
+                    search: search_view,
+                    find_hl: &find_hl,
+                    status: status_s.as_deref(),
                 };
                 term.draw(|f| ui::draw(f, &view))?;
                 last_draw = Instant::now();
@@ -427,6 +505,23 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         }
                                     }
                                 }
+                                Intent::ListPick(row) => {
+                                    let picked = match &mut mode {
+                                        Mode::Results(r) => {
+                                            let h = ui::search::results_list_rect(main).height as usize;
+                                            r.list.hit(row, h).map(|i| r.list.select(i, h))
+                                        }
+                                        Mode::Finder(fd) => {
+                                            let h = ui::search::finder_list_rect(main).height as usize;
+                                            fd.list.hit(row, h).map(|i| fd.list.select(i, h))
+                                        }
+                                        _ => None,
+                                    };
+                                    if picked.is_some() {
+                                        out.extend(b"\r");
+                                        dirty = true;
+                                    }
+                                }
                             }
                         }
                         out
@@ -442,6 +537,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         if let Mode::Prompt(p) = &mut mode {
                             p.input.push_str(&String::from_utf8_lossy(&b).replace(['\r', '\n'], ""));
                             p.error = None;
+                            dirty = true;
+                        } else if paste_search(&mut mode, &String::from_utf8_lossy(&b).replace(['\r', '\n'], "")) {
                             dirty = true;
                         } else if let Mode::Ask(x) = &mut mode {
                             if let Some(buf) = x.editing.as_mut() {
@@ -482,17 +579,20 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             let side_focus = app.tabs[app.active].side_focused();
                             if app.tabs[app.active].is_preview() || side_focus {
                                 let rows = shell_size(app.tabs.len())?.1 as usize;
-                                let (mut back, mut reload) = (false, false);
+                                let (mut back, mut reload, mut find) = (false, false, false);
                                 if let Some(p) = focused_slot(&mut app).as_mut() {
                                     let page = rows - usize::from(p.banner.is_some() && rows > 1);
                                     for k in pvkeys::parse(head) {
                                         match k {
                                             PvKey::Back => back = true,
                                             PvKey::Reload => reload = true,
+                                            PvKey::Find => find = true,
                                             k => { p.navigate(k, page); }
                                         }
                                     }
+                                    if let Some(l) = p.find_label() { message = Some(l); }
                                 }
+                                if find { mode = Mode::FindPrompt(FindPrompt { target: FindTarget::Preview, text: String::new() }); }
                                 dirty = true;
                                 if back && side_focus { app.tabs[app.active].focus = Pane::Shell; }
                                 else if back { go_back(&mut app); }
@@ -521,6 +621,205 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 }
                                 None => chunk = &[],
                             }
+                        }
+                        Mode::Working(_) => {
+                            if search::decode(chunk, menu_key).iter().any(|k| matches!(k, K::Esc | K::Menu)) {
+                                job = None;
+                                mode = Mode::Shell;
+                                message = Some("cancelled".into());
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
+                        Mode::GrepPrompt(ref mut gp) => {
+                            let (mut cancel, mut start) = (false, None);
+                            for k in search::decode(chunk, menu_key) {
+                                match k {
+                                    K::Esc | K::Menu => {
+                                        cancel = true;
+                                        break;
+                                    }
+                                    k => {
+                                        if gp.key(k) {
+                                            start = Some(gp.query.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if cancel {
+                                mode = Mode::Shell;
+                            } else if let Some(q) = start {
+                                mode = Mode::Working("searching");
+                                job = Some(start_search(backend, active_dir(&app), q));
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
+                        Mode::Results(ref mut r) => {
+                            let h = ui::search::results_list_rect(main_rect(&app)?).height as usize;
+                            let (mut leave, mut open, mut rerun, mut newq) = (false, false, false, false);
+                            message = None;
+                            for k in search::decode(chunk, menu_key) {
+                                match k {
+                                    K::Up => r.list.step(-1, h),
+                                    K::Down => r.list.step(1, h),
+                                    K::PageUp => r.list.page(false, h),
+                                    K::PageDown => r.list.page(true, h),
+                                    K::Home => r.list.home(h),
+                                    K::End => r.list.end(h),
+                                    K::Enter => {
+                                        open = true;
+                                        break;
+                                    }
+                                    K::Esc | K::Menu => {
+                                        leave = true;
+                                        break;
+                                    }
+                                    K::Char('r' | 'R') => {
+                                        rerun = true;
+                                        break;
+                                    }
+                                    K::Char('s' | 'S') => {
+                                        newq = true;
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if open && let Some(m) = r.selected().cloned() {
+                                let path = anchor(&r.dir, &m.path);
+                                match open_preview(&mut app, backend, &path, read_cap, &opts, Some(m.line)).await {
+                                    Ok(pl) => {
+                                        leave = true;
+                                        if pl == Placement::TabNarrow {
+                                            message = Some("narrow: opened in a tab".into());
+                                        }
+                                    }
+                                    Err(e) => message = Some(format!("{}: {e}", sanitize(&m.path))),
+                                }
+                            }
+                            if rerun {
+                                let (d, q) = (r.dir.clone(), r.query.clone());
+                                mode = Mode::Working("searching");
+                                job = Some(start_search(backend, d, q));
+                            } else if newq {
+                                let q = r.query.clone();
+                                if let Mode::Results(b) = std::mem::replace(&mut mode, Mode::GrepPrompt(GrepPrompt::new(Some(&q)))) {
+                                    last_results = Some(b);
+                                }
+                            } else if leave && let Mode::Results(b) = std::mem::replace(&mut mode, Mode::Shell) {
+                                last_results = Some(b);
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
+                        Mode::Finder(ref mut fd) => {
+                            let h = ui::search::finder_list_rect(main_rect(&app)?).height as usize;
+                            let (mut leave, mut open) = (false, false);
+                            message = None;
+                            for k in search::decode(chunk, menu_key) {
+                                match k {
+                                    K::Up => fd.list.step(-1, h),
+                                    K::Down => fd.list.step(1, h),
+                                    K::PageUp => fd.list.page(false, h),
+                                    K::PageDown => fd.list.page(true, h),
+                                    K::Home => fd.list.home(h),
+                                    K::End => fd.list.end(h),
+                                    K::Enter => {
+                                        open = true;
+                                        break;
+                                    }
+                                    K::Esc | K::Menu => {
+                                        leave = true;
+                                        break;
+                                    }
+                                    k @ (K::Char(_) | K::Backspace | K::Clear) => fd.type_keys(&[k]),
+                                    _ => {}
+                                }
+                            }
+                            if open && let Some(f) = fd.selected().map(str::to_string) {
+                                match open_preview(&mut app, backend, &anchor(&fd.dir, &f), read_cap, &opts, None).await {
+                                    Ok(pl) => {
+                                        leave = true;
+                                        if pl == Placement::TabNarrow {
+                                            message = Some("narrow: opened in a tab".into());
+                                        }
+                                    }
+                                    Err(e) => message = Some(format!("{}: {e}", sanitize(&f))),
+                                }
+                            }
+                            if leave {
+                                mode = Mode::Shell;
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
+                        Mode::FindPrompt(ref mut fp) => {
+                            let (mut cancel, mut go) = (false, false);
+                            for k in search::decode(chunk, menu_key) {
+                                match k {
+                                    K::Esc | K::Menu => {
+                                        cancel = true;
+                                        break;
+                                    }
+                                    K::Enter => {
+                                        go = true;
+                                        break;
+                                    }
+                                    k => {
+                                        search::edit(&mut fp.text, k);
+                                    }
+                                }
+                            }
+                            if cancel {
+                                mode = Mode::Shell;
+                            } else if go && !fp.text.is_empty() {
+                                let (target, text) = (fp.target, fp.text.clone());
+                                mode = Mode::Shell;
+                                match target {
+                                    FindTarget::Output => {
+                                        let t = &mut app.tabs[app.active];
+                                        let f = OutFind::new(&mut t.parser, &text);
+                                        if f.hits.is_empty() {
+                                            message = Some(format!("no match for \"{}\" in the output", sanitize(&text)));
+                                        } else {
+                                            t.parser.screen_mut().set_scrollback(f.offset());
+                                            mode = Mode::OutFind(Box::new(f));
+                                        }
+                                    }
+                                    FindTarget::Preview => {
+                                        if let Some(p) = focused_slot(&mut app).as_mut() {
+                                            message = Some(if p.set_find(&text) == 0 { format!("no match for \"{}\"", sanitize(&text)) } else { p.find_label().unwrap_or_default() });
+                                        }
+                                    }
+                                }
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
+                        Mode::OutFind(ref mut f) => {
+                            let mut leave = false;
+                            for k in search::decode(chunk, menu_key) {
+                                match k {
+                                    K::Char('n' | 'N') => f.older(),
+                                    K::Char('b' | 'B') => f.newer(),
+                                    K::Esc | K::Menu => {
+                                        leave = true;
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if leave {
+                                app.tabs[app.active].parser.screen_mut().set_scrollback(0);
+                                mode = Mode::Shell;
+                            } else {
+                                let off = f.offset();
+                                app.tabs[app.active].parser.screen_mut().set_scrollback(off);
+                            }
+                            dirty = true;
+                            chunk = &[];
                         }
                         Mode::Confirm(_) => {
                             let (mut yes, mut no) = (false, false);
@@ -856,6 +1155,18 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                             message = Some("no preview pane open".into());
                                         }
                                     }
+                                    Action::SearchText => {
+                                        mode = match last_results.take() {
+                                            Some(r) => Mode::Results(r),
+                                            None => Mode::GrepPrompt(GrepPrompt::new(None)),
+                                        };
+                                    }
+                                    Action::FindFile => {
+                                        mode = Mode::Working("listing files");
+                                        job = Some(start_files(backend, active_dir(&app)));
+                                    }
+                                    Action::FindOutput if app.tabs[app.active].is_preview() => message = Some("find in output works on a shell tab; press F inside a preview to find in it".into()),
+                                    Action::FindOutput => mode = Mode::FindPrompt(FindPrompt { target: FindTarget::Output, text: String::new() }),
                                     Action::Scroll if app.tabs[app.active].side_focused() => message = Some("the preview has the keyboard: switch pane (menu W) to scroll the shell".into()),
                                     Action::Scroll if app.tabs[app.active].is_preview() => message = Some("scroll a preview with the arrow keys and PgUp/PgDn".into()),
                                     Action::Scroll => mode = Mode::Scroll,
@@ -938,6 +1249,25 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 });
                 dirty = true;
             }
+            done = async {
+                match job.as_mut() {
+                    Some(f) => f.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            }, if job.is_some() => {
+                job = None;
+                if matches!(mode, Mode::Working(_)) {
+                    mode = match done {
+                        JobDone::Grep(r) => Mode::Results(Box::new(r)),
+                        JobDone::Files(Ok(l), dir) => Mode::Finder(Box::new(Finder::new(l.files, l.notice, dir))),
+                        JobDone::Files(Err(e), _) => {
+                            message = Some(format!("find file: {e}"));
+                            Mode::Shell
+                        }
+                    };
+                }
+                dirty = true;
+            }
             _ = tokio::time::sleep(Duration::from_millis(250)), if fetching.is_some() => { dirty = true; }
             _ = sigterm.recv() => return finish(&app, backend).await,
             _ = sighup.recv() => return finish(&app, backend).await,
@@ -949,6 +1279,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
             ev = events.recv() => match ev {
                 Some(Event::Output(id, data)) => {
                     if let Some(i) = app.tabs.iter().position(|t| t.id == id) {
+                        if i == app.active && matches!(mode, Mode::OutFind(_)) {
+                            // The rows the matches point at have moved: leave find mode.
+                            app.tabs[i].parser.screen_mut().set_scrollback(0);
+                            mode = Mode::Shell;
+                            message = Some("new output: find closed".into());
+                        }
                         app.tabs[i].output(&data);
                         if i != app.active { app.tabs[i].note_background_output(); }
                         dirty = true;
@@ -959,7 +1295,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     dirty = true;
                 }
                 Some(Event::Exited(id)) => {
-                    if app.tabs.get(app.active).is_some_and(|t| t.id == id) && matches!(mode, Mode::Scroll) { mode = Mode::Shell; }
+                    if app.tabs.get(app.active).is_some_and(|t| t.id == id) && matches!(mode, Mode::Scroll | Mode::OutFind(_)) { mode = Mode::Shell; }
                     if remove_tab(&mut app, id)? { return finish(&app, backend).await; }
                     dirty = true;
                 }
@@ -1436,6 +1772,8 @@ enum Intent {
     ScrollWheel(isize),
     EnterScroll,
     PickCandidate(usize),
+    /// A click on a row of the results list or the file finder (row within the list area).
+    ListPick(usize),
 }
 
 /// What a mouse event means right now. Pure so it can be tested without a terminal.
@@ -1460,7 +1798,20 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Ask(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) => Intent::None,
+        Mode::Ask(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) => Intent::None,
+        Mode::GrepPrompt(p) => match m.kind {
+            Kind::Down(mouse::Button::Left) => ui::search::grep_chip_at(main, p, m.col, m.row).map_or(Intent::None, |k| Intent::Synth(k.to_vec())),
+            _ => Intent::None,
+        },
+        Mode::Results(_) | Mode::Finder(_) => {
+            let l = if matches!(mode, Mode::Results(_)) { ui::search::results_list_rect(main) } else { ui::search::finder_list_rect(main) };
+            match m.kind {
+                Kind::Down(mouse::Button::Left) if hit(l) => Intent::ListPick((m.row - l.y) as usize),
+                Kind::WheelUp => Intent::Synth(b"\x1b[A".repeat(3)),
+                Kind::WheelDown => Intent::Synth(b"\x1b[B".repeat(3)),
+                _ => Intent::None,
+            }
+        }
         Mode::Prompt(p) => {
             let r = ui::prompt_rect(main, p);
             match m.kind {
@@ -1468,7 +1819,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Scroll => pane_mouse(m, app, main, selecting, link_click, true),
+        Mode::Scroll | Mode::OutFind(_) => pane_mouse(m, app, main, selecting, link_click, true),
         Mode::Shell => {
             if app.tabs.len() > 1 && m.row == 1 {
                 let strip: Vec<_> = app.tabs.iter().enumerate().map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
