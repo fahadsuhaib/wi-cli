@@ -1,6 +1,6 @@
 FROM debian:stable-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      openssh-server tmux vim htop procps tar ca-certificates git \
+      openssh-server tmux vim htop procps tar ca-certificates git ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd \
     && useradd -m -s /bin/bash dev \

@@ -10,8 +10,6 @@ use std::time::Duration;
 
 pub const MAX_MATCHES: usize = 2000;
 pub const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
-/// Most matches one file contributes (keeps one huge file from using the whole budget).
-const PER_FILE: usize = 500;
 /// Longest line text kept per match, in characters.
 const KEEP_CHARS: usize = 1000;
 pub const FILES_CAP: usize = 50_000;
@@ -98,13 +96,12 @@ impl Tool {
 
 /// The shell command (without the `cd`) that lists matches, at most `MAX_MATCHES + 1` lines.
 pub fn command(tool: Tool, q: &Query) -> String {
-    let per_file = PER_FILE.to_string();
     let mut a: Vec<&str> = match tool {
         Tool::Rg => vec![
             "rg", "--no-config", "--vimgrep", "--no-heading", "--color", "never", "--max-columns", "400", "--max-columns-preview",
-            "--max-count", &per_file, "--glob", "'!node_modules'",
+            "--glob", "'!node_modules'",
         ],
-        Tool::Grep => vec!["grep", "-rnIH", "--exclude-dir=.git", "--exclude-dir=node_modules", "-m", &per_file],
+        Tool::Grep => vec!["grep", "-rnIH", "--exclude-dir=.git", "--exclude-dir=node_modules"],
     };
     if !q.sensitive() {
         a.push("-i");
@@ -480,7 +477,7 @@ mod tests {
         let c = command(Tool::Rg, &q("foo"));
         assert_eq!(
             c,
-            "rg --no-config --vimgrep --no-heading --color never --max-columns 400 --max-columns-preview --max-count 500 --glob '!node_modules' -i -F -- 'foo' . | head -n 2001"
+            "rg --no-config --vimgrep --no-heading --color never --max-columns 400 --max-columns-preview --glob '!node_modules' -i -F -- 'foo' . | head -n 2001"
         );
         assert!(command(Tool::Rg, &q("Foo")).contains(" -s -F -- 'Foo'"));
     }
@@ -488,12 +485,12 @@ mod tests {
     #[test]
     fn grep_command_has_the_exclusions() {
         let c = command(Tool::Grep, &q("foo"));
-        assert_eq!(c, "grep -rnIH --exclude-dir=.git --exclude-dir=node_modules -m 500 -i -F -- 'foo' . | head -n 2001");
+        assert_eq!(c, "grep -rnIH --exclude-dir=.git --exclude-dir=node_modules -i -F -- 'foo' . | head -n 2001");
         let mut x = q("a.*b");
         x.regex = true;
         x.word = true;
         x.case = Case::Insensitive;
-        assert_eq!(command(Tool::Grep, &x), "grep -rnIH --exclude-dir=.git --exclude-dir=node_modules -m 500 -i -E -w -- 'a.*b' . | head -n 2001");
+        assert_eq!(command(Tool::Grep, &x), "grep -rnIH --exclude-dir=.git --exclude-dir=node_modules -i -E -w -- 'a.*b' . | head -n 2001");
         x.case = Case::Sensitive;
         assert!(command(Tool::Rg, &x).contains(" -s -w -- 'a.*b' ."));
         assert!(!command(Tool::Rg, &x).contains("-F"));
