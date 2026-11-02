@@ -1,3 +1,5 @@
 dev/id_test
 target/
 .worktrees/
+dist/
+dist-*/

@@ -33,3 +33,22 @@ fn invalid_config_toml_fails() {
     check(&run("this is = [not valid toml", &[]));
     check(&run("this is = [not valid toml", &["somebox"]));
 }
+
+#[test]
+fn version_flag_prints_version() {
+    for flag in ["--version", "-V"] {
+        let out = run("this is = [not valid toml", &[flag]); // runs before the config is read
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), format!("wi {}", env!("CARGO_PKG_VERSION")));
+    }
+}
+
+#[test]
+fn help_flag_prints_usage() {
+    for flag in ["--help", "-h"] {
+        let out = run("", &[flag]);
+        assert_eq!(out.status.code(), Some(0));
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("usage:") && text.contains("wi <folder>") && text.contains("wi fetch"), "{text}");
+    }
+}

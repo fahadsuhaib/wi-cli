@@ -1,0 +1,151 @@
+name: Release
+
+# Push a tag such as v0.1.0 to build and publish a release. A manual run only builds the artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4 # fetch the repository
+      - name: Tag must match the version in Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          echo "Cargo.toml version: $version"
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            if [ "${GITHUB_REF_NAME}" != "v$version" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version $version (expected v$version). Fix the version or the tag." >&2
+              exit 1
+            fi
+          else
+            echo "not a tag run; skipping the tag check"
+          fi
+
+  build:
+    needs: verify
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            rust_targets: x86_64-unknown-linux-musl
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            rust_targets: aarch64-unknown-linux-musl
+          - name: macos-universal
+            os: macos-latest
+            target: macos-universal
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4 # fetch the repository
+      - uses: dtolnay/rust-toolchain@stable # stable Rust plus the cross targets
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - uses: Swatinem/rust-cache@v2 # cache cargo registry and target
+        with:
+          key: ${{ matrix.target }}
+      - name: Install musl toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Package
+        run: scripts/package.sh "${{ matrix.target }}" dist
+      - uses: actions/upload-artifact@v4 # hand the archive to the publish job
+        with:
+          name: wi-${{ matrix.name }}
+          path: |
+            dist/wi-${{ matrix.name }}.tar.gz
+            dist/wi-${{ matrix.name }}.tar.gz.sha256
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    name: smoke ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: macos-universal
+            os: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4 # the archive built above
+        with:
+          name: wi-${{ matrix.name }}
+          path: dist
+      - name: Unpack
+        run: tar -xzf dist/wi-${{ matrix.name }}.tar.gz -C dist
+      - name: Linux binary is static
+        if: runner.os == 'Linux'
+        run: |
+          bin=dist/wi-${{ matrix.name }}/wi
+          file "$bin"
+          if file "$bin" | grep -Eq 'statically linked|static-pie'; then exit 0; fi
+          if ldd "$bin" 2>&1 | grep -Eq 'not a dynamic executable|statically linked'; then exit 0; fi
+          echo "::error::$bin is not statically linked" >&2
+          exit 1
+      - name: Run wi --version in several distributions
+        if: runner.os == 'Linux'
+        run: |
+          for image in alpine:3 debian:bookworm-slim ubuntu:22.04 fedora:latest; do
+            echo "=== $image"
+            docker run --rm -v "$PWD/dist/wi-${{ matrix.name }}":/wi:ro "$image" /wi/wi --version
+          done
+      - name: Run wi --version natively
+        if: runner.os == 'macOS'
+        run: dist/wi-${{ matrix.name }}/wi --version
+      # Rosetta may not be installed on a hosted runner, so this single step may not be able to run.
+      - name: Run the Intel slice under Rosetta
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: arch -x86_64 dist/wi-${{ matrix.name }}/wi --version
+
+  publish:
+    needs: [build, smoke]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4 # fetch all three archives
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Combine checksums
+        run: |
+          cd dist
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          rm ./*.sha256
+          ls -l
+      - uses: softprops/action-gh-release@v2 # create the release with generated notes
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/wi-linux-x86_64.tar.gz
+            dist/wi-linux-aarch64.tar.gz
+            dist/wi-macos-universal.tar.gz
+            dist/SHA256SUMS
+
