@@ -7,7 +7,10 @@ S, mode = sys.argv[1], sys.argv[2]
 remote = mode == "remote"
 MENU = b"\x00"
 openlog = S + "/open.log"; cache = S + "/cache"
-cfg = S + "/test.toml"
+# These tests are about preview tabs and links: keep previews as separate tabs (preview_side = "tab");
+# dev/pty_split.py covers the side-by-side pane.
+cfg = S + "/links_tab.toml"
+open(cfg, "w").write(open(S + "/test.toml").read() + '\n[defaults]\npreview_side = "tab"\n')
 env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_OPEN_LOG=openlog, WICLI_CACHE_DIR=cache)
 
 def build_fixtures():
@@ -212,7 +215,7 @@ r.quit()
 # ---- confirm_open = never skips the question (for people who want that)
 if not remote:
     nc = S + "/noconfirm.toml"
-    open(nc, "w").write('[defaults]\nconfirm_open = "never"\n')
+    open(nc, "w").write('[defaults]\nconfirm_open = "never"\npreview_side = "tab"\n')
     os.remove(openlog)
     r = Run(nc)
     r.send(b"echo q doc.pdf end\n", 0.8)
