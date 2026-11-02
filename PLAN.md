@@ -62,6 +62,11 @@ Work split: links engine (pure path/URL detection, `src/links.rs`), opener (clas
 1. Side-by-side preview: opening a file from a shell tab (path prompt, link click, labels, git view) shows it in a pane beside the shell, on the right by default (`preview_side = right | left | tab`, `preview_width_pct`), instead of a separate full-screen tab. Falls back to a tab on narrow terminals. Focus moves by click or a menu action; Esc in the preview returns focus to the shell; the divider can be dragged.
 2. Per-tab base folder: open a new tab in any folder (menu prompt with Tab completion and recent folders), so several Claude sessions can run in different projects. Existing tab: change folder only when it is idle at a shell prompt (never type into a running agent). Previews, git view, links and agent detection use the tab's folder.
 
+## Phase A7: Multi-line input (added 2026-11-02, user request)
+Why terminals cannot do it: Enter and Shift+Enter send the same byte (CR) in the classic protocol, so programs cannot tell them apart; editing happens inside each program (readline, an agent's input box), not in the terminal; enhanced key reporting (kitty keyboard protocol, xterm modifyOtherKeys) exists but support is uneven (none in macOS Terminal.app).
+1. Compose box (works in every terminal): a menu action opens a multi-line editor overlay (arrows, Home/End, PgUp/PgDn, mouse click to place the cursor, drag select, copy/cut/paste, undo, Enter = newline). A send key delivers the text to the active tab as ONE bracketed paste so an agent receives it as a single multi-line prompt; nothing is submitted unless the user chooses "send and press Enter". Saves drafts; later links to bins/snippets.
+2. Shift+Enter translation: ask the host terminal for enhanced key reporting where supported and translate Shift+Enter into what the program in the tab expects (e.g. ESC+CR or a newline sequence), so multi-line input in agent tabs behaves the same on macOS and Linux; terminals without support fall back to the compose box.
+
 ## Phase B: Remote M1 completion
 1. tmux-backed detach/reattach (`tmux new -A -s wicli`, tmux status/keys disabled so it is invisible; plain session if tmux missing).
 2. ssh-agent auth, passphrase-protected keys, `~/.ssh/config` host aliases (HostName, User, Port, IdentityFile).
