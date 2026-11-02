@@ -12,6 +12,9 @@ pub enum PvKey {
     Bottom,
     Wrap,
     Reload,
+    /// Git view: next / previous changed file.
+    NextFile,
+    PrevFile,
     Back,
 }
 
@@ -49,6 +52,8 @@ pub fn parse(buf: &[u8]) -> Vec<PvKey> {
             match b {
                 b'w' | b'W' => keys.push(PvKey::Wrap),
                 b'r' | b'R' => keys.push(PvKey::Reload),
+                b'n' | b'N' => keys.push(PvKey::NextFile),
+                b'p' | b'P' => keys.push(PvKey::PrevFile),
                 _ => {}
             }
         }
@@ -66,6 +71,7 @@ mod tests {
         assert_eq!(parse(b"\x1b[A\x1b[B\x1b[C\x1b[D"), vec![PvKey::Up, PvKey::Down, PvKey::Right, PvKey::Left]);
         assert_eq!(parse(b"\x1b[5~\x1b[6~\x1b[H\x1b[F"), vec![PvKey::PageUp, PvKey::PageDown, PvKey::Top, PvKey::Bottom]);
         assert_eq!(parse(b"wR"), vec![PvKey::Wrap, PvKey::Reload]);
+        assert_eq!(parse(b"nP"), vec![PvKey::NextFile, PvKey::PrevFile]);
     }
 
     #[test]
