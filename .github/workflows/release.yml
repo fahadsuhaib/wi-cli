@@ -6,8 +6,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Read-only by default; only the publish job below may write (to create the release).
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -127,6 +128,8 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write # create the GitHub Release and attach the files
     steps:
       - uses: actions/download-artifact@v4 # fetch all three archives
         with:
