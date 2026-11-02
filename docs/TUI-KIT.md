@@ -23,3 +23,6 @@ list.render(&rows, areas.body, buf, &t);
 
 ## Rules of the look
 Title bar on top (inverted), then one dim hint line, then a status line (badge + dim counts, tones only for good/warn/hot). Panes have a coloured header row, no boxes; a footer row inside the pane shows `pos/total · hints`. Numeric columns are right-aligned with a column header; the selection is a full-row highlight; Up/Down wrap around. Truncate with `…`, never split a wide character, never wrap.
+
+## Used by the explorer (`src/explorer.rs`, `src/ui/explorer.rs`)
+The file explorer (menu `x`) is the first screen built from the kit: `TitleBar`, `HintBar`, `StatusLine`, a `Panel` for the right-hand detail pane, a `ColumnList` (its header row doubles as the left pane's title; a header `hit_header` click sorts), `Tree<DirEntry>` with lazy `set_children` and `flatten_visible` (added for the explorer: drop nodes such as dotfiles without opening folders; `flatten_filtered` is used for find and changed-only), and `SplitView` (collapses under 100 columns; `pct_for_col` drives the divider drag). The tree keeps its own order (`sort_with` a no-op comparator) because the explorer sorts entries with `explorer_data::sort_entries` before they reach the tree.

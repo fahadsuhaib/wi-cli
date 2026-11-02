@@ -1,5 +1,6 @@
 //! Rendering: header, status bar, shell screen, menu overlay.
 
+pub mod explorer;
 pub mod search;
 
 use ratatui::Frame;
@@ -41,6 +42,8 @@ pub enum Action {
     SearchText,
     /// Fuzzy find a file by name.
     FindFile,
+    /// The full-screen file explorer for the active tab's folder.
+    Explorer,
     /// Find text in the active shell tab's scrollback.
     FindOutput,
     Info,
@@ -99,6 +102,7 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Close preview", key: 'v', action: Action::ClosePreview, remote_only: false },
     MenuItem { label: "Search in files", key: 'l', action: Action::SearchText, remote_only: false },
     MenuItem { label: "Find file", key: 'k', action: Action::FindFile, remote_only: false },
+    MenuItem { label: "Explorer", key: 'x', action: Action::Explorer, remote_only: false },
     MenuItem { label: "Find in output", key: 'u', action: Action::FindOutput, remote_only: false },
     MenuItem { label: "Start / change agent", key: 'a', action: Action::Agent, remote_only: false },
     MenuItem { label: "Mouse on/off", key: 'm', action: Action::Mouse, remote_only: false },
@@ -294,6 +298,8 @@ pub struct View<'a> {
     pub find_hl: &'a [(u16, u16, u16, bool)],
     /// Replaces the status bar text when set.
     pub status: Option<&'a str>,
+    /// The file explorer, drawn over the whole screen (no header, tab strip or status bar).
+    pub explorer: Option<&'a crate::explorer::ExplorerState>,
 }
 
 fn vt_color(c: vt100::Color) -> Color {
@@ -346,6 +352,10 @@ pub fn draw(f: &mut Frame, v: &View) {
 }
 
 fn draw_frame(f: &mut Frame, v: &View) {
+    if let Some(ex) = v.explorer {
+        explorer::draw(f, ex);
+        return;
+    }
     let t = theme();
     let strip_h = if v.tabs.len() > 1 { 1 } else { 0 };
     let [header, strip, main, status] = Layout::vertical([

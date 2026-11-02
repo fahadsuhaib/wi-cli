@@ -1,7 +1,6 @@
 //! Data for the file explorer: detailed directory listings (size, modified time), sorting, git
 //! marks from `git status`, and the small formatters the view uses. Local and remote go through
 //! `Backend`; remote listings use the attributes SFTP already sends (no per-entry stat).
-#![allow(dead_code)] // used by the explorer view
 
 use crate::files::LIST_CAP;
 use crate::workspace::Backend;

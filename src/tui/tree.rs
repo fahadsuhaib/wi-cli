@@ -208,6 +208,29 @@ impl<T> Tree<T> {
         out
     }
 
+    /// Visible rows when only some nodes may show (for example hiding dotfiles): a node that does
+    /// not pass `keep` is dropped with its whole subtree, and folded directories stay folded
+    /// (unlike `flatten_filtered`, which opens the way to matches).
+    pub fn flatten_visible(&self, keep: &dyn Fn(&Node<T>) -> bool) -> Vec<FlatRow<'_, T>> {
+        let mut out = Vec::new();
+        Self::walk_visible(&self.roots, 0, &mut Vec::new(), keep, &mut out);
+        out
+    }
+
+    fn walk_visible<'a>(nodes: &'a [Node<T>], depth: usize, anc: &mut Vec<bool>, keep: &dyn Fn(&Node<T>) -> bool, out: &mut Vec<FlatRow<'a, T>>) {
+        let shown: Vec<&Node<T>> = nodes.iter().filter(|n| keep(n)).collect();
+        let count = shown.len();
+        for (i, n) in shown.into_iter().enumerate() {
+            let is_last = i + 1 == count;
+            out.push(FlatRow { node: n, depth, has_children: n.is_dir && (!n.children.is_empty() || !n.loaded), is_last, ancestors_last: anc.clone() });
+            if n.expanded {
+                anc.push(is_last);
+                Self::walk_visible(&n.children, depth + 1, anc, keep, out);
+                anc.pop();
+            }
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     fn walk<'a>(nodes: &'a [Node<T>], depth: usize, anc: &mut Vec<bool>, m: Option<&dyn Fn(&Node<T>) -> bool>, out: &mut Vec<FlatRow<'a, T>>) {
         let shown: Vec<&Node<T>> = nodes.iter().filter(|n| m.is_none_or(|m| subtree_matches(n, m))).collect();
@@ -321,6 +344,15 @@ mod tests {
         assert!(!rows[5].has_children);
         assert!(rows[6].is_last && !rows[5].is_last);
         assert_eq!(rows[4].ancestors_last, vec![true, false]);
+    }
+
+    #[test]
+    fn flatten_visible_drops_nodes_but_keeps_folds() {
+        let mut t = sample();
+        t.collapse("p/src");
+        let rows = t.flatten_visible(&|n| n.label != "A.md");
+        let got: Vec<&str> = rows.iter().map(|r| r.node.id.as_str()).collect();
+        assert_eq!(got, ["p", "p/lazy", "p/src", "p/b.rs"]);
     }
 
     #[test]

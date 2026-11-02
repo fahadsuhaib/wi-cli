@@ -4,6 +4,7 @@ use crate::input::{InEv, PasteFilter};
 use crate::keys::{EnterMap, KeyDecoder};
 use crate::scroll::{self, ScrollKey};
 use crate::config::{Config, parse_prefix_key, prefix_label};
+use crate::explorer::{self, Act as ExAct, ExJob, ExMouse, ExplorerState};
 use crate::tab::{Pane, Side, Split, Tab, pct_for_col, split_main};
 use crate::files::complete;
 use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
@@ -57,6 +58,8 @@ enum Mode {
     OutFind(Box<OutFind>),
     /// A search or file listing is running; Esc cancels.
     Working(&'static str),
+    /// The full-screen file explorer.
+    Explorer(Box<ExplorerState>),
 }
 
 /// A search or file listing in flight (dropped = cancelled; the process is killed with it).
@@ -204,6 +207,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut pending: Option<Pending> = None;
     let mut fetching: Option<Fetching<'_>> = None;
     let mut job: Option<Job<'_>> = None;
+    // The explorer's reads, one at a time, and its pane split kept for the session.
+    let mut ex_job: Option<ExJob<'_>> = None;
+    let mut ex_pct: u16 = 40;
     let mut last_results: Option<Box<Results>> = None;
     let mut filter = PasteFilter::default();
     let mut flush_at: Option<Instant> = None;
@@ -268,6 +274,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 dirty = true;
             }
         }
+        if !matches!(mode, Mode::Explorer(_)) {
+            ex_job = None;
+        } else if ex_job.is_none() && let Mode::Explorer(ex) = &mut mode && let Some((epoch, req)) = ex.next_req() {
+            ex_job = Some(explorer::start(backend, ex.root.clone(), epoch, req, ex.read_cap));
+        }
         let due = last_draw + frame;
         // Earliest moment a still-printing background tab counts as quiet. No tab streaming
         // means no deadline, so an idle wi has no timers running.
@@ -324,6 +335,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         _ => {}
                     }
                 }
+                if let Mode::Explorer(ex) = &mut mode {
+                    let (ec, er) = crossterm::terminal::size()?;
+                    ex.prepare(ec, er);
+                }
                 let find_hl: Vec<(u16, u16, u16, bool)> = match &mode {
                     Mode::OutFind(f) => f.in_view(app.tabs[app.active].parser.screen().scrollback()),
                     _ => Vec::new(),
@@ -368,6 +383,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     search: search_view,
                     find_hl: &find_hl,
                     status: status_s.as_deref(),
+                    explorer: match &mode { Mode::Explorer(e) => Some(&**e), _ => None },
                 };
                 if std::mem::take(&mut repaint) {
                     // Not Terminal::clear(): it asks the terminal for the cursor position and wants
@@ -448,6 +464,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 Piece::Bytes(x) => { if sel.take().is_some() { dirty = true; } out.extend(x); continue; }
                                 Piece::Mouse(m) => m,
                             };
+                            if let Mode::Explorer(ex) = &mut mode {
+                                if ex.mouse(&m) == ExMouse::Enter { out.extend(b"\r"); }
+                                ex_pct = ex.pct();
+                                dirty = true;
+                                continue;
+                            }
                             let (tc, tr) = crossterm::terminal::size()?;
                             let strip_h = u16::from(app.tabs.len() > 1);
                             let main = Rect::new(0, 1 + strip_h, tc, tr.saturating_sub(2 + strip_h).max(1));
@@ -899,6 +921,65 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             dirty = true;
                             chunk = &[];
                         }
+                        Mode::Explorer(ref mut ex) => {
+                            let mut act = None;
+                            for k in explorer::decode(chunk, menu_key) {
+                                if let Some(a) = ex.key(k) {
+                                    act = Some(a);
+                                    break;
+                                }
+                            }
+                            ex_pct = ex.pct();
+                            match act {
+                                None => {}
+                                Some(ExAct::Leave) => mode = Mode::Shell,
+                                Some(ExAct::Copy { text, what }) => {
+                                    ex.message = Some(match crate::clip::copy(&text) {
+                                        Ok(how) => (format!("copied {what} ({how})"), false),
+                                        Err(e) => (format!("could not copy: {e}"), true),
+                                    });
+                                }
+                                Some(ExAct::OpenFile(abs)) => {
+                                    // Resolved exactly like a clicked path: text opens in the preview,
+                                    // complex files and downloads ask first, programs are refused.
+                                    let o = resolve_link(&app, backend, ws, &explorer::path_link(&abs), Pane::Shell, &open_cfg, confirm_needed).await;
+                                    if let LinkOutcome::Message(m) = &o {
+                                        ex.message = Some((sanitize(m), true));
+                                    } else {
+                                        mode = Mode::Shell;
+                                        apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                    }
+                                }
+                                Some(act @ (ExAct::Editor { .. } | ExAct::NewTab(_))) => {
+                                    let (file, dir) = match act {
+                                        ExAct::Editor { file, dir } => (Some(file), dir),
+                                        ExAct::NewTab(dir) => (None, dir),
+                                        _ => unreachable!(),
+                                    };
+                                    let (c, r) = shell_size(app.tabs.len() + 1)?;
+                                    let had_strip = app.tabs.len() > 1;
+                                    match open_tab_in(&mut app, backend, &events_tx, c, r, None, Some(&dir)).await {
+                                        Ok(()) => {
+                                            app.active = app.tabs.len() - 1;
+                                            if let Some(f) = file {
+                                                app.tabs[app.active].write(explorer::editor_command(&f).into_bytes());
+                                            }
+                                            if !had_strip { resize_all(&mut app)?; }
+                                            mode = Mode::Shell;
+                                        }
+                                        Err(e) => ex.message = Some((format!("could not open shell: {e}"), true)),
+                                    }
+                                }
+                                Some(ExAct::Agent(dir)) => {
+                                    let mut list = agents::detect(backend, &dir).await;
+                                    if list.is_empty() { list = agents::ALL.to_vec(); }
+                                    ask_ctx = AskCtx { key: agents::workspace_key(ws, &dir), dir, tab: None };
+                                    mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key));
+                                }
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
                         Mode::Confirm(_) => {
                             let (mut yes, mut no) = (false, false);
                             for (i, &b) in chunk.iter().enumerate() {
@@ -1256,6 +1337,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         mode = Mode::Working("listing files");
                                         job = Some(start_files(backend, active_dir(&app)));
                                     }
+                                    Action::Explorer => {
+                                        let (ec, er) = crossterm::terminal::size()?;
+                                        let mut ex = ExplorerState::new(active_dir(&app), remote.then(|| name.clone()), explorer::Settings { csv_rows: opts.csv_rows, read_cap, open_cfg: open_cfg.clone(), pct: ex_pct });
+                                        ex.prepare(ec, er);
+                                        mode = Mode::Explorer(Box::new(ex));
+                                    }
                                     Action::FindOutput if app.tabs[app.active].is_preview() => message = Some("find in output works on a shell tab; press F inside a preview to find in it".into()),
                                     Action::FindOutput => mode = Mode::FindPrompt(FindPrompt { target: FindTarget::Output, text: String::new() }),
                                     Action::Scroll if app.tabs[app.active].side_focused() => message = Some("the preview has the keyboard: switch pane (menu W) to scroll the shell".into()),
@@ -1338,6 +1425,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     Err(e) if e == "cancelled" => "download cancelled".to_string(),
                     Err(e) => format!("download failed: {e}"),
                 });
+                dirty = true;
+            }
+            done = async {
+                match ex_job.as_mut() {
+                    Some(f) => f.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            }, if ex_job.is_some() => {
+                ex_job = None;
+                if let Mode::Explorer(ex) = &mut mode { ex.apply(done); }
                 dirty = true;
             }
             done = async {
@@ -1893,7 +1990,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Ask(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) => Intent::None,
+        Mode::Ask(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
         Mode::GrepPrompt(p) => match m.kind {
             Kind::Down(mouse::Button::Left) => ui::search::grep_chip_at(main, p, m.col, m.row).map_or(Intent::None, |k| Intent::Synth(k.to_vec())),
             _ => Intent::None,

@@ -2,8 +2,8 @@
 //! header rows, column lists, a tree model and a two-pane split. Everything draws into a ratatui
 //! `Buffer` with colours from the theme; widths are measured with unicode-width.
 
-// Items are unused until the explorer view lands.
-#![allow(dead_code)] // used by the explorer view
+// A kit: the explorer uses most of it; the rest is for the next screens.
+#![allow(dead_code)]
 
 pub mod bars;
 pub mod columns;
