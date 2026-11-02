@@ -3,7 +3,7 @@
 Written 2026-11-03. The reference screenshot (a dense, aligned, two-pane monitor with a title bar,
 key hints, a foldable tree with a right-hand column and a detail pane) is the model for how wi
 screens should look and behave. This plan builds the **file explorer** that way, and the reusable
-widgets that make the next screens look the same. No monitoring (see PLAN-DASHBOARD.md, parked).
+widgets that make the next screens look the same. No monitoring (see 03-dashboard.md, parked).
 
 ## 1. What we copy from the reference
 

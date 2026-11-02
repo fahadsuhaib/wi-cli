@@ -1,11 +1,11 @@
 # wicli: live dashboard view (plan, from the reference screenshot)
 
 > **PARKED (2026-11-03).** The user wants the screenshot only as a style reference for building TUIs,
-> not monitoring. The file explorer in PLAN-EXPLORER.md uses its look. Kept for later.
+> not monitoring. The file explorer in 04-explorer.md uses its look. Kept for later.
 
 Reference: a screenshot of a distributed-build monitor (title `mathlib-unlocking · result pending ·
 lean-build/v6 / mathlib-oct31-unlocking`). Written 2026-11-03. This plan turns that look into a `wi`
-feature. It extends PLAN-OVERVIEW.md items 1.1 (Overview tab), 1.2 (progress and timers) and 4.2
+feature. It extends 02-overview-features.md items 1.1 (Overview tab), 1.2 (progress and timers) and 4.2
 (resource meter). Nothing here is built yet.
 
 ## 1. What the screenshot contains
