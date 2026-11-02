@@ -405,6 +405,16 @@ fn draw_frame(f: &mut Frame, v: &View) {
         let c = &mut f.buffer_mut()[(div.x, div.y)];
         c.set_symbol(if v.focus_side == side_is_right { "▶" } else { "◀" });
         c.set_style(accent);
+        // A close button in the preview's top corner.
+        let r = sp.side;
+        if r.width >= crate::tab::CLOSE_W * 2 {
+            let btn = Style::default().fg(t.bar_fg).bg(t.bar_bg).add_modifier(Modifier::BOLD);
+            for (i, sym) in [" ", "✕", " "].into_iter().enumerate() {
+                let c = &mut f.buffer_mut()[(r.x + r.width - crate::tab::CLOSE_W + i as u16, r.y)];
+                c.set_symbol(sym);
+                c.set_style(btn);
+            }
+        }
         shell_area = sp.shell;
         active_prev = v.focus_side.then_some(side);
         f.render_widget(ScreenWidget(v.screen, sel_in(crate::tab::Pane::Shell)), shell_area);
@@ -460,7 +470,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
             (false, true) => "N/B match · ",
             (false, false) => "",
         };
-        let back = if split.is_some() { "Esc to the shell" } else { "Esc back" };
+        let back = if split.is_some() { "Esc to the shell · Q closes" } else { "Esc back · Q closes" };
         format!(" arrows scroll · {files}F find · W wrap · R reload · {back}   lines {}-{} of {}", (p.top + 1).min(total), last, total)
     });
     let status_text = v.status.map(|t| format!(" {t}"));

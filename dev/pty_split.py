@@ -220,6 +220,22 @@ check("closing the preview restores full width", w4 == 120)
 check("...and removes the pane", "alpha_line" not in r.text() and "BRAVO" not in r.text())
 r.send(MENU + b"w", 0.6)
 check("Switch pane with no preview is a harmless message", "no preview pane" in r.status())
+
+# more ways to close: the X button and the Q key
+r.open_file("split/a.txt")
+check("the preview pane shows a close button in its top corner", "✕" in r.rows()[1][110:120])
+check("the status hint says Q closes", "Q closes" in r.status())
+r.click(118, 1)
+check("clicking the X closes the preview and restores full width", "alpha_line" not in r.text() and r.cols_now() == 120)
+r.open_file("split/a.txt")
+r.send(b"q", 0.8)
+check("Q closes a focused preview and restores full width", "alpha_line" not in r.text() and r.cols_now() == 120)
+r.open_file("split/a.txt")
+r.send(b"\x1b", 0.6)
+r.send(b"q", 0.6)
+check("Q typed in the shell does not close the preview", "alpha_line_1" in r.right())
+r.send(b"\x15", 0.3)
+r.send(MENU + b"v", 0.8)
 r.quit()
 
 # ---------------------------------------------------------------- left

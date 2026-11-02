@@ -398,7 +398,7 @@ impl Preview {
             PrevFile => self.jump_file(false, page),
             MatchNext => self.find_step(true),
             MatchPrev => self.find_step(false),
-            Reload | Back | Find => return false,
+            Reload | Back | Find | Close => return false,
         }
         true
     }

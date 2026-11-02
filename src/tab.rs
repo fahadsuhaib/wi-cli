@@ -53,7 +53,16 @@ pub struct Split {
     pub side: ratatui::layout::Rect,
 }
 
+/// Width in cells of the close button in the top corner of the preview pane.
+pub const CLOSE_W: u16 = 3;
+
 impl Split {
+    /// The ✕ button at the top outer corner of the preview pane.
+    pub fn on_close(&self, col: u16, row: u16) -> bool {
+        let r = self.side;
+        r.width >= CLOSE_W * 2 && row == r.y && col + CLOSE_W >= r.x + r.width && col < r.x + r.width
+    }
+
     pub fn on_divider(&self, col: u16, row: u16) -> bool {
         col == self.divider.x && row >= self.divider.y && row < self.divider.y + self.divider.height
     }
@@ -323,6 +332,18 @@ mod tests {
         assert!(split_main(main(80), Side::Left, 50).is_none());
         assert!(split_main(main(101), Side::Right, 50).is_some());
         assert!(split_main(main(200), Side::Tab, 50).is_none());
+    }
+
+    #[test]
+    fn close_button_hit_testing() {
+        let s = split_main(main(120), Side::Right, 50).unwrap();
+        let r = s.side;
+        assert!(s.on_close(r.x + r.width - 1, r.y) && s.on_close(r.x + r.width - 3, r.y));
+        assert!(!s.on_close(r.x + r.width - 4, r.y), "only the three button cells");
+        assert!(!s.on_close(r.x + r.width - 1, r.y + 1), "only the top row");
+        assert!(!s.on_close(s.divider.x, r.y) && !s.on_close(s.shell.x + 5, r.y));
+        let l = split_main(main(120), Side::Left, 50).unwrap();
+        assert!(l.on_close(l.side.x + l.side.width - 1, l.side.y));
     }
 
     #[test]

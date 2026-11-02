@@ -445,6 +445,14 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 Intent::None => {}
                                 Intent::Synth(bytes) => out.extend(bytes),
                                 Intent::SwitchTab(i) => { sel = None; switch_to(&mut app, i); dirty = true; }
+                                Intent::ClosePreview => {
+                                    let t = &mut app.tabs[app.active];
+                                    t.side = None;
+                                    t.focus = Pane::Shell;
+                                    sel = None;
+                                    resize_all(&mut app)?;
+                                    dirty = true;
+                                }
                                 Intent::DividerDown => { app.div_drag = true; sel = None; }
                                 Intent::DividerDrag(col) => {
                                     app.pct = pct_for_col(main, app.side, col);
@@ -617,7 +625,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             let side_focus = app.tabs[app.active].side_focused();
                             if app.tabs[app.active].is_preview() || side_focus {
                                 let rows = shell_size(app.tabs.len())?.1 as usize;
-                                let (mut back, mut reload, mut find) = (false, false, false);
+                                let (mut back, mut reload, mut find, mut close) = (false, false, false, false);
                                 if let Some(p) = focused_slot(&mut app).as_mut() {
                                     let page = rows - usize::from(p.banner.is_some() && rows > 1);
                                     for k in pvkeys::parse(head) {
@@ -625,6 +633,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                             PvKey::Back => back = true,
                                             PvKey::Reload => reload = true,
                                             PvKey::Find => find = true,
+                                            PvKey::Close => close = true,
                                             k => { p.navigate(k, page); }
                                         }
                                     }
@@ -634,6 +643,19 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 dirty = true;
                                 if back && side_focus { app.tabs[app.active].focus = Pane::Shell; }
                                 else if back { go_back(&mut app); }
+                                if close {
+                                    if side_focus {
+                                        let t = &mut app.tabs[app.active];
+                                        t.side = None;
+                                        t.focus = Pane::Shell;
+                                        sel = None;
+                                        resize_all(&mut app)?;
+                                    } else {
+                                        // a preview that is its own tab: close the tab
+                                        let id = app.tabs[app.active].id;
+                                        if remove_tab(&mut app, id)? { return finish(&app, backend).await; }
+                                    }
+                                }
                                 if reload {
                                     let is_git = focused_slot(&mut app).as_ref().is_some_and(|p| p.kind == crate::preview::Kind::Diff);
                                     let res = if is_git {
@@ -1806,6 +1828,8 @@ struct SelState {
 }
 
 enum Intent {
+    /// Click on the preview pane's ✕ button.
+    ClosePreview,
     None,
     /// Ctrl/Alt+click (or right-click) on a path or URL.
     OpenLink(Link, Pane),
@@ -1898,6 +1922,9 @@ fn pane_mouse(m: &MouseEvent, app: &App, main: Rect, selecting: Option<Pane>, li
                 Kind::Up(Button::Left) => return Intent::DividerUp,
                 _ => {}
             }
+        }
+        if matches!(m.kind, Kind::Down(Button::Left)) && sp.on_close(m.col, m.row) {
+            return Intent::ClosePreview;
         }
         if matches!(m.kind, Kind::Down(Button::Left)) && sp.on_divider(m.col, m.row) {
             return Intent::DividerDown;

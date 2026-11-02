@@ -18,6 +18,8 @@ pub enum PvKey {
     Back,
     /// Open the find prompt.
     Find,
+    /// Close this preview (the side pane, or the preview tab).
+    Close,
     /// Step to the next / previous find match.
     MatchNext,
     MatchPrev,
@@ -60,6 +62,7 @@ pub fn parse(buf: &[u8]) -> Vec<PvKey> {
                 b'n' | b'N' => keys.push(PvKey::NextFile),
                 b'p' | b'P' => keys.push(PvKey::PrevFile),
                 b'f' | b'F' => keys.push(PvKey::Find),
+                b'q' | b'Q' => keys.push(PvKey::Close),
                 b'b' | b'B' => keys.push(PvKey::MatchPrev),
                 b'\r' | b'\n' => keys.push(PvKey::MatchNext),
                 _ => {}
@@ -81,6 +84,11 @@ mod tests {
         assert_eq!(parse(b"wR"), vec![PvKey::Wrap, PvKey::Reload]);
         assert_eq!(parse(b"nP"), vec![PvKey::NextFile, PvKey::PrevFile]);
         assert_eq!(parse(b"fB\r"), vec![PvKey::Find, PvKey::MatchPrev, PvKey::MatchNext]);
+    }
+
+    #[test]
+    fn q_closes() {
+        assert_eq!(parse(b"qQ"), vec![PvKey::Close, PvKey::Close]);
     }
 
     #[test]
