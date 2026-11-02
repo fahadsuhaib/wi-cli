@@ -473,7 +473,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
         let back = if split.is_some() { "Esc to the shell · Q closes" } else { "Esc back · Q closes" };
         let md = p.md_hint().map(|h| format!("{h} · ")).unwrap_or_default();
         let wrap = if p.md_rendered() { "" } else { "W wrap · " };
-        format!(" arrows scroll · {files}F find · {md}{wrap}R reload · {back}   lines {}-{} of {}", (p.top + 1).min(total), last, total)
+        format!(" lines {}-{} of {}  ·  arrows scroll · {files}F find · {md}{wrap}R reload · {back}", (p.top + 1).min(total), last, total)
     });
     let status_text = v.status.map(|t| format!(" {t}"));
     let hint = match (v.menu, v.message) {

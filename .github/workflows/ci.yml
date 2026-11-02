@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4 # fetch the repository
+      - uses: dtolnay/rust-toolchain@stable # stable Rust
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2 # cache cargo registry and target
+      - name: Install tools used by the pty tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv vim git tmux ripgrep zsh openssh-client procps
+      - name: Python venv with pyte
+        run: |
+          python3 -m venv "$RUNNER_TEMP/scratch/venv"
+          "$RUNNER_TEMP/scratch/venv/bin/pip" install pyte
+      - name: Generate the test SSH key
+        run: ssh-keygen -t ed25519 -N "" -f dev/id_test -C wicli-ci
+      - name: Start the remote test box
+        run: |
+          docker build -t devbox-test dev
+          docker run -d --name devbox-test -p 2222:22 devbox-test
+          for _ in $(seq 1 60); do
+            if (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; then echo "test box is up"; exit 0; fi
+            sleep 1
+          done
+          docker logs devbox-test
+          echo "test box did not answer on port 2222" >&2
+          exit 1
+      - name: Write test.toml
+        run: |
+          S="$RUNNER_TEMP/scratch"
+          mkdir -p "$S/ws"
+          cat > "$S/test.toml" <<EOF
+          [[box]]
+          name = "test"
+          host = "127.0.0.1"
+          port = 2222
+          user = "dev"
+          identity = "$GITHUB_WORKSPACE/dev/id_test"
+          known_hosts = "$S/known_hosts"
+          EOF
+      - name: Run the full suite
+        run: bash dev/run_tests.sh "$RUNNER_TEMP/scratch" 2>&1 | tee "$RUNNER_TEMP/tests.log"; exit "${PIPESTATUS[0]}"
+      - name: Upload the log
+        if: always()
+        uses: actions/upload-artifact@v4 # keep the full test log
+        with:
+          name: linux-test-log
+          path: ${{ runner.temp }}/tests.log
+          if-no-files-found: ignore
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4 # fetch the repository
+      - uses: dtolnay/rust-toolchain@stable # stable Rust
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2 # cache cargo registry and target
+      - name: Build
+        run: cargo build
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit and CLI tests
+        run: cargo test
+      - name: Python venv with pyte
+        run: |
+          python3 -m venv "$RUNNER_TEMP/scratch/venv"
+          "$RUNNER_TEMP/scratch/venv/bin/pip" install pyte
+          mkdir -p "$RUNNER_TEMP/scratch/ws"
+          printf '[[box]]\nname = "test"\nhost = "127.0.0.1"\nport = 2222\nuser = "dev"\nidentity = "/nonexistent"\nknown_hosts = "%s/known_hosts"\n' "$RUNNER_TEMP/scratch" > "$RUNNER_TEMP/scratch/test.toml"
+      # The pty scripts were developed on macOS but have not yet run on a hosted runner, so they
+      # do not gate the build for now. Drop continue-on-error once they are known to pass.
+      - name: Local-mode pty scripts (not required yet)
+        continue-on-error: true
+        run: |
+          S="$RUNNER_TEMP/scratch"
+          failed=0
+          for t in dev/pty_*.py; do
+            case "$(basename "$t")" in pty_drive.py) continue;; esac
+            echo "=== $t"
+            "$S/venv/bin/python" -I "$t" "$S" local || { echo "FAIL $t"; failed=1; }
+          done
+          exit $failed

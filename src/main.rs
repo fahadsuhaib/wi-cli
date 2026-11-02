@@ -41,7 +41,33 @@ async fn main() {
     std::process::exit(code);
 }
 
+const HELP: &str = "wi: a terminal workspace for AI coding tools, local or over SSH
+
+usage:
+  wi                  local workspace in the current folder
+  wi <folder>         local workspace in that folder
+  wi <box>            remote workspace, a [[box]] name from the config
+  wi <ssh-alias>      remote workspace, a Host from ~/.ssh/config
+  wi fetch ...        download files from a box (see the docs)
+  wi --version, -V    print the version
+  wi --help, -h       print this help
+
+config: ~/.config/wicli/config.toml (override with WICLI_CONFIG)
+docs:   https://github.com/fahadsuhaib/wi-cli
+";
+
 async fn real_main() -> Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("--version" | "-V") => {
+            println!("wi {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--help" | "-h") => {
+            print!("{HELP}");
+            return Ok(());
+        }
+        _ => {}
+    }
     let cfg = config::Config::load()?;
     if std::env::args().nth(1).as_deref() == Some("fetch") {
         return fetch_cmd(&cfg).await;

@@ -1,0 +1,90 @@
+# wi
+
+[![CI](https://github.com/fahadsuhaib/wi-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/fahadsuhaib/wi-cli/actions/workflows/ci.yml)
+
+`wi` is a lightweight terminal workspace for working with AI coding tools (Claude Code, Codex), on your own machine
+or on a remote box over SSH. It gives you a good terminal with tabs, plus quick previews and diffs of what the AI
+produced. It has no debugger, no LSP and no built-in editor. Nothing is installed on the remote box beyond sshd.
+
+## Install
+
+One line (Linux x86_64 / aarch64, macOS; installs to `~/.local/bin`, never uses sudo):
+
+    curl -fsSL https://raw.githubusercontent.com/fahadsuhaib/wi-cli/main/install.sh | sh
+
+Read the script first if you like; it only downloads the archive and `SHA256SUMS`, checks the checksum and copies `wi`.
+`WICLI_INSTALL_DIR` changes the target folder and `WICLI_VERSION=v0.1.0` pins a release.
+
+Manual: download `wi-linux-x86_64.tar.gz`, `wi-linux-aarch64.tar.gz` or `wi-macos-universal.tar.gz` from the
+[releases page](https://github.com/fahadsuhaib/wi-cli/releases), check it against `SHA256SUMS`, unpack it and put `wi` on your PATH.
+The Linux builds are static and run on any distribution; the macOS build runs on Apple Silicon and Intel.
+
+From source (Rust stable):
+
+    cargo install --path .        # or: cargo build --release  ->  target/release/wi
+
+wi supports macOS and Linux.
+
+## Use
+
+    wi                 # local workspace in the current folder
+    wi <folder>        # local workspace in a folder
+    wi <box>           # remote box from the config, or a Host from ~/.ssh/config
+    wi --help
+
+## Features
+
+- Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet)
+- Previews: text, markdown, CSV/TSV, JSON, binary stub; git changes and diffs
+- Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste
+- Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
+  `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation
+- Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
+- Search in files, find file, find in output; dark and light themes
+
+## Keys
+
+`Ctrl-Space` opens the menu; press the underlined letter or use the arrows and Enter. Esc closes it.
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| P | Preview a file | N | New shell tab |
+| G | Git changes | F | New tab in folder |
+| O | Open path on screen | H | Change folder of this tab |
+| D | Download (remote) | T / B | Next / previous tab |
+| L | Search in files | C | Close tab |
+| K | Find file | S | Scroll |
+| U | Find in output | W | Switch pane |
+| A | Start / change agent | V | Close preview |
+| M | Mouse on/off | Y | Theme dark / light |
+| R | Reconnect (remote) | I / Q | Info / quit |
+
+Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOARD.md).
+
+## Configuration
+
+`~/.config/wicli/config.toml` (override with `WICLI_CONFIG`). A small example:
+
+    [defaults]
+    theme = "auto"          # auto, dark or light
+    preview_side = "right"  # right, left or tab
+
+    [agents.claude]
+    command = "claude --continue"
+
+    [[box]]
+    name = "dev"
+    host = "dev.example.com"
+    user = "me"
+    identity = "~/.ssh/id_ed25519"
+
+Every option is documented in `src/config.rs`.
+
+## Develop and test
+
+`cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. The full suite, including terminal-driving
+scripts and a Docker test box for remote mode, is `dev/run_tests.sh`; see [dev/README.md](dev/README.md).
+
+## License
+
+License: not yet chosen

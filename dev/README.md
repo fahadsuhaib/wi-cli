@@ -24,3 +24,13 @@ then runs build, clippy, `cargo test` and every `dev/pty_*.py` in local mode, pr
 release build and `dev/bench.py`. `--lang-c` runs with `LANG=C` instead of `C.UTF-8`. Remote-mode scripts are not run there.
 Notes: SHELL is unset in the container so wi uses /bin/sh (dash); `pty_input.py` falls back to bash when zsh is missing.
 `pty_mouse.py` is flaky on both macOS and Linux (about 1 run in 3 fails its wheel-down check).
+
+## CI
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request. The `linux` job builds the Docker
+test box, generates its own SSH key (`dev/id_test` is gitignored; never commit it) and runs `dev/run_tests.sh` in full,
+remote mode included; the full log is uploaded as an artifact. The `macos` job runs build, clippy and `cargo test`
+(required) and the local-mode pty scripts (not required yet). `.github/workflows/release.yml` builds
+`wi-linux-x86_64.tar.gz`, `wi-linux-aarch64.tar.gz` and `wi-macos-universal.tar.gz` with `scripts/package.sh` when a
+`v*` tag is pushed (the tag must equal the Cargo.toml version) and publishes them with `SHA256SUMS`.
+Try a package locally with `scripts/package.sh macos-universal dist`, then `WICLI_DOWNLOAD_URL=file://$PWD/dist` with
+a `SHA256SUMS` in it to test `install.sh`.

@@ -107,6 +107,7 @@ Menu search-as-you-type, recent files, per-box config (sensitive patterns, caps)
 Benchmarks in CI, error messages, man page, README, release builds for macOS (arm64/x86_64) and Linux, Homebrew tap, `wicli.dev` docs (domain not yet registered; check crates.io `wicli` and GitHub name availability).
 
 ## Deferred
+Windows (user decision 2026-11-02: parked, not wanted for now; wi targets macOS and Linux only).
 Preview links and the link service (M5), Windows client, upload-back of edited downloads.
 
 ## Open decisions
