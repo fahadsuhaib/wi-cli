@@ -37,6 +37,13 @@ Goal: the same experience in any terminal app. Fonts belong to the terminal, so 
 5. Linux verified in a container: build, unit tests and pty suite (dev/linux/).
 Out of scope for now: a standalone GUI window with a bundled font.
 
+## Phase A4: Search (added 2026-11-02, user request)
+1. Search text in files: `rg` (fallback `grep`) via local process or SSH exec, on demand only; capped (~2,000 matches, 10 s) with a visible notice; respects .gitignore, skips .git/node_modules; results list `path:line  snippet` grouped by file with highlighted matches; Enter opens a preview at that line with the match highlighted. Mouse and arrow keys work.
+2. Find in shell output: search a tab's scrollback, highlight matches, step through them (find that error from 500 lines ago).
+3. Find file by name: fuzzy, narrows as you type; `git ls-files` in repos, capped walk otherwise; Enter opens a preview.
+4. Find inside a preview (`F`), with the same match highlighting; menu type-to-filter.
+Shared: one results/list widget (also used by prompts), every search is a menu Action, no index, no watchers. Engine (rg parsing, scrollback matching, fuzzy scoring) is independent of the UI and can be built by a separate agent first.
+
 ## Phase B: Remote M1 completion
 1. tmux-backed detach/reattach (`tmux new -A -s wicli`, tmux status/keys disabled so it is invisible; plain session if tmux missing).
 2. ssh-agent auth, passphrase-protected keys, `~/.ssh/config` host aliases (HostName, User, Port, IdentityFile).
