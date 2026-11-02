@@ -38,6 +38,28 @@ pub enum Piece {
 pub const ENABLE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 pub const DISABLE: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
+/// Modifier bits in a mouse report's button code. The Cmd/Super key is not reported by most
+/// terminals, so links are opened with Ctrl or Alt held.
+#[allow(dead_code)] // used once link clicks are wired up
+pub const MOD_ALT: u16 = 8;
+#[allow(dead_code)] // used once link clicks are wired up
+pub const MOD_CTRL: u16 = 16;
+
+/// Whether this click should open a link, per the `link_click` setting:
+/// `any` (Ctrl or Alt held, the default), `ctrl`, `alt`, `plain` (an ordinary click on a link),
+/// or `off`.
+#[allow(dead_code)] // used once link clicks are wired up
+pub fn is_link_click(code: u16, setting: &str) -> bool {
+    let (ctrl, alt) = (code & MOD_CTRL != 0, code & MOD_ALT != 0);
+    match setting {
+        "ctrl" => ctrl,
+        "alt" => alt,
+        "plain" => true,
+        "off" => false,
+        _ => ctrl || alt,
+    }
+}
+
 fn button(code: u16) -> Button {
     match code & 3 {
         0 => Button::Left,
@@ -194,6 +216,17 @@ mod tests {
         let mut s = Splitter::default();
         assert_eq!(s.split(b"\x1b[A\x1b[5~"), vec![Piece::Bytes(b"\x1b[A\x1b[5~".to_vec())]);
         assert_eq!(s.split(b"\x1b"), vec![Piece::Bytes(vec![0x1b])] , "a lone Esc is a key, not a report prefix");
+    }
+
+    #[test]
+    fn link_click_modifiers() {
+        assert!(is_link_click(16, "any") && is_link_click(8, "any"));
+        assert!(!is_link_click(0, "any") && !is_link_click(4, "any"), "shift is the terminal's own selection");
+        assert!(is_link_click(16, "ctrl") && !is_link_click(8, "ctrl"));
+        assert!(is_link_click(8, "alt") && !is_link_click(16, "alt"));
+        assert!(is_link_click(0, "plain"));
+        assert!(!is_link_click(16, "off"));
+        assert!(is_link_click(16, "anything else"), "unknown values behave like the default");
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub struct Defaults {
     pub mouse: bool,
     /// What to do when an AI-agent workspace is detected: `ask`, `always` or `never`.
     pub agent_start: String,
+    /// Which click opens a file path or URL shown in terminal output: `any` (Ctrl or Alt held),
+    /// `ctrl`, `alt`, `plain` or `off`.
+    pub link_click: String,
 }
 
 impl Default for Defaults {
@@ -37,6 +40,7 @@ impl Default for Defaults {
             bell_on_quiet: false,
             mouse: true,
             agent_start: "ask".into(),
+            link_click: "any".into(),
         }
     }
 }

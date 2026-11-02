@@ -44,6 +44,11 @@ pub struct Preview {
     /// Line indices where each changed file starts (Diff only), for N/P.
     pub jumps: Vec<usize>,
     wrapped: Option<(u16, Vec<Line<'static>>)>,
+    /// For each source line, the display row where it starts (only while wrapping).
+    starts: Vec<usize>,
+    /// 1-based source line to bring into view and mark (text previews only).
+    pub target_line: Option<usize>,
+    goto_pending: bool,
 }
 
 /// Human-readable size: `256 KB`, `48 MB`.
@@ -89,6 +94,9 @@ impl Preview {
             from_tab: 0,
             jumps: Vec::new(),
             wrapped: None,
+            starts: Vec::new(),
+            target_line: None,
+            goto_pending: false,
         };
         // Content wins over the extension: a binary file named notes.txt is never shown as text.
         if sniff_binary(bytes) {
@@ -150,6 +158,9 @@ impl Preview {
             from_tab: 0,
             jumps: r.jumps,
             wrapped: None,
+            starts: Vec::new(),
+            target_line: None,
+            goto_pending: false,
         }
     }
 
@@ -193,14 +204,52 @@ impl Preview {
         if self.wrap {
             if self.wrapped.as_ref().map(|(w, _)| *w) != Some(width) {
                 let g = self.gutter;
-                let w = self.lines.iter().flat_map(|l| wrap_line(l, g, width as usize)).collect();
+                let mut w: Vec<Line<'static>> = Vec::new();
+                let mut starts = Vec::with_capacity(self.lines.len());
+                for l in &self.lines {
+                    starts.push(w.len());
+                    w.extend(wrap_line(l, g, width as usize));
+                }
+                self.starts = starts;
                 self.wrapped = Some((width, w));
             }
         } else {
             self.wrapped = None;
         }
         let max = self.display_len().saturating_sub(height.max(1));
+        if self.goto_pending {
+            self.goto_pending = false;
+            if let Some((first, _)) = self.target_rows() {
+                // Leave a third of the window above the line so there is context.
+                self.top = first.saturating_sub(height / 3);
+            }
+        }
         self.top = self.top.min(max);
+    }
+
+    /// Bring a source line (1-based) into view and mark it. Only text previews have source lines.
+    #[allow(dead_code)] // used once link clicks are wired up
+    pub fn goto_line(&mut self, line: usize) {
+        if self.kind == Kind::Text && line > 0 {
+            self.target_line = Some(line.min(self.lines.len().max(1)));
+            self.goto_pending = true;
+        }
+    }
+
+    /// Display rows (first, one past last) occupied by the target line.
+    fn target_rows(&self) -> Option<(usize, usize)> {
+        let i = self.target_line? - 1;
+        if i >= self.lines.len() {
+            return None;
+        }
+        match (&self.wrapped, self.wrap) {
+            (Some((_, w)), true) => {
+                let first = *self.starts.get(i)?;
+                let next = self.starts.get(i + 1).copied().unwrap_or(w.len());
+                Some((first, next))
+            }
+            _ => Some((i, i + 1)),
+        }
     }
 
     pub fn max_top(&self, height: usize) -> usize {
@@ -241,10 +290,19 @@ impl Preview {
 
     /// The lines to draw for a window of `height` rows and `width` columns.
     pub fn visible(&self, height: usize, width: usize) -> Vec<Line<'static>> {
-        match (&self.wrapped, self.wrap) {
+        let mut rows: Vec<Line<'static>> = match (&self.wrapped, self.wrap) {
             (Some((_, w)), true) => w.iter().skip(self.top).take(height).cloned().collect(),
             _ => self.lines.iter().skip(self.top).take(height).map(|l| slice_line(l, self.gutter, self.left, width)).collect(),
+        };
+        if let Some((a, b)) = self.target_rows() {
+            for (i, row) in rows.iter_mut().enumerate() {
+                if (a..b).contains(&(self.top + i)) {
+                    let marked: Vec<Cell> = cells(row).into_iter().map(|(c, st)| (c, st.bg(ratatui::style::Color::DarkGray))).collect();
+                    *row = from_cells(&marked);
+                }
+            }
         }
+        rows
     }
 }
 
@@ -466,6 +524,51 @@ mod tests {
     fn truncated_git_view_has_banner() {
         let p = Preview::from_git(&diff::Snapshot { truncated: true, ..Default::default() });
         assert!(p.banner.unwrap().contains("truncated"));
+    }
+
+    fn numbered(n: usize) -> String {
+        (1..=n).map(|i| format!("line number {i}\n")).collect()
+    }
+
+    fn has_mark(l: &Line<'_>) -> bool {
+        l.spans.iter().any(|s| s.style.bg == Some(ratatui::style::Color::DarkGray))
+    }
+
+    #[test]
+    fn goto_line_scrolls_and_marks_the_line() {
+        let body = numbered(100);
+        let mut p = Preview::build("a.rs", body.as_bytes(), body.len() as u64, &opts());
+        p.goto_line(50);
+        p.layout(80, 20);
+        assert_eq!(p.top, 49 - 20 / 3);
+        let vis = p.visible(20, 80);
+        let marked: Vec<String> = vis.iter().filter(|l| has_mark(l)).map(plain).collect();
+        assert_eq!(marked.len(), 1);
+        assert!(marked[0].contains("line number 50"), "{marked:?}");
+    }
+
+    #[test]
+    fn goto_line_with_wrapping_uses_display_rows() {
+        let long = "word ".repeat(40);
+        let body: String = (1..=30).map(|i| format!("{i} {long}\n")).collect();
+        let mut p = Preview::build("a.log", body.as_bytes(), body.len() as u64, &opts());
+        p.toggle_wrap();
+        p.goto_line(20);
+        p.layout(40, 10);
+        let marked = p.visible(10, 40).iter().filter(|l| has_mark(l)).count();
+        assert!(marked >= 2, "a wrapped line is marked on every row it occupies");
+        assert!(p.top > 19, "display rows are more than source lines");
+    }
+
+    #[test]
+    fn goto_line_clamps_and_ignores_other_kinds() {
+        let mut p = Preview::build("a.txt", b"one\ntwo\n", 8, &opts());
+        p.goto_line(999);
+        p.layout(80, 5);
+        assert_eq!(p.target_line, Some(2));
+        let mut m = Preview::build("a.md", b"# hi\n", 5, &opts());
+        m.goto_line(1);
+        assert_eq!(m.target_line, None);
     }
 
     #[test]
