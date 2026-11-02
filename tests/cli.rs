@@ -1,7 +1,11 @@
 use std::process::{Command, Output};
 
+static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn run(config: &str, args: &[&str]) -> Output {
-    let dir = std::env::temp_dir().join(format!("wicli-cli-test-{}-{}", std::process::id(), config.len()));
+    // One folder per call: tests run in parallel and must not share (or delete) each other's.
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("wicli-cli-test-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.toml");
     std::fs::write(&path, config).unwrap();
