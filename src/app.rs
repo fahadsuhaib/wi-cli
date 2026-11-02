@@ -2021,7 +2021,7 @@ fn origin_row(app: &App, area: Rect, pane: Pane) -> u16 {
 /// A left click with Ctrl/Alt held (per `link_click`), or a right click, on a path or URL.
 fn link_intent(m: &MouseEvent, app: &App, area: Rect, pane: Pane, link_click: &str) -> Option<Intent> {
     let wanted = match m.kind {
-        Kind::Down(Button::Left) => mouse::is_link_click(m.code, link_click),
+        Kind::Down(Button::Left) => mouse::is_link_click(m.code, link_click, mouse::cmd_held()),
         Kind::Down(Button::Right) => link_click != "off",
         _ => false,
     };

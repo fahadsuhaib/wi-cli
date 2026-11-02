@@ -262,8 +262,42 @@ fn find_links(chars: &[char]) -> Vec<Found> {
     py_file(chars, &mut claimed, &mut out);
     quoted(chars, &mut claimed, &mut out);
     tokens(chars, &mut claimed, &mut out);
+    // Shell errors read `script.sh: line 11: ...`: the line number follows the path in words.
+    for f in out.iter_mut() {
+        if let LinkKind::Path { line, .. } = &mut f.2
+            && line.is_none()
+        {
+            *line = line_word(chars, f.1 + 1);
+        }
+    }
     out.sort_by_key(|f| f.0);
     out
+}
+
+/// `: line 11`, `, line 11` or ` line 11` right after a path.
+fn line_word(chars: &[char], mut i: usize) -> Option<u32> {
+    while i < chars.len() && matches!(chars[i], ':' | ',' | ' ') {
+        i += 1;
+    }
+    if !starts_ci(chars, i, "line") {
+        return None;
+    }
+    i += 4;
+    let gap = i;
+    while i < chars.len() && chars[i] == ' ' {
+        i += 1;
+    }
+    if i == gap {
+        return None;
+    }
+    let digits = i;
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == digits {
+        return None;
+    }
+    chars[digits..i].iter().collect::<String>().parse().ok()
 }
 
 fn any_claimed(claimed: &[bool], s: usize, e: usize) -> bool {
@@ -1219,6 +1253,27 @@ mod tests {
         let l = links1("+++ b/src/x.rs");
         assert_eq!(l[0].kind, pk("src/x.rs", None, None));
         assert_eq!(l[0].start_col, 6);
+    }
+
+    #[test]
+    fn bash_error_line_gives_both_paths_and_the_line_number() {
+        let text = "dev/run_tests.sh: line 11: /private/tmp/scratchpad/main/venv/bin/python: No such file or directory";
+        let l = links1(text);
+        assert_eq!(l.len(), 2, "{l:?}");
+        assert_eq!(l[0].kind, LinkKind::Path { path: "dev/run_tests.sh".into(), line: Some(11), col: None });
+        assert_eq!(l[0].start_col, 0);
+        assert_eq!(l[0].end_col as usize, "dev/run_tests.sh".len() - 1, "the link covers only the path");
+        assert_eq!(l[1].kind, LinkKind::Path { path: "/private/tmp/scratchpad/main/venv/bin/python".into(), line: None, col: None });
+    }
+
+    #[test]
+    fn line_words_after_a_path() {
+        assert_eq!(kind("./x.sh: line 3: foo: command not found"), LinkKind::Path { path: "./x.sh".into(), line: Some(3), col: None });
+        assert_eq!(kind("src/a.rs, line 40"), LinkKind::Path { path: "src/a.rs".into(), line: Some(40), col: None });
+        // an explicit :LINE still wins, and prose without a number is left alone
+        assert_eq!(kind("src/a.rs:7: line 9"), LinkKind::Path { path: "src/a.rs".into(), line: Some(7), col: None });
+        assert_eq!(kind("src/a.rs: linefeed"), LinkKind::Path { path: "src/a.rs".into(), line: None, col: None });
+        assert_eq!(kind("src/a.rs: line x"), LinkKind::Path { path: "src/a.rs".into(), line: None, col: None });
     }
 
     #[test]

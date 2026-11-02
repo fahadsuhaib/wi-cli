@@ -43,17 +43,43 @@ pub const DISABLE: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 pub const MOD_ALT: u16 = 8;
 pub const MOD_CTRL: u16 = 16;
 
-/// Whether this click should open a link, per the `link_click` setting:
-/// `any` (Ctrl or Alt held, the default), `ctrl`, `alt`, `plain` (an ordinary click on a link),
-/// or `off`.
-pub fn is_link_click(code: u16, setting: &str) -> bool {
+/// Whether the Command key is held right now. Terminals cannot pass Cmd to programs (the mouse
+/// protocol has no bit for it), but wi runs on the user's own Mac, so macOS can be asked directly
+/// at the moment a click arrives. Always false elsewhere.
+pub fn cmd_held() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "ApplicationServices", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventSourceFlagsState(state_id: i32) -> u64;
+        }
+        const COMBINED_SESSION_STATE: i32 = 0;
+        const FLAG_COMMAND: u64 = 0x0010_0000;
+        // SAFETY: a plain query of the keyboard modifier state; no pointers are involved.
+        unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) & FLAG_COMMAND != 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Whether this click should open a link, per the `link_click` setting. `cmd` says the Command
+/// key is held (macOS only, see `cmd_held`).
+/// - `auto` (default): Cmd on a Mac, Ctrl on Linux, and Alt on both; right-click always works
+/// - `cmd`, `ctrl`, `alt`: only that key
+/// - `any`: Cmd, Ctrl or Alt
+/// - `plain`: an ordinary click on a link
+/// - `off`
+pub fn is_link_click(code: u16, setting: &str, cmd: bool) -> bool {
     let (ctrl, alt) = (code & MOD_CTRL != 0, code & MOD_ALT != 0);
     match setting {
+        "cmd" => cmd,
         "ctrl" => ctrl,
         "alt" => alt,
         "plain" => true,
         "off" => false,
-        _ => ctrl || alt,
+        _ => cmd || ctrl || alt, // auto, any, and anything unknown
     }
 }
 
@@ -217,13 +243,22 @@ mod tests {
 
     #[test]
     fn link_click_modifiers() {
-        assert!(is_link_click(16, "any") && is_link_click(8, "any"));
-        assert!(!is_link_click(0, "any") && !is_link_click(4, "any"), "shift is the terminal's own selection");
-        assert!(is_link_click(16, "ctrl") && !is_link_click(8, "ctrl"));
-        assert!(is_link_click(8, "alt") && !is_link_click(16, "alt"));
-        assert!(is_link_click(0, "plain"));
-        assert!(!is_link_click(16, "off"));
-        assert!(is_link_click(16, "anything else"), "unknown values behave like the default");
+        assert!(is_link_click(16, "any", false) && is_link_click(8, "any", false) && is_link_click(0, "any", true));
+        assert!(is_link_click(0, "auto", true), "Cmd+click on a Mac");
+        assert!(is_link_click(16, "auto", false), "Ctrl+click");
+        assert!(!is_link_click(0, "auto", false) && !is_link_click(4, "auto", false), "shift is the terminal's own selection");
+        assert!(is_link_click(0, "cmd", true) && !is_link_click(16, "cmd", false));
+        assert!(is_link_click(16, "ctrl", false) && !is_link_click(8, "ctrl", false) && !is_link_click(0, "ctrl", true));
+        assert!(is_link_click(8, "alt", false) && !is_link_click(16, "alt", false));
+        assert!(is_link_click(0, "plain", false));
+        assert!(!is_link_click(16, "off", true));
+        assert!(is_link_click(16, "anything else", false), "unknown values behave like auto");
+    }
+
+    #[test]
+    fn cmd_held_can_be_queried() {
+        // Nobody is pressing Cmd in a test run; this just proves the system call works.
+        assert!(!cmd_held());
     }
 
     #[test]
