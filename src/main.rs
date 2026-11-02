@@ -14,7 +14,7 @@ mod workspace;
 
 use anyhow::{Result, bail};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     term::install_panic_hook();
     let code = match real_main().await {

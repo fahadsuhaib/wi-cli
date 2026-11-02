@@ -106,7 +106,18 @@ impl Shell {
                     _ => {}
                 }
             },
-            Shell::Local(l) => l.rx.recv().await,
+            Shell::Local(l) => {
+                let mut data = l.rx.recv().await?;
+                // Merge whatever is already queued: ptys hand output over in small
+                // pieces and each piece would otherwise cost several thread wake-ups.
+                while data.len() < COALESCE_MAX {
+                    match l.rx.try_recv() {
+                        Ok(more) => data.extend_from_slice(&more),
+                        Err(_) => break,
+                    }
+                }
+                Some(data)
+            }
         }
     }
 
@@ -121,6 +132,9 @@ impl Shell {
         }
     }
 }
+
+/// Largest merged output event.
+const COALESCE_MAX: usize = 64 * 1024;
 
 pub enum Cmd {
     Write(Vec<u8>),
@@ -177,7 +191,7 @@ pub struct LocalPty {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
-    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    rx: mpsc::Receiver<Vec<u8>>,
 }
 
 impl LocalPty {
@@ -193,12 +207,14 @@ impl LocalPty {
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
-        let (tx, rx) = mpsc::unbounded_channel();
+        // Bounded: when the app falls behind, the reader blocks and the pty throttles the
+        // child instead of queueing the whole flood in memory.
+        let (tx, rx) = mpsc::channel(128);
         // Blocking reads live on their own thread; it ends when the shell exits.
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                if n == 0 || tx.blocking_send(buf[..n].to_vec()).is_err() {
                     break;
                 }
             }

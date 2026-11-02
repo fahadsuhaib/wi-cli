@@ -11,6 +11,8 @@ pub struct Defaults {
     pub preview_read_kb: u64,
     pub csv_rows: usize,
     pub fps_cap: u32,
+    /// Lines of scrollback kept per tab. Costs roughly 7 KB per line at 90 columns, per tab.
+    pub scrollback_lines: usize,
 }
 
 impl Default for Defaults {
@@ -22,6 +24,7 @@ impl Default for Defaults {
             preview_read_kb: 256,
             csv_rows: 200,
             fps_cap: 30,
+            scrollback_lines: 1000,
         }
     }
 }

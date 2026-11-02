@@ -63,6 +63,7 @@ struct App {
     active: usize,
     next_id: usize,
     shell_count: usize,
+    scrollback: usize,
 }
 
 pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> {
@@ -72,9 +73,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let menu_label = prefix_label(&cfg.defaults.prefix_key);
     let fps = cfg.defaults.fps_cap;
 
-    let (events_tx, mut events) = mpsc::channel::<Event>(64);
+    let (events_tx, mut events) = mpsc::channel::<Event>(8);
     let (cols, rows) = shell_size(1)?;
-    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0 };
+    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines };
     open_tab(&mut app, backend, &events_tx, cols, rows).await?;
 
     let _guard = TermGuard::enter()?;
@@ -291,7 +292,7 @@ async fn open_tab(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, co
     app.next_id += 1;
     app.shell_count += 1;
     let handle = spawn_shell(id, shell, tx.clone());
-    app.tabs.push(Tab::new(id, format!("shell {}", app.shell_count), handle, cols, rows));
+    app.tabs.push(Tab::new(id, format!("shell {}", app.shell_count), handle, cols, rows, app.scrollback));
     Ok(())
 }
 
