@@ -44,6 +44,14 @@ Out of scope for now: a standalone GUI window with a bundled font.
 4. Find inside a preview (`F`), with the same match highlighting; menu type-to-filter.
 Shared: one results/list widget (also used by prompts), every search is a menu Action, no index, no watchers. Engine (rg parsing, scrollback matching, fuzzy scoring) is independent of the UI and can be built by a separate agent first.
 
+## Phase A5: Clickable paths and links, native apps for complex files (added 2026-11-02, user: "main thing for VS Code parity")
+1. Paths in terminal output are clickable: Cmd/Ctrl (or Alt, or plain, per `link_click` config) + click on `src/main.rs:12:5`, `./x.py`, `~/a/b`, `File "x.py", line 3`, `--> src/lib.rs:5:9`, git `a/` `b/` prefixes, etc. opens a preview tab (scrolled to the line). URLs open in the local browser.
+2. Keyboard route that always works: menu "Open from screen" labels every path/URL visible in the tab with a letter; press the letter. Needed because many terminals do not pass Cmd+click (or Ctrl+click on macOS, which is a right click) to the program.
+3. Relative paths resolve against the tab's working directory (OSC 7 if the shell sends it; the tmux pane path for remote tabs; /proc or lsof for local tabs), then the workspace root. Candidates are checked with a bounded stat before opening.
+4. Complex files (images, PDF, Office, archives, audio/video, HTML, other binaries) open in the native app: `open` on macOS, `xdg-open` on Linux. Remote files are fetched over SFTP into `~/.cache/wicli/<box>/` (streamed in 64 KB chunks, `.part` then rename, size+mtime reuse, confirm above 100 MB, Esc cancels, total cache capped) and then opened locally. This is the M3 download engine, built first for this purpose.
+5. Config: `link_click = ctrl | alt | cmd | any | none`, `[open] native_ext` / `preview_ext` overrides.
+Work split: links engine (pure path/URL detection, `src/links.rs`), opener (classification, native open, remote fetch cache, `src/opener.rs`), then one integration pass (mouse modifiers, hint mode, cwd resolution, goto-line).
+
 ## Phase B: Remote M1 completion
 1. tmux-backed detach/reattach (`tmux new -A -s wicli`, tmux status/keys disabled so it is invisible; plain session if tmux missing).
 2. ssh-agent auth, passphrase-protected keys, `~/.ssh/config` host aliases (HostName, User, Port, IdentityFile).
