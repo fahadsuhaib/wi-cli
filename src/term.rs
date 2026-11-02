@@ -1,6 +1,7 @@
 //! Host terminal setup and teardown.
 
 use anyhow::Result;
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::{execute, terminal};
 use std::io::stdout;
 
@@ -8,13 +9,13 @@ pub struct TermGuard;
 impl TermGuard {
     pub fn enter() -> Result<Self> {
         terminal::enable_raw_mode()?;
-        execute!(stdout(), terminal::EnterAlternateScreen)?;
+        execute!(stdout(), terminal::EnterAlternateScreen, EnableBracketedPaste)?;
         Ok(Self)
     }
 }
 impl Drop for TermGuard {
     fn drop(&mut self) {
-        let _ = execute!(stdout(), terminal::LeaveAlternateScreen);
+        let _ = execute!(stdout(), DisableBracketedPaste, terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
 }
