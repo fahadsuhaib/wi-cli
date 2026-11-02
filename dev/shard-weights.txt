@@ -30,3 +30,5 @@ dev/pty_tabdir.py remote 120
 dev/pty_tabs.py local 9
 dev/pty_tabs.py remote 9
 dev/pty_theme.py local 60
+dev/pty_explorer.py local 97
+dev/pty_explorer.py remote 112

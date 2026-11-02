@@ -1,5 +1,6 @@
 //! Rendering: header, status bar, shell screen, menu overlay.
 
+pub mod explorer;
 pub mod search;
 
 use ratatui::Frame;
@@ -41,6 +42,8 @@ pub enum Action {
     SearchText,
     /// Fuzzy find a file by name.
     FindFile,
+    /// The full-screen file explorer for the active tab's folder.
+    Explorer,
     /// Find text in the active shell tab's scrollback.
     FindOutput,
     Info,
@@ -93,6 +96,7 @@ const fn mi(label: &'static str, key: char, action: Action, remote_only: bool, s
 pub const MENU: &[MenuItem] = &[
     mi("Preview a file", 'p', Action::Preview, false, "FILES", &["open", "view", "show", "read", "markdown"]),
     mi("Find file", 'k', Action::FindFile, false, "FILES", &["open", "fuzzy", "name", "locate"]),
+    mi("Explorer", 'x', Action::Explorer, false, "FILES", &["tree", "browse", "folders", "files"]),
     mi("Git changes", 'g', Action::Git, false, "FILES", &["diff", "status", "commit", "branch", "modified"]),
     mi("Open path on screen", 'o', Action::OpenLink, false, "FILES", &["link", "url", "click", "hint"]),
     mi("Search in files", 'l', Action::SearchText, false, "SEARCH", &["grep", "find", "text", "ripgrep"]),
@@ -471,6 +475,8 @@ pub struct View<'a> {
     pub find_hl: &'a [(u16, u16, u16, bool)],
     /// Replaces the status bar text when set.
     pub status: Option<&'a str>,
+    /// The file explorer, drawn over the whole screen (no header, tab strip or status bar).
+    pub explorer: Option<&'a crate::explorer::ExplorerState>,
 }
 
 fn vt_color(c: vt100::Color) -> Color {
@@ -523,6 +529,10 @@ pub fn draw(f: &mut Frame, v: &View) {
 }
 
 fn draw_frame(f: &mut Frame, v: &View) {
+    if let Some(ex) = v.explorer {
+        explorer::draw(f, ex);
+        return;
+    }
     let t = theme();
     let strip_h = if v.tabs.len() > 1 { 1 } else { 0 };
     let [header, strip, main, status] = Layout::vertical([
