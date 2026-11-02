@@ -228,6 +228,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let frame = Duration::from_secs_f64(1.0 / fps.clamp(1, 120) as f64);
     let mut last_draw = Instant::now() - frame;
     let mut dirty = true;
+    // A terminal can throw away what it showed while its tab was hidden. After a pause in input,
+    // the next key or click repaints the whole screen once instead of only what changed.
+    const IDLE_REPAINT: Duration = Duration::from_millis(1500);
+    let mut last_input = Instant::now();
+    let mut repaint = false;
 
     // Recognise Claude Code / Codex workspaces: start the remembered agent, or ask the first time.
     let root = app.root.clone();
@@ -364,6 +369,13 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     find_hl: &find_hl,
                     status: status_s.as_deref(),
                 };
+                if std::mem::take(&mut repaint) {
+                    // Not Terminal::clear(): it asks the terminal for the cursor position and wants
+                    // the reply on stdin, which wi itself is reading. Clear the screen directly and
+                    // start from an empty drawing surface so the next frame paints everything.
+                    crossterm::execute!(stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
+                    term = Terminal::new(CrosstermBackend::new(stdout()))?;
+                }
                 term.draw(|f| ui::draw(f, &view))?;
                 last_draw = Instant::now();
                 dirty = false;
@@ -391,6 +403,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     Some(r) => {
                         let n = r?;
                         if n == 0 { return finish(&app, backend).await; }
+                        let now = Instant::now();
+                        if now.duration_since(last_input) > IDLE_REPAINT {
+                            repaint = true;
+                            dirty = true;
+                        }
+                        last_input = now;
                         filter.feed(&buf[..n])
                     }
                 };
