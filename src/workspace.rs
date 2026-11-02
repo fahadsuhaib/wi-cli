@@ -1,0 +1,203 @@
+//! A workspace is where the shell (and, later, previews and transfers) live:
+//! either a local directory or a remote box over SSH.
+
+use crate::config::BoxConfig;
+use crate::session::Session;
+use anyhow::{Context, Result};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use russh::{Channel, ChannelMsg, client::Msg};
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+pub enum Workspace {
+    Local(PathBuf),
+    Remote(BoxConfig),
+}
+
+impl Workspace {
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Workspace::Remote(_))
+    }
+
+    /// (name, detail) for the header.
+    pub fn title(&self) -> (String, String) {
+        match self {
+            Workspace::Local(dir) => {
+                let home = dirs::home_dir().unwrap_or_default();
+                let shown = match dir.strip_prefix(&home) {
+                    Ok(rel) => format!("~/{}", rel.display()),
+                    Err(_) => dir.display().to_string(),
+                };
+                ("local".into(), shown.trim_end_matches('/').to_string())
+            }
+            Workspace::Remote(b) => (b.name.clone(), format!("{}@{}:{}", b.user, b.host, b.port)),
+        }
+    }
+
+    /// Establish the connection once; every tab then opens its shell on it.
+    pub async fn connect(&self) -> Result<Backend> {
+        match self {
+            Workspace::Local(dir) => Ok(Backend::Local(dir.clone())),
+            Workspace::Remote(b) => Ok(Backend::Remote(Arc::new(Session::connect(b).await?))),
+        }
+    }
+}
+
+pub enum Backend {
+    Local(PathBuf),
+    Remote(Arc<Session>),
+}
+
+impl Backend {
+    pub async fn open_shell(&self, cols: u16, rows: u16) -> Result<Shell> {
+        match self {
+            Backend::Local(dir) => Ok(Shell::Local(LocalPty::spawn(dir, cols, rows)?)),
+            Backend::Remote(session) => Ok(Shell::Remote(session.open_shell(cols, rows).await?)),
+        }
+    }
+
+    pub async fn close(&self) {
+        if let Backend::Remote(session) = self {
+            let _ = session.handle.disconnect(russh::Disconnect::ByApplication, "", "en").await;
+        }
+    }
+}
+
+pub enum Shell {
+    Remote(Channel<Msg>),
+    Local(LocalPty),
+}
+
+impl Shell {
+    async fn write(&mut self, data: &[u8]) -> Result<()> {
+        match self {
+            Shell::Remote(channel) => channel.data(data).await?,
+            Shell::Local(l) => {
+                l.writer.write_all(data)?;
+                l.writer.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        match self {
+            Shell::Remote(channel) => channel.window_change(cols as u32, rows as u32, 0, 0).await?,
+            Shell::Local(l) => l.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?,
+        }
+        Ok(())
+    }
+
+    /// Next chunk of output, or None once the shell has ended.
+    async fn next_output(&mut self) -> Option<Vec<u8>> {
+        match self {
+            Shell::Remote(channel) => loop {
+                match channel.wait().await? {
+                    ChannelMsg::Data { data } => return Some(data.to_vec()),
+                    ChannelMsg::ExtendedData { data, .. } => return Some(data.to_vec()),
+                    ChannelMsg::Eof | ChannelMsg::Close => return None,
+                    _ => {}
+                }
+            },
+            Shell::Local(l) => l.rx.recv().await,
+        }
+    }
+
+    async fn close(&mut self) {
+        match self {
+            Shell::Remote(channel) => {
+                let _ = channel.close().await;
+            }
+            Shell::Local(l) => {
+                let _ = l.child.kill();
+            }
+        }
+    }
+}
+
+pub enum Cmd {
+    Write(Vec<u8>),
+    Resize(u16, u16),
+    Close,
+}
+
+pub enum Event {
+    Output(usize, Vec<u8>),
+    Exited(usize),
+}
+
+/// Handle to a shell running in its own task. Output arrives as `Event`s on a
+/// bounded channel, so a flood of output slows the shell instead of growing memory.
+#[derive(Clone)]
+pub struct ShellHandle {
+    tx: mpsc::UnboundedSender<Cmd>,
+}
+
+impl ShellHandle {
+    pub fn write(&self, data: Vec<u8>) {
+        let _ = self.tx.send(Cmd::Write(data));
+    }
+    pub fn resize(&self, cols: u16, rows: u16) {
+        let _ = self.tx.send(Cmd::Resize(cols, rows));
+    }
+    pub fn close(&self) {
+        let _ = self.tx.send(Cmd::Close);
+    }
+}
+
+pub fn spawn_shell(id: usize, mut shell: Shell, events: mpsc::Sender<Event>) -> ShellHandle {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                cmd = rx.recv() => match cmd {
+                    Some(Cmd::Write(d)) => { if shell.write(&d).await.is_err() { break; } }
+                    Some(Cmd::Resize(c, r)) => { let _ = shell.resize(c, r).await; }
+                    Some(Cmd::Close) | None => { shell.close().await; break; }
+                },
+                out = shell.next_output() => match out {
+                    Some(d) => { if events.send(Event::Output(id, d)).await.is_err() { break; } }
+                    None => break,
+                },
+            }
+        }
+        let _ = events.send(Event::Exited(id)).await;
+    });
+    ShellHandle { tx }
+}
+
+pub struct LocalPty {
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+impl LocalPty {
+    fn spawn(dir: &PathBuf, cols: u16, rows: u16) -> Result<Self> {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .context("opening local pty")?;
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let mut cmd = CommandBuilder::new(shell);
+        cmd.cwd(dir);
+        cmd.env("TERM", "xterm-256color");
+        let child = pair.slave.spawn_command(cmd).context("starting local shell")?;
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader()?;
+        let writer = pair.master.take_writer()?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Blocking reads live on their own thread; it ends when the shell exits.
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self { master: pair.master, writer, child, rx })
+    }
+}
