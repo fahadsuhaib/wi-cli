@@ -118,6 +118,33 @@ pub struct Theme {
     /// Reserved for warnings (no caller yet).
     #[allow(dead_code)]
     pub warning: Color,
+    // Widget kit (`src/tui/`): title bar, hint line, badge, column header, tree rows, tones.
+    /// Inverted full-width title bar.
+    pub title_bg: Color,
+    pub title_fg: Color,
+    /// Label text of the one-line key hints (`hint_fg` is the link-label colour, a different thing).
+    pub hintline_fg: Color,
+    /// Coloured badge in the status line (`LOCAL`, a box name) and the header row of a panel.
+    pub badge_bg: Color,
+    pub badge_fg: Color,
+    /// Header row of a column list (`FILES  SIZE  MODIFIED`).
+    pub col_header_bg: Color,
+    pub col_header_fg: Color,
+    /// Fold glyphs and indentation guides of trees.
+    #[allow(dead_code)] // used by the explorer view
+    pub tree_guide: Color,
+    /// Size and date columns.
+    #[allow(dead_code)] // used by the explorer view
+    pub size_fg: Color,
+    #[allow(dead_code)] // used by the explorer view
+    pub date_fg: Color,
+    /// Selected row of a list (the whole row is painted).
+    pub row_sel_bg: Color,
+    pub row_sel_fg: Color,
+    /// Semantic tones for status segments and cells.
+    pub good: Color,
+    pub warn: Color,
+    pub hot: Color,
     /// The 16 named ANSI colours, used for shell output when `ansi_remap` is on.
     pub ansi: [Color; 16],
 }
@@ -186,6 +213,21 @@ pub const DARK: Theme = Theme {
     diff_branch: c(0xeceff4),
     error: c(0xf07178),
     warning: c(0xf2cc60),
+    title_bg: c(0xd7dae0),
+    title_fg: c(0x1c1f26),
+    hintline_fg: c(0x8b93a1),
+    badge_bg: c(0x7aa2f7),
+    badge_fg: c(0x11141b),
+    col_header_bg: c(0x2f3a52),
+    col_header_fg: c(0xeceff4),
+    tree_guide: c(0x6b7484),
+    size_fg: c(0xa9b1c0),
+    date_fg: c(0x8b93a1),
+    row_sel_bg: c(0x34487a),
+    row_sel_fg: c(0xffffff),
+    good: c(0x8fdc7f),
+    warn: c(0xf2cc60),
+    hot: c(0xf07178),
     ansi: [
         c(0x3b4252), c(0xf07178), c(0x98d982), c(0xf2cc60), c(0x7aa2f7), c(0xd69cf5), c(0x7dcfe0), c(0xc8ccd4),
         c(0x6b7280), c(0xff8b92), c(0xb4f09a), c(0xffe08a), c(0x9dbcff), c(0xe5b8ff), c(0x9fe3f0), c(0xffffff),
@@ -252,6 +294,21 @@ pub const LIGHT: Theme = Theme {
     diff_branch: c(0x1f2328),
     error: c(0xcf222e),
     warning: c(0x7a4e00),
+    title_bg: c(0x24292f),
+    title_fg: c(0xfafafa),
+    hintline_fg: c(0x636c76),
+    badge_bg: c(0x0b57d0),
+    badge_fg: c(0xffffff),
+    col_header_bg: c(0xcfd8ea),
+    col_header_fg: c(0x1f2328),
+    tree_guide: c(0x7d8694),
+    size_fg: c(0x4a5361),
+    date_fg: c(0x636c76),
+    row_sel_bg: c(0xb6d4fe),
+    row_sel_fg: c(0x1f2328),
+    good: c(0x1a6b2a),
+    warn: c(0x7a4e00),
+    hot: c(0xcf222e),
     ansi: [
         c(0x24292f), c(0xcf222e), c(0x1a7f37), c(0x7a4e00), c(0x0b57d0), c(0x7a3fd0), c(0x0a7087), c(0x8c959f),
         c(0x6e7781), c(0xe5534b), c(0x2da44e), c(0x9a6700), c(0x218bff), c(0xa475f9), c(0x3192aa), c(0xffffff),
@@ -460,6 +517,17 @@ mod tests {
                 ("error", t.error, t.bg),
                 ("warning", t.warning, t.bg),
                 ("error on dialog", t.error, t.dialog_bg),
+                ("title bar", t.title_fg, t.title_bg),
+                ("hint line", t.hintline_fg, t.bg),
+                ("hint line keys", t.fg, t.bg),
+                ("badge", t.badge_fg, t.badge_bg),
+                ("column header", t.col_header_fg, t.col_header_bg),
+                ("size", t.size_fg, t.bg),
+                ("date", t.date_fg, t.bg),
+                ("selected row", t.row_sel_fg, t.row_sel_bg),
+                ("good", t.good, t.bg),
+                ("warn", t.warn, t.bg),
+                ("hot", t.hot, t.bg),
             ];
             for (name, fg, bg) in pairs {
                 let r = contrast(fg, bg);
@@ -482,11 +550,16 @@ mod tests {
                 ("goto mark", t.goto_bg, t.bg),
                 ("quote bar", t.md_quote_bar, t.bg),
                 ("code panel", t.md_code_bg, t.bg),
+                ("tree guide", t.tree_guide, t.bg),
+                ("badge on canvas", t.badge_bg, t.bg),
+                ("column header on canvas", t.col_header_bg, t.bg),
+                ("selected row on canvas", t.row_sel_bg, t.bg),
+                ("title bar on canvas", t.title_bg, t.bg),
             ];
             for (name, fg, bg) in pairs {
                 let r = contrast(fg, bg);
                 // The goto-line mark is a background tint: it only has to differ from the canvas.
-                let need = if name == "goto mark" || name == "code panel" { 1.1 } else { 3.0 };
+                let need = if matches!(name, "goto mark" | "code panel" | "column header on canvas" | "selected row on canvas") { 1.1 } else { 3.0 };
                 assert!(r >= need, "{} {name}: contrast {r:.2} < {need}", k.name());
             }
             for (i, col) in t.ansi.iter().enumerate() {
