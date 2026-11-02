@@ -57,8 +57,8 @@ pub struct View<'a> {
     pub detail: &'a str,
     pub remote: bool,
     pub menu_label: &'a str,
-    /// (title, active, has new output) per tab; the strip shows only with 2+ tabs.
-    pub tabs: &'a [(String, bool, bool)],
+    /// (title, active, state) per tab; the strip shows only with 2+ tabs.
+    pub tabs: &'a [(String, bool, crate::tab::TabState)],
     pub message: Option<&'a str>,
     /// Some(selected index) when the menu is open.
     pub menu: Option<usize>,
@@ -123,15 +123,23 @@ pub fn draw(f: &mut Frame, v: &View) {
 
     if strip_h == 1 {
         let mut spans = Vec::new();
-        for (i, (title, active, activity)) in v.tabs.iter().enumerate() {
-            let mark = if *activity && !*active { "*" } else { "" };
+        for (i, (title, active, state)) in v.tabs.iter().enumerate() {
+            use crate::tab::TabState;
+            // `*` still printing, `!` printed and then went quiet (finished or waiting for you).
+            let mark = match state {
+                TabState::Streaming => " *",
+                TabState::Quiet => " !",
+                TabState::Idle => "",
+            };
             let label = format!(" {} {}{} ", i + 1, title, mark);
             let style = if *active {
                 Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-            } else if *activity {
-                Style::default().fg(Color::Yellow)
             } else {
-                Style::default()
+                match state {
+                    TabState::Streaming => Style::default().fg(Color::Yellow),
+                    TabState::Quiet => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    TabState::Idle => Style::default(),
+                }
             };
             spans.push(Span::styled(label, style));
         }

@@ -13,6 +13,10 @@ pub struct Defaults {
     pub fps_cap: u32,
     /// Lines of scrollback kept per tab. Costs roughly 7 KB per line at 90 columns, per tab.
     pub scrollback_lines: usize,
+    /// Seconds without output before a background tab is marked as having gone quiet.
+    pub quiet_secs: u64,
+    /// Ring the terminal bell when a background tab goes quiet.
+    pub bell_on_quiet: bool,
 }
 
 impl Default for Defaults {
@@ -25,6 +29,8 @@ impl Default for Defaults {
             csv_rows: 200,
             fps_cap: 30,
             scrollback_lines: 1000,
+            quiet_secs: 5,
+            bell_on_quiet: false,
         }
     }
 }

@@ -64,6 +64,7 @@ struct App {
     next_id: usize,
     shell_count: usize,
     scrollback: usize,
+    quiet: Duration,
 }
 
 pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> {
@@ -75,7 +76,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
 
     let (events_tx, mut events) = mpsc::channel::<Event>(8);
     let (cols, rows) = shell_size(1)?;
-    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines };
+    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)) };
     open_tab(&mut app, backend, &events_tx, cols, rows).await?;
 
     let _guard = TermGuard::enter()?;
@@ -101,15 +102,39 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
 
     loop {
         let due = last_draw + frame;
+        // Earliest moment a still-printing background tab counts as quiet. No tab streaming
+        // means no deadline, so an idle wi has no timers running.
+        let quiet_at = app.tabs.iter().enumerate()
+            .filter(|(i, t)| *i != app.active && t.activity && !t.quiet)
+            .map(|(_, t)| t.last_output + app.quiet)
+            .min();
         tokio::select! {
+            _ = sleep_until(quiet_at.unwrap_or(due).into()), if quiet_at.is_some() => {
+                let now = Instant::now();
+                let mut went_quiet = false;
+                for (i, t) in app.tabs.iter_mut().enumerate() {
+                    if i != app.active && t.activity && !t.quiet && t.last_output + app.quiet <= now {
+                        t.quiet = true;
+                        went_quiet = true;
+                    }
+                }
+                if went_quiet {
+                    if cfg.defaults.bell_on_quiet {
+                        use std::io::Write;
+                        let _ = stdout().write_all(b"\x07");
+                        let _ = stdout().flush();
+                    }
+                    dirty = true;
+                }
+            }
             _ = sleep_until(due.into()), if dirty => {
                 let menu = match mode { Mode::Menu(i) => Some(i), _ => None };
                 let scroll = match mode {
                     Mode::Scroll => { let s = app.tabs[app.active].parser.screen(); Some((s.scrollback(), s.scrollback_len())) }
                     _ => None,
                 };
-                let strip: Vec<(String, bool, bool)> = app.tabs.iter().enumerate()
-                    .map(|(i, t)| (t.title.clone(), i == app.active, t.activity)).collect();
+                let strip: Vec<(String, bool, crate::tab::TabState)> = app.tabs.iter().enumerate()
+                    .map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
                 let view = View {
                     screen: app.tabs[app.active].parser.screen(),
                     name: &name,
@@ -267,7 +292,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 Some(Event::Output(id, data)) => {
                     if let Some(i) = app.tabs.iter().position(|t| t.id == id) {
                         app.tabs[i].output(&data);
-                        if i != app.active { app.tabs[i].activity = true; }
+                        if i != app.active { app.tabs[i].note_background_output(); }
                         dirty = true;
                     }
                 }
@@ -298,7 +323,7 @@ async fn open_tab(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, co
 
 fn switch_to(app: &mut App, i: usize) {
     app.active = i;
-    app.tabs[i].activity = false;
+    app.tabs[i].mark_seen();
 }
 
 fn resize_all(app: &mut App) -> Result<()> {
@@ -319,7 +344,7 @@ fn remove_tab(app: &mut App, id: usize) -> Result<bool> {
     if app.active > i || app.active >= app.tabs.len() {
         app.active = app.active.saturating_sub(1).min(app.tabs.len() - 1);
     }
-    app.tabs[app.active].activity = false;
+    app.tabs[app.active].mark_seen();
     resize_all(app)?;
     Ok(false)
 }

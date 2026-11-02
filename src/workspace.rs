@@ -166,6 +166,15 @@ impl ShellHandle {
     }
 }
 
+impl ShellHandle {
+    /// A handle connected to nothing, for tests.
+    #[cfg(test)]
+    pub fn dummy() -> Self {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Self { tx }
+    }
+}
+
 pub fn spawn_shell(id: usize, mut shell: Shell, events: mpsc::Sender<Event>) -> ShellHandle {
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
     tokio::spawn(async move {
