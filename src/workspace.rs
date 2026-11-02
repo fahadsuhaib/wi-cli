@@ -108,6 +108,13 @@ pub enum Shell {
 }
 
 impl Shell {
+    fn pid(&self) -> Option<u32> {
+        match self {
+            Shell::Local(l) => l.child.process_id(),
+            Shell::Remote(_) => None,
+        }
+    }
+
     async fn write(&mut self, data: &[u8]) -> Result<()> {
         match self {
             Shell::Remote(channel) => channel.data(data).await?,
@@ -184,9 +191,16 @@ pub enum Event {
 #[derive(Clone)]
 pub struct ShellHandle {
     tx: mpsc::UnboundedSender<Cmd>,
+    /// Process id of a local shell (used to find its working directory).
+    #[allow(dead_code)] // read by the link integration
+    pid: Option<u32>,
 }
 
 impl ShellHandle {
+    #[allow(dead_code)] // used by the link integration
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
     pub fn write(&self, data: Vec<u8>) {
         let _ = self.tx.send(Cmd::Write(data));
     }
@@ -203,12 +217,13 @@ impl ShellHandle {
     #[cfg(test)]
     pub fn dummy() -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
-        Self { tx }
+        Self { tx, pid: None }
     }
 }
 
 pub fn spawn_shell(id: usize, mut shell: Shell, events: mpsc::Sender<Event>) -> ShellHandle {
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
+    let pid = shell.pid();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -225,7 +240,7 @@ pub fn spawn_shell(id: usize, mut shell: Shell, events: mpsc::Sender<Event>) -> 
         }
         let _ = events.send(Event::Exited(id)).await;
     });
-    ShellHandle { tx }
+    ShellHandle { tx, pid }
 }
 
 pub struct LocalPty {

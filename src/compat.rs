@@ -9,6 +9,8 @@ const MAX_CARRY: usize = 256;
 pub struct Compat {
     /// Trailing, still-incomplete escape sequence from the previous chunk.
     carry: Vec<u8>,
+    /// Working directory the shell reported with OSC 7, if it does.
+    pub cwd: Option<String>,
     /// Latest window title set by the program (OSC 0/2), if any.
     pub title: Option<String>,
 }
@@ -60,6 +62,13 @@ impl Compat {
     fn set_title(&mut self, body: &[u8]) {
         let s = String::from_utf8_lossy(body);
         let Some((cmd, text)) = s.split_once(';') else { return };
+        if cmd == "7" {
+            // Shells that report their directory (OSC 7) tell us exactly where relative paths point.
+            if let Some(p) = crate::links::parse_osc7(text) {
+                self.cwd = Some(p);
+            }
+            return;
+        }
         if cmd == "0" || cmd == "2" {
             let t: String = text.chars().filter(|c| !c.is_control()).take(20).collect();
             self.title = if t.trim().is_empty() { None } else { Some(t) };

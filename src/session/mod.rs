@@ -171,6 +171,17 @@ impl Session {
         }
     }
 
+    /// Current directory of the tmux pane behind a tab (so relative paths in its output resolve).
+    pub async fn tmux_pane_path(&self, name: &str) -> Option<String> {
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return None;
+        }
+        let cmd = format!("{TMUX} display-message -p -t ={name} '#{{pane_current_path}}' 2>/dev/null");
+        let (out, status) = self.exec(&cmd).await.ok()?;
+        let p = String::from_utf8_lossy(&out).trim().to_string();
+        (status == 0 && p.starts_with('/')).then_some(p)
+    }
+
     pub fn has_tmux(&self) -> bool {
         self.tmux
     }

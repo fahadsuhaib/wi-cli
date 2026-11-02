@@ -3,6 +3,7 @@ mod app;
 mod clip;
 mod compat;
 mod config;
+mod cwd;
 mod exec;
 mod input;
 mod links;
