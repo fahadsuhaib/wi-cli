@@ -21,6 +21,10 @@ START = "/home/dev" if remote else X + "/ws"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
 # Own tmux server on the box, so this test can run next to other remote tests.
 env = dict(os.environ, WICLI_CONFIG=CFGDIR + "/config.toml", TERM="xterm-256color", WICLI_TMUX_SOCKET="tabdirtest")
+# A plain shell with an empty home: default prompts (Ubuntu's .bashrc, zsh themes) change the title
+# and can be slow to start, which these checks do not want.
+os.makedirs(CFGDIR + "/home_plain", exist_ok=True)
+env.update(SHELL="/bin/bash", HOME=CFGDIR + "/home_plain")
 
 def sh(script, check=True):
     if remote:
@@ -82,7 +86,10 @@ def cleanup():
 fails = []
 def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
-    if not cond: fails.append(name)
+    if not cond:
+        fails.append(name)
+        try: print("--- screen at the failure ---\n" + text() + "\n---")
+        except Exception: pass
 def state(): return open(STATE).read() if os.path.exists(STATE) else ""
 def where():
     send(b"\x15clear\r", 0.6)

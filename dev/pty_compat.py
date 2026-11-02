@@ -3,6 +3,10 @@ import os, pty, sys, time, select, struct, fcntl, termios, pyte
 S, mode = sys.argv[1], sys.argv[2]
 MENU = b"\x00"  # Ctrl-Space
 env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color")
+# A plain shell: many default prompts (Ubuntu's .bashrc, zsh themes) rewrite the terminal title after
+# every command, which would hide the titles this test sets.
+os.makedirs(S + "/home_plain", exist_ok=True)
+env.update(SHELL="/bin/bash", HOME=S + "/home_plain")
 args = ["wi"] if mode == "local" else ["wi", "test"]
 pid, fd = pty.fork()
 if pid == 0:
@@ -24,7 +28,10 @@ def text():
 fails = []
 def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
-    if not cond: fails.append(name)
+    if not cond:
+        fails.append(name)
+        try: print("--- screen at the failure ---\n" + text() + "\n---")
+        except Exception: pass
 pump(2.5)
 def send(cmd, t=1.2): os.write(fd, cmd.encode() + b"\n"); pump(t)
 send("bash --norc")
