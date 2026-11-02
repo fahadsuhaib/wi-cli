@@ -24,6 +24,10 @@ pub enum Action {
     CloseTab,
     Reconnect,
     Scroll,
+    /// Move the keyboard between the shell and the side preview.
+    SwitchPane,
+    /// Close the side preview and give the shell the full width back.
+    ClosePreview,
     Info,
     Quit,
     EndAndQuit,
@@ -74,6 +78,8 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Close tab", key: 'c', action: Action::CloseTab, remote_only: false },
     MenuItem { label: "Reconnect", key: 'r', action: Action::Reconnect, remote_only: true },
     MenuItem { label: "Scroll", key: 's', action: Action::Scroll, remote_only: false },
+    MenuItem { label: "Switch pane", key: 'w', action: Action::SwitchPane, remote_only: false },
+    MenuItem { label: "Close preview", key: 'v', action: Action::ClosePreview, remote_only: false },
     MenuItem { label: "Start / change agent", key: 'a', action: Action::Agent, remote_only: false },
     MenuItem { label: "Mouse on/off", key: 'm', action: Action::Mouse, remote_only: false },
     MenuItem { label: "Info", key: 'i', action: Action::Info, remote_only: false },
@@ -199,8 +205,12 @@ pub fn hint_labels(n: usize) -> Vec<String> {
 pub struct View<'a> {
     pub confirm: Option<&'a Confirm>,
     pub hints: Option<(&'a [Hint], &'a str)>,
-    /// Selected cells, relative to the shell area (or the preview body).
-    pub selection: Option<crate::select::Sel>,
+    /// Selected cells and the pane they are in, relative to that pane (or the preview body).
+    pub selection: Option<(crate::tab::Pane, crate::select::Sel)>,
+    /// The preview attached beside the shell, with the side/percentage setting that places it.
+    pub side: Option<&'a crate::preview::Preview>,
+    pub split: (crate::tab::Side, u16),
+    pub focus_side: bool,
     pub ask: Option<&'a Ask>,
     pub preview: Option<&'a crate::preview::Preview>,
     pub prompt: Option<&'a Prompt>,
@@ -294,27 +304,32 @@ pub fn draw(f: &mut Frame, v: &View) {
         f.render_widget(Paragraph::new(Line::from(spans)), strip);
     }
 
+    let split = v.side.and_then(|_| crate::tab::split_main(main, v.split.0, v.split.1));
+    let sel_in = |pane| v.selection.filter(|(p, _)| *p == pane).map(|(_, s)| s);
     let mut preview_rows = 0usize;
-    if let Some(p) = v.preview {
-        let (banner_area, body) = if p.banner.is_some() {
-            let [b, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main);
-            (Some(b), body)
-        } else {
-            (None, main)
-        };
-        if let (Some(b), Some(text)) = (banner_area, p.banner.as_deref()) {
-            f.render_widget(Paragraph::new(format!(" {text}")).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)), b);
+    let mut shell_area = main;
+    let mut active_prev = v.preview;
+    if let (Some(sp), Some(side)) = (&split, v.side) {
+        preview_rows = draw_preview(f, sp.side, side, sel_in(crate::tab::Pane::Side));
+        let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let div = sp.divider;
+        for y in 0..div.height {
+            let c = &mut f.buffer_mut()[(div.x, div.y + y)];
+            c.set_symbol("│");
+            c.set_style(if v.focus_side { accent } else { Style::default().fg(Color::DarkGray) });
         }
-        preview_rows = body.height as usize;
-        let mut vis = p.visible(body.height as usize, body.width as usize);
-        if let Some(sel) = v.selection {
-            for (r, line) in vis.iter_mut().enumerate() {
-                *line = crate::preview::highlight_line(line, r as u16, sel);
-            }
-        }
-        f.render_widget(Paragraph::new(vis), body);
+        // An arrow at the top of the divider points at the pane that has the keyboard.
+        let side_is_right = sp.side.x > sp.shell.x;
+        let c = &mut f.buffer_mut()[(div.x, div.y)];
+        c.set_symbol(if v.focus_side == side_is_right { "▶" } else { "◀" });
+        c.set_style(accent);
+        shell_area = sp.shell;
+        active_prev = v.focus_side.then_some(side);
+        f.render_widget(ScreenWidget(v.screen, sel_in(crate::tab::Pane::Shell)), shell_area);
+    } else if let Some(p) = v.preview {
+        preview_rows = draw_preview(f, main, p, sel_in(crate::tab::Pane::Shell));
     } else {
-        f.render_widget(ScreenWidget(v.screen, v.selection), main);
+        f.render_widget(ScreenWidget(v.screen, sel_in(crate::tab::Pane::Shell)), main);
     }
 
     if let Some((hints, typed)) = v.hints {
@@ -341,11 +356,12 @@ pub fn draw(f: &mut Frame, v: &View) {
     }
 
     let scroll_hint = v.scroll.map(|(n, m)| format!(" scroll: arrows, PgUp/PgDn, Home/End   Esc exits   scrollback {n}/{m}"));
-    let preview_hint = v.preview.map(|p| {
+    let preview_hint = active_prev.map(|p| {
         let total = p.display_len();
         let last = (p.top + preview_rows).min(total);
         let files = if p.kind == crate::preview::Kind::Diff { "N/P file · " } else { "" };
-        format!(" arrows scroll · {files}W wrap · R reload · Esc back   lines {}-{} of {}", (p.top + 1).min(total), last, total)
+        let back = if split.is_some() { "Esc to the shell" } else { "Esc back" };
+        format!(" arrows scroll · {files}W wrap · R reload · {back}   lines {}-{} of {}", (p.top + 1).min(total), last, total)
     });
     let hint = match (v.menu, v.message) {
         _ if v.confirm.is_some_and(|c| c.yes.is_empty()) => " Esc cancels the download".to_string(),
@@ -357,6 +373,7 @@ pub fn draw(f: &mut Frame, v: &View) {
         (None, None) if preview_hint.is_some() => preview_hint.unwrap_or_default(),
         (Some(_), _) => " arrows + Enter, a letter, or a tab number   Esc closes".to_string(),
         (None, Some(m)) => format!(" {m}"),
+        (None, None) if split.is_some() => format!(" {}  menu · click a pane or menu W to switch · menu V closes the preview", v.menu_label),
         (None, None) => format!(" {}  menu", v.menu_label),
     };
     f.render_widget(Paragraph::new(hint).style(bar), status);
@@ -375,15 +392,36 @@ pub fn draw(f: &mut Frame, v: &View) {
     }
     match v.menu {
         Some(sel) => draw_menu(f, main, sel, v.remote),
-        None if v.preview.is_some() => {}
+        None if v.preview.is_some() || (split.is_some() && v.focus_side) => {}
         None if !v.screen.hide_cursor() && v.scroll.is_none() => {
             let (r, c) = v.screen.cursor_position();
-            if r < main.height && c < main.width {
-                f.set_cursor_position((main.x + c, main.y + r));
+            if r < shell_area.height && c < shell_area.width {
+                f.set_cursor_position((shell_area.x + c, shell_area.y + r));
             }
         }
         None => {}
     }
+}
+
+/// A preview (banner on top, then the body) drawn into `area`. Returns the body height.
+fn draw_preview(f: &mut Frame, area: Rect, p: &crate::preview::Preview, selection: Option<crate::select::Sel>) -> usize {
+    let (banner_area, body) = if p.banner.is_some() && area.height > 1 {
+        let [b, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+        (Some(b), body)
+    } else {
+        (None, area)
+    };
+    if let (Some(b), Some(text)) = (banner_area, p.banner.as_deref()) {
+        f.render_widget(Paragraph::new(format!(" {text}")).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)), b);
+    }
+    let mut vis = p.visible(body.height as usize, body.width as usize);
+    if let Some(sel) = selection {
+        for (r, line) in vis.iter_mut().enumerate() {
+            *line = crate::preview::highlight_line(line, r as u16, sel);
+        }
+    }
+    f.render_widget(Paragraph::new(vis), body);
+    body.height as usize
 }
 
 fn draw_menu(f: &mut Frame, main: Rect, selected: usize, remote: bool) {

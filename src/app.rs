@@ -3,7 +3,7 @@
 use crate::input::{InEv, PasteFilter};
 use crate::scroll::{self, ScrollKey};
 use crate::config::{Config, parse_prefix_key, prefix_label};
-use crate::tab::Tab;
+use crate::tab::{Pane, Side, Split, Tab, pct_for_col, split_main};
 use crate::files::complete;
 use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
 use crate::mouse::{self, Button, Kind, MouseEvent, Piece};
@@ -87,6 +87,11 @@ struct App {
     quiet: Duration,
     /// tmux session behind each shell tab (by tab id), on remote boxes with tmux.
     sessions: std::collections::HashMap<usize, String>,
+    /// Where side previews go and how wide they are (changed by dragging the divider).
+    side: Side,
+    pct: u16,
+    /// The divider is being dragged.
+    div_drag: bool,
 }
 
 pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> {
@@ -98,7 +103,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
 
     let (events_tx, mut events) = mpsc::channel::<Event>(8);
     let (cols, rows) = shell_size(1)?;
-    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)), sessions: Default::default() };
+    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)), sessions: Default::default(), side: Side::parse(&cfg.defaults.preview_side), pct: cfg.defaults.preview_width_pct, div_drag: false };
     // Reattach to sessions left running on the box; otherwise start one fresh shell.
     let restored = backend.restored_sessions();
     let (cols, rows) = if restored.len() > 1 { shell_size(restored.len())? } else { (cols, rows) };
@@ -127,6 +132,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let open_cfg = cfg.open.clone();
     let link_click = cfg.defaults.link_click.clone();
     let confirm_needed = cfg.defaults.confirm_open != "never";
+    let mut sel_reset = false;
     let mut pending: Option<Pending> = None;
     let mut fetching: Option<Fetching<'_>> = None;
     let mut filter = PasteFilter::default();
@@ -196,6 +202,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 }
             }
             _ = sleep_until(due.into()), if dirty => {
+                if std::mem::take(&mut sel_reset) { sel = None; }
                 let menu = match mode { Mode::Menu(i) => Some(i), _ => None };
                 let scroll = match mode {
                     Mode::Scroll => { let s = app.tabs[app.active].parser.screen(); Some((s.scrollback(), s.scrollback_len())) }
@@ -206,15 +213,25 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     let h = prows as usize - usize::from(p.banner.is_some() && prows > 1);
                     p.layout(pcols, h);
                 }
+                let (pside, ppct) = (app.side, app.pct);
+                if let Some(sp) = split_main(Rect::new(0, 0, pcols, prows), pside, ppct)
+                    && let Some(p) = app.tabs[app.active].side.as_mut()
+                {
+                    let h = sp.side.height as usize - usize::from(p.banner.is_some() && sp.side.height > 1);
+                    p.layout(sp.side.width, h);
+                }
                 let strip: Vec<(String, bool, crate::tab::TabState)> = app.tabs.iter().enumerate()
                     .map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
-                let selection = sel.as_ref().filter(|s| s.tab == app.tabs[app.active].id).map(|s| select::normalize(s.anchor, s.end));
+                let selection = sel.as_ref().filter(|s| s.tab == app.tabs[app.active].id).map(|s| (s.pane, select::normalize(s.anchor, s.end)));
                 let progress_dlg = fetching.as_ref().map(|f| f.dialog());
                 let confirm_ref = match &mode { Mode::Confirm(c) => Some(c), Mode::Fetch => progress_dlg.as_ref(), _ => None };
                 let hints_ref = match &mode { Mode::Hints(h) => Some((&h.hints[..], h.typed.as_str())), _ => None };
                 let view = View {
                     selection,
                     preview: app.tabs[app.active].preview.as_ref(),
+                    side: app.tabs[app.active].side.as_ref(),
+                    split: (app.side, app.pct),
+                    focus_side: app.tabs[app.active].side_focused(),
                     prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
                     ask: match &mode { Mode::Ask(x) => Some(x), _ => None },
                     confirm: confirm_ref,
@@ -266,20 +283,36 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             let (tc, tr) = crossterm::terminal::size()?;
                             let strip_h = u16::from(app.tabs.len() > 1);
                             let main = Rect::new(0, 1 + strip_h, tc, tr.saturating_sub(2 + strip_h).max(1));
-                            match mouse_intent(&m, &mode, &app, &items, main, sel.as_ref().is_some_and(|s| s.dragging), &link_click) {
+                            if matches!(mode, Mode::Shell | Mode::Scroll) && matches!(m.kind, Kind::Down(_))
+                                && let Some(sp) = split_of(&app, &app.tabs[app.active], main)
+                            {
+                                // Clicking in a pane gives it the keyboard.
+                                let t = &mut app.tabs[app.active];
+                                if inside(sp.side, m.col, m.row) { t.focus = Pane::Side; dirty = true; }
+                                else if inside(sp.shell, m.col, m.row) { t.focus = Pane::Shell; dirty = true; }
+                            }
+                            match mouse_intent(&m, &mode, &app, &items, main, sel.as_ref().filter(|s| s.dragging).map(|s| s.pane), &link_click) {
                                 Intent::None => {}
                                 Intent::Synth(bytes) => out.extend(bytes),
                                 Intent::SwitchTab(i) => { sel = None; switch_to(&mut app, i); dirty = true; }
-                                Intent::OpenLink(l) => {
+                                Intent::DividerDown => { app.div_drag = true; sel = None; }
+                                Intent::DividerDrag(col) => {
+                                    app.pct = pct_for_col(main, app.side, col);
+                                    resize_all(&mut app)?;
+                                    dirty = true;
+                                }
+                                Intent::DividerUp => { app.div_drag = false; dirty = true; }
+                                Intent::OpenLink(l, pane) => {
                                     sel = None;
                                     if matches!(mode, Mode::Scroll) { mode = Mode::Shell; }
-                                    let o = resolve_link(&app, backend, ws, &l, &open_cfg, confirm_needed).await;
+                                    let o = resolve_link(&app, backend, ws, &l, pane, &open_cfg, confirm_needed).await;
                                     apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
                                     dirty = true;
                                 }
-                                Intent::Select(phase, pos) => {
+                                Intent::Select(phase, pos, pane) => {
                                     let tab_id = app.tabs[app.active].id;
-                                    let (rows, wrapped) = area_rows(&app, main);
+                                    let area = pane_rect(&app, main, pane);
+                                    let (rows, wrapped) = area_rows(&app, area, pane);
                                     let width = rows.first().map_or(0, |r| r.len()) as u16;
                                     match phase {
                                         Phase::Down => {
@@ -297,7 +330,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                                 3 => ((pos.0, 0), (pos.0, width.saturating_sub(1))),
                                                 _ => (pos, pos),
                                             };
-                                            sel = Some(SelState { tab: tab_id, anchor: a, end: b, dragging: true, clicks });
+                                            sel = Some(SelState { tab: tab_id, pane, anchor: a, end: b, dragging: true, clicks });
                                         }
                                         Phase::Drag => {
                                             if let Some(s) = sel.as_mut().filter(|s| s.dragging && s.clicks == 1) { s.end = pos; }
@@ -321,10 +354,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     }
                                     dirty = true;
                                 }
-                                Intent::PreviewScroll(n) => {
+                                Intent::PreviewScroll(n, pane) => {
                                     sel = None;
                                     let page = main.height as usize;
-                                    if let Some(p) = app.tabs[app.active].preview.as_mut() {
+                                    if let Some(p) = pane_preview_mut(&mut app, pane) {
                                         let key = if n < 0 { PvKey::Up } else { PvKey::Down };
                                         for _ in 0..n.unsigned_abs() { p.navigate(key, page); }
                                     }
@@ -358,7 +391,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         out
                     }
                     InEv::PasteStart => {
-                        let fwd = matches!(mode, Mode::Shell) && !app.tabs[app.active].is_preview();
+                        let fwd = matches!(mode, Mode::Shell) && !app.tabs[app.active].is_preview() && !app.tabs[app.active].side_focused();
                         let wrap = app.tabs[app.active].parser.screen().bracketed_paste();
                         if fwd && wrap { app.tabs[app.active].write(b"\x1b[200~".to_vec()); }
                         pasting = Some((fwd, wrap));
@@ -405,10 +438,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 Some(pos) => (&chunk[..pos], Some(&chunk[pos + 1..])),
                                 None => (chunk, None),
                             };
-                            if app.tabs[app.active].is_preview() {
+                            let side_focus = app.tabs[app.active].side_focused();
+                            if app.tabs[app.active].is_preview() || side_focus {
                                 let rows = shell_size(app.tabs.len())?.1 as usize;
                                 let (mut back, mut reload) = (false, false);
-                                if let Some(p) = app.tabs[app.active].preview.as_mut() {
+                                if let Some(p) = focused_slot(&mut app).as_mut() {
                                     let page = rows - usize::from(p.banner.is_some() && rows > 1);
                                     for k in pvkeys::parse(head) {
                                         match k {
@@ -419,9 +453,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     }
                                 }
                                 dirty = true;
-                                if back { go_back(&mut app); }
+                                if back && side_focus { app.tabs[app.active].focus = Pane::Shell; }
+                                else if back { go_back(&mut app); }
                                 if reload {
-                                    let is_git = app.tabs[app.active].preview.as_ref().is_some_and(|p| p.kind == crate::preview::Kind::Diff);
+                                    let is_git = focused_slot(&mut app).as_ref().is_some_and(|p| p.kind == crate::preview::Kind::Diff);
                                     let res = if is_git {
                                         reload_git(&mut app, backend).await.map(|b| { detail = header_detail(&base_detail, &b); })
                                     } else {
@@ -477,7 +512,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             chunk = &[];
                         }
                         Mode::Hints(ref mut hs) => {
-                            let (mut cancel, mut chosen) = (false, None::<Link>);
+                            let (mut cancel, mut chosen) = (false, None::<(Link, Pane)>);
                             let mut i = 0;
                             while i < chunk.len() {
                                 let b = chunk[i];
@@ -509,9 +544,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             }
                             if cancel {
                                 mode = Mode::Shell;
-                            } else if let Some(l) = chosen {
+                            } else if let Some((l, pane)) = chosen {
                                 mode = Mode::Shell;
-                                let o = resolve_link(&app, backend, ws, &l, &open_cfg, confirm_needed).await;
+                                let o = resolve_link(&app, backend, ws, &l, pane, &open_cfg, confirm_needed).await;
                                 apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
                             }
                             dirty = true;
@@ -635,7 +670,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             if open_now && !pr.input.trim().is_empty() {
                                 let path = pr.input.trim().to_string();
                                 match open_preview(&mut app, backend, &path, read_cap, &opts, None).await {
-                                    Ok(()) => cancel = true,
+                                    Ok(pl) => {
+                                        cancel = true;
+                                        if pl == Placement::TabNarrow { message = Some("narrow: opened in a tab".into()); }
+                                    }
                                     Err(e) => pr.error = Some(format!("{path}: {e}")),
                                 }
                             }
@@ -681,20 +719,23 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     }),
                                     Action::OpenLink => {
                                         let main = main_rect(&app)?;
-                                        let (rows, wrapped) = area_rows(&app, main);
-                                        let mut ls = links::all_links(&rows, &wrapped);
+                                        let mut ls: Vec<(Link, Pane, Rect)> = Vec::new();
+                                        for (pane, area) in visible_panes(&app, main) {
+                                            let (rows, wrapped) = area_rows(&app, area, pane);
+                                            ls.extend(links::all_links(&rows, &wrapped).into_iter().map(|l| (l, pane, area)));
+                                        }
                                         ls.truncate(200);
                                         if ls.is_empty() {
                                             message = Some("no file paths or links on screen".into());
                                         } else {
-                                            let origin = origin_row(&app, main);
-                                            let hints = ls.iter().zip(hint_labels(ls.len())).map(|(l, label)| Hint {
+                                            let hints = ls.iter().zip(hint_labels(ls.len())).map(|((l, pane, area), label)| Hint {
                                                 label,
-                                                row: origin + l.row,
-                                                col: l.start_col,
-                                                width: if l.wrap_rows == 0 { l.end_col - l.start_col + 1 } else { main.width - l.start_col },
+                                                row: origin_row(&app, *area, *pane) + l.row,
+                                                col: area.x + l.start_col,
+                                                width: if l.wrap_rows == 0 { l.end_col - l.start_col + 1 } else { area.width - l.start_col },
                                             }).collect();
-                                            mode = Mode::Hints(HintState { links: ls, hints, typed: String::new() });
+                                            let links = ls.into_iter().map(|(l, p, _)| (l, p)).collect();
+                                            mode = Mode::Hints(HintState { links, hints, typed: String::new() });
                                         }
                                     }
                                     Action::Agent => {
@@ -709,6 +750,27 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         let _ = std::io::Write::flush(&mut o);
                                         message = Some(if mouse_on { "mouse on".to_string() } else { "mouse off: select and copy text natively".to_string() });
                                     }
+                                    Action::SwitchPane => {
+                                        let main = main_rect(&app)?;
+                                        if split_of(&app, &app.tabs[app.active], main).is_some() {
+                                            let t = &mut app.tabs[app.active];
+                                            t.focus = if t.focus == Pane::Side { Pane::Shell } else { Pane::Side };
+                                        } else {
+                                            message = Some("no preview pane open".into());
+                                        }
+                                    }
+                                    Action::ClosePreview => {
+                                        if app.tabs[app.active].side.is_some() {
+                                            let t = &mut app.tabs[app.active];
+                                            t.side = None;
+                                            t.focus = Pane::Shell;
+                                            sel_reset = true;
+                                            resize_all(&mut app)?;
+                                        } else {
+                                            message = Some("no preview pane open".into());
+                                        }
+                                    }
+                                    Action::Scroll if app.tabs[app.active].side_focused() => message = Some("the preview has the keyboard: switch pane (menu W) to scroll the shell".into()),
                                     Action::Scroll if app.tabs[app.active].is_preview() => message = Some("scroll a preview with the arrow keys and PgUp/PgDn".into()),
                                     Action::Scroll => mode = Mode::Scroll,
                                     Action::Git => match open_git(&mut app, backend).await {
@@ -824,8 +886,15 @@ fn switch_to(app: &mut App, i: usize) {
 
 fn resize_all(app: &mut App) -> Result<()> {
     let (c, r) = shell_size(app.tabs.len())?;
+    let split = split_main(Rect::new(0, 0, c, r), app.side, app.pct);
     for t in &mut app.tabs {
-        t.resize(c, r);
+        // The shell is narrower while a side preview fits beside it; without room the pane hides.
+        let shell_c = match (&t.side, &split) {
+            (Some(_), Some(sp)) => sp.shell.width,
+            _ => c,
+        };
+        if t.side.is_some() && split.is_none() { t.focus = Pane::Shell; }
+        t.resize(shell_c, r);
     }
     Ok(())
 }
@@ -856,7 +925,7 @@ async fn finish(app: &App, backend: &Backend) -> Result<()> {
 }
 
 /// Open `input` (relative to the workspace) in a new preview tab and switch to it.
-async fn open_preview(app: &mut App, backend: &Backend, input: &str, cap: usize, opts: &Opts, line: Option<u32>) -> Result<()> {
+async fn open_preview(app: &mut App, backend: &Backend, input: &str, cap: usize, opts: &Opts, line: Option<u32>) -> Result<Placement> {
     let abs = backend.resolve(input).await?;
     let (bytes, total) = backend.read_prefix(&abs, cap).await?;
     let mut p = Preview::build(&abs, &bytes, total, opts);
@@ -864,12 +933,43 @@ async fn open_preview(app: &mut App, backend: &Backend, input: &str, cap: usize,
         p.goto_line(l as usize);
     }
     p.from_tab = app.active;
-    let id = app.next_id;
-    app.next_id += 1;
-    app.tabs.push(Tab::new_preview(id, p));
-    app.active = app.tabs.len() - 1;
-    resize_all(app)?; // the tab strip may have just appeared
-    Ok(())
+    match attach_side(app, p)? {
+        Ok(()) => Ok(Placement::Side),
+        Err((p, narrow)) => {
+            let id = app.next_id;
+            app.next_id += 1;
+            app.tabs.push(Tab::new_preview(id, p));
+            app.active = app.tabs.len() - 1;
+            resize_all(app)?; // the tab strip may have just appeared
+            Ok(if narrow { Placement::TabNarrow } else { Placement::Tab })
+        }
+    }
+}
+
+/// Where an opened preview ended up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Placement {
+    Side,
+    Tab,
+    /// A tab, because the window is too narrow for a pane.
+    TabNarrow,
+}
+
+/// Put `p` in the active shell tab's side pane when the setting and the window allow it.
+/// Otherwise hand it back, with whether the window was too narrow.
+fn attach_side(app: &mut App, p: Preview) -> Result<Result<(), (Preview, bool)>> {
+    if app.tabs[app.active].is_preview() || app.side == Side::Tab {
+        return Ok(Err((p, false)));
+    }
+    let (c, r) = shell_size(app.tabs.len())?;
+    if split_main(Rect::new(0, 0, c, r), app.side, app.pct).is_none() {
+        return Ok(Err((p, true)));
+    }
+    let t = &mut app.tabs[app.active];
+    t.side = Some(p);
+    t.focus = Pane::Side;
+    resize_all(app)?;
+    Ok(Ok(()))
 }
 
 fn header_detail(base: &str, branch: &str) -> String {
@@ -886,6 +986,11 @@ async fn open_git(app: &mut App, backend: &Backend) -> Result<String> {
     let branch = backend.git_branch().await.unwrap_or_else(|| "?".into());
     let mut p = Preview::from_git(&snap);
     p.from_tab = app.active;
+    let p = match attach_side(app, p)? {
+        Ok(()) => return Ok(branch),
+        Err((p, _)) => p,
+    };
+    let mut p = p;
     if let Some(i) = git_tab(app) {
         if i != app.active { switch_to(app, i); }
         let old = app.tabs[i].preview.as_ref().map(|o| o.from_tab);
@@ -905,20 +1010,20 @@ async fn open_git(app: &mut App, backend: &Backend) -> Result<String> {
 async fn reload_git(app: &mut App, backend: &Backend) -> Result<String> {
     let snap = backend.git_snapshot().await?;
     let branch = backend.git_branch().await.unwrap_or_else(|| "?".into());
-    let Some(old) = app.tabs[app.active].preview.as_ref() else { return Ok(branch) };
+    let Some(old) = focused_slot(app).as_ref() else { return Ok(branch) };
     let (top, left, wrap, from) = (old.top, old.left, old.wrap, old.from_tab);
     let mut p = Preview::from_git(&snap);
     p.top = top;
     p.left = left;
     if p.wrap != wrap { p.toggle_wrap(); p.left = left; }
     p.from_tab = from;
-    app.tabs[app.active].preview = Some(p);
+    *focused_slot(app) = Some(p);
     Ok(branch)
 }
 
 /// Re-read the file shown in the active preview tab, keeping scroll position and wrap setting.
 async fn reload_preview(app: &mut App, backend: &Backend, cap: usize, opts: &Opts) -> Result<()> {
-    let Some(old) = app.tabs[app.active].preview.as_ref() else { return Ok(()) };
+    let Some(old) = focused_slot(app).as_ref() else { return Ok(()) };
     let (path, top, left, wrap, from, target) = (old.path.clone(), old.top, old.left, old.wrap, old.from_tab, old.target_line);
     let (bytes, total) = backend.read_prefix(&path, cap).await?;
     let mut p = Preview::build(&path, &bytes, total, opts);
@@ -930,8 +1035,57 @@ async fn reload_preview(app: &mut App, backend: &Backend, cap: usize, opts: &Opt
     }
     p.from_tab = from;
     p.target_line = target;
-    app.tabs[app.active].preview = Some(p);
+    *focused_slot(app) = Some(p);
     Ok(())
+}
+
+/// The preview that has the keyboard: the side pane when it is focused, else the tab's own.
+fn focused_slot(app: &mut App) -> &mut Option<Preview> {
+    let t = &mut app.tabs[app.active];
+    if t.side_focused() { &mut t.side } else { &mut t.preview }
+}
+
+/// The preview shown in a pane of the active tab (a preview tab's own preview counts as `Shell`).
+fn pane_preview(app: &App, pane: Pane) -> Option<&Preview> {
+    let t = &app.tabs[app.active];
+    match pane {
+        Pane::Side => t.side.as_ref(),
+        Pane::Shell => t.preview.as_ref(),
+    }
+}
+
+fn pane_preview_mut(app: &mut App, pane: Pane) -> Option<&mut Preview> {
+    let t = &mut app.tabs[app.active];
+    match pane {
+        Pane::Side => t.side.as_mut(),
+        Pane::Shell => t.preview.as_mut(),
+    }
+}
+
+fn inside(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
+/// The pane rectangles of a tab with a side preview, when the window has room for both.
+fn split_of(app: &App, tab: &Tab, main: Rect) -> Option<Split> {
+    tab.side.as_ref().and_then(|_| split_main(main, app.side, app.pct))
+}
+
+/// The area a pane occupies in the active tab.
+fn pane_rect(app: &App, main: Rect, pane: Pane) -> Rect {
+    match (split_of(app, &app.tabs[app.active], main), pane) {
+        (Some(s), Pane::Side) => s.side,
+        (Some(s), Pane::Shell) => s.shell,
+        (None, _) => main,
+    }
+}
+
+/// Every pane currently on screen with its area.
+fn visible_panes(app: &App, main: Rect) -> Vec<(Pane, Rect)> {
+    match split_of(app, &app.tabs[app.active], main) {
+        Some(s) => vec![(Pane::Shell, s.shell), (Pane::Side, s.side)],
+        None => vec![(Pane::Shell, main)],
+    }
 }
 
 /// Esc in a preview: return to the tab it was opened from, or the first shell.
@@ -954,7 +1108,7 @@ enum Pending {
 }
 
 struct HintState {
-    links: Vec<Link>,
+    links: Vec<(Link, Pane)>,
     hints: Vec<Hint>,
     typed: String,
 }
@@ -1017,6 +1171,7 @@ fn scroll_by(app: &mut App, n: isize) -> bool {
 /// An in-progress or finished text selection.
 struct SelState {
     tab: usize,
+    pane: Pane,
     anchor: Pos,
     end: Pos,
     dragging: bool,
@@ -1027,12 +1182,17 @@ struct SelState {
 enum Intent {
     None,
     /// Ctrl/Alt+click (or right-click) on a path or URL.
-    OpenLink(Link),
-    Select(Phase, Pos),
+    OpenLink(Link, Pane),
+    Select(Phase, Pos, Pane),
+    /// Mouse went down on the divider between the panes.
+    DividerDown,
+    /// Divider drag: the pointer column.
+    DividerDrag(u16),
+    DividerUp,
     /// Handle as if these bytes had been typed (or, in a shell tab, send them to the app).
     Synth(Vec<u8>),
     SwitchTab(usize),
-    PreviewScroll(isize),
+    PreviewScroll(isize, Pane),
     /// Mouse wheel in scrollback: positive looks further back, negative returns toward the live view.
     ScrollWheel(isize),
     EnterScroll,
@@ -1040,15 +1200,14 @@ enum Intent {
 }
 
 /// What a mouse event means right now. Pure so it can be tested without a terminal.
-fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], main: Rect, selecting: bool, link_click: &str) -> Intent {
-    let inside = |r: Rect| m.col >= r.x && m.col < r.x + r.width && m.row >= r.y && m.row < r.y + r.height;
-    let up3 = || Intent::Synth(b"\x1b[A".repeat(3));
-    let down3 = || Intent::Synth(b"\x1b[B".repeat(3));
+/// `selecting` is the pane of a selection being dragged, if any.
+fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], main: Rect, selecting: Option<Pane>, link_click: &str) -> Intent {
+    let hit = |r: Rect| inside(r, m.col, m.row);
     match mode {
         Mode::Menu(_) => {
             let r = ui::menu_rect(main, items.len());
             match m.kind {
-                Kind::Down(_) if inside(r) => {
+                Kind::Down(_) if hit(r) => {
                     // Rows 1..=n inside the border are the entries.
                     let idx = m.row.saturating_sub(r.y + 1) as usize;
                     match items.get(idx) {
@@ -1066,15 +1225,11 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
         Mode::Prompt(p) => {
             let r = ui::prompt_rect(main, p);
             match m.kind {
-                Kind::Down(_) if inside(r) && ((m.row - r.y) as usize) < p.shown.len() => Intent::PickCandidate((m.row - r.y) as usize),
+                Kind::Down(_) if hit(r) && ((m.row - r.y) as usize) < p.shown.len() => Intent::PickCandidate((m.row - r.y) as usize),
                 _ => Intent::None,
             }
         }
-        Mode::Scroll => match m.kind {
-            Kind::WheelUp => Intent::ScrollWheel(3),
-            Kind::WheelDown => Intent::ScrollWheel(-3),
-            _ => link_intent(m, app, main, link_click).unwrap_or_else(|| select_intent(m, app, main, selecting)),
-        },
+        Mode::Scroll => pane_mouse(m, app, main, selecting, link_click, true),
         Mode::Shell => {
             if app.tabs.len() > 1 && m.row == 1 {
                 let strip: Vec<_> = app.tabs.iter().enumerate().map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
@@ -1083,69 +1238,110 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                     _ => Intent::None,
                 };
             }
-            if !inside(main) {
-                return Intent::None;
-            }
-            let tab = &app.tabs[app.active];
-            if tab.is_preview() {
-                return match m.kind {
-                    Kind::WheelUp => Intent::PreviewScroll(-3),
-                    Kind::WheelDown => Intent::PreviewScroll(3),
-                    _ => link_intent(m, app, main, link_click).unwrap_or_else(|| select_intent(m, app, main, selecting)),
-                };
-            }
-            let scr = tab.parser.screen();
-            use vt100::{MouseProtocolEncoding, MouseProtocolMode};
-            let wanted = match scr.mouse_protocol_mode() {
-                MouseProtocolMode::None => None,
-                MouseProtocolMode::Press => Some(matches!(m.kind, Kind::Down(_) | Kind::WheelUp | Kind::WheelDown)),
-                MouseProtocolMode::PressRelease => Some(!matches!(m.kind, Kind::Drag(_) | Kind::Other)),
-                MouseProtocolMode::ButtonMotion | MouseProtocolMode::AnyMotion => Some(!matches!(m.kind, Kind::Other)),
-            };
-            match wanted {
-                // The app in this tab asked for the mouse: give it the event at its own coordinates.
-                Some(true) => Intent::Synth(mouse::encode(m, m.col, m.row - main.y, scr.mouse_protocol_encoding() == MouseProtocolEncoding::Sgr)),
-                Some(false) => Intent::None,
-                None => match m.kind {
-                    // Full-screen apps without mouse support get arrow keys, like a terminal's alternate-scroll.
-                    Kind::WheelUp if scr.alternate_screen() => up3(),
-                    Kind::WheelDown if scr.alternate_screen() => down3(),
-                    Kind::WheelUp => Intent::EnterScroll,
-                    _ => link_intent(m, app, main, link_click).unwrap_or_else(|| select_intent(m, app, main, selecting)),
-                },
-            }
+            pane_mouse(m, app, main, selecting, link_click, false)
         }
     }
 }
 
-/// Left button down/drag/up selects text. Drag and release keep working outside the area so a
-/// selection can be dragged past the edge.
-fn select_intent(m: &MouseEvent, app: &App, main: Rect, selecting: bool) -> Intent {
-    let banner = app.tabs[app.active].preview.as_ref().is_some_and(|p| p.banner.is_some()) && main.height > 1;
-    let origin = main.y + u16::from(banner);
-    let height = main.height - u16::from(banner);
-    let clamped = (m.row.saturating_sub(origin).min(height.saturating_sub(1)), m.col.min(main.width.saturating_sub(1)));
-    let in_area = m.row >= origin && m.row < origin + height && m.col < main.width;
+/// A mouse event over the shell, a preview, or the divider between them. Coordinates handed on
+/// are relative to the pane the event belongs to. `scrolling`: the shell is browsing scrollback.
+fn pane_mouse(m: &MouseEvent, app: &App, main: Rect, selecting: Option<Pane>, link_click: &str, scrolling: bool) -> Intent {
+    let up3 = || Intent::Synth(b"\x1b[A".repeat(3));
+    let down3 = || Intent::Synth(b"\x1b[B".repeat(3));
+    let tab = &app.tabs[app.active];
+    let split = split_of(app, tab, main);
+    if let Some(sp) = &split {
+        if app.div_drag {
+            match m.kind {
+                Kind::Drag(Button::Left) => return Intent::DividerDrag(m.col),
+                Kind::Up(Button::Left) => return Intent::DividerUp,
+                _ => {}
+            }
+        }
+        if matches!(m.kind, Kind::Down(Button::Left)) && sp.on_divider(m.col, m.row) {
+            return Intent::DividerDown;
+        }
+    }
+    if !scrolling && !inside(main, m.col, m.row) {
+        return Intent::None;
+    }
+    let pane = match (&split, selecting) {
+        (Some(_), Some(p)) => p,
+        (Some(sp), None) => {
+            if inside(sp.side, m.col, m.row) { Pane::Side } else if inside(sp.shell, m.col, m.row) { Pane::Shell } else { return Intent::None }
+        }
+        (None, _) => Pane::Shell,
+    };
+    let area = match (&split, pane) {
+        (Some(sp), Pane::Side) => sp.side,
+        (Some(sp), Pane::Shell) => sp.shell,
+        (None, _) => main,
+    };
+    let sel = selecting.is_some();
+    let link_or_select = || link_intent(m, app, area, pane, link_click).unwrap_or_else(|| select_intent(m, app, area, pane, sel));
+    if pane_preview(app, pane).is_some() {
+        return match m.kind {
+            Kind::WheelUp => Intent::PreviewScroll(-3, pane),
+            Kind::WheelDown => Intent::PreviewScroll(3, pane),
+            _ => link_or_select(),
+        };
+    }
+    if scrolling {
+        return match m.kind {
+            Kind::WheelUp => Intent::ScrollWheel(3),
+            Kind::WheelDown => Intent::ScrollWheel(-3),
+            _ => link_or_select(),
+        };
+    }
+    let scr = tab.parser.screen();
+    use vt100::{MouseProtocolEncoding, MouseProtocolMode};
+    let wanted = match scr.mouse_protocol_mode() {
+        MouseProtocolMode::None => None,
+        MouseProtocolMode::Press => Some(matches!(m.kind, Kind::Down(_) | Kind::WheelUp | Kind::WheelDown)),
+        MouseProtocolMode::PressRelease => Some(!matches!(m.kind, Kind::Drag(_) | Kind::Other)),
+        MouseProtocolMode::ButtonMotion | MouseProtocolMode::AnyMotion => Some(!matches!(m.kind, Kind::Other)),
+    };
+    match wanted {
+        // The app in this tab asked for the mouse: give it the event at its own coordinates.
+        Some(true) => Intent::Synth(mouse::encode(m, m.col.saturating_sub(area.x), m.row.saturating_sub(area.y), scr.mouse_protocol_encoding() == MouseProtocolEncoding::Sgr)),
+        Some(false) => Intent::None,
+        None => match m.kind {
+            // Full-screen apps without mouse support get arrow keys, like a terminal's alternate-scroll.
+            Kind::WheelUp if scr.alternate_screen() => up3(),
+            Kind::WheelDown if scr.alternate_screen() => down3(),
+            Kind::WheelUp => Intent::EnterScroll,
+            _ => link_or_select(),
+        },
+    }
+}
+
+/// Left button down/drag/up selects text in `area`. Drag and release keep working outside the
+/// area so a selection can be dragged past the edge.
+fn select_intent(m: &MouseEvent, app: &App, area: Rect, pane: Pane, selecting: bool) -> Intent {
+    let banner = pane_preview(app, pane).is_some_and(|p| p.banner.is_some()) && area.height > 1;
+    let origin = area.y + u16::from(banner);
+    let height = area.height - u16::from(banner);
+    let clamped = (m.row.saturating_sub(origin).min(height.saturating_sub(1)), m.col.saturating_sub(area.x).min(area.width.saturating_sub(1)));
+    let in_area = m.row >= origin && m.row < origin + height && inside(Rect::new(area.x, area.y, area.width, area.height), m.col, m.row);
     match m.kind {
-        Kind::Down(Button::Left) if in_area => Intent::Select(Phase::Down, clamped),
-        Kind::Drag(Button::Left) if selecting => Intent::Select(Phase::Drag, clamped),
-        Kind::Up(Button::Left) if selecting => Intent::Select(Phase::Up, clamped),
+        Kind::Down(Button::Left) if in_area => Intent::Select(Phase::Down, clamped, pane),
+        Kind::Drag(Button::Left) if selecting => Intent::Select(Phase::Drag, clamped, pane),
+        Kind::Up(Button::Left) if selecting => Intent::Select(Phase::Up, clamped, pane),
         _ => Intent::None,
     }
 }
 
-/// Cell text of every row in the area being selected in, and which rows soft-wrap.
-fn area_rows(app: &App, main: Rect) -> (Vec<Vec<String>>, Vec<bool>) {
-    let tab = &app.tabs[app.active];
-    match tab.preview.as_ref() {
+/// Cell text of every row in the pane being selected in, and which rows soft-wrap.
+fn area_rows(app: &App, area: Rect, pane: Pane) -> (Vec<Vec<String>>, Vec<bool>) {
+    match pane_preview(app, pane) {
         Some(p) => {
-            let banner = p.banner.is_some() && main.height > 1;
-            let h = (main.height - u16::from(banner)) as usize;
-            let rows: Vec<Vec<String>> = p.visible(h, main.width as usize).iter().map(|l| crate::preview::row_cells(l, p.gutter, main.width as usize)).collect();
+            let banner = p.banner.is_some() && area.height > 1;
+            let h = (area.height - u16::from(banner)) as usize;
+            let rows: Vec<Vec<String>> = p.visible(h, area.width as usize).iter().map(|l| crate::preview::row_cells(l, p.gutter, area.width as usize)).collect();
             let wrapped = vec![false; rows.len()];
             (rows, wrapped)
         }
-        None => select::screen_rows(tab.parser.screen()),
+        None => select::screen_rows(app.tabs[app.active].parser.screen()),
     }
 }
 
@@ -1170,14 +1366,14 @@ fn main_rect(app: &App) -> Result<Rect> {
     Ok(Rect::new(0, 1 + strip_h, tc, tr.saturating_sub(2 + strip_h).max(1)))
 }
 
-/// First screen row of the content (below the banner of a preview that has one).
-fn origin_row(app: &App, main: Rect) -> u16 {
-    let banner = app.tabs[app.active].preview.as_ref().is_some_and(|p| p.banner.is_some()) && main.height > 1;
-    main.y + u16::from(banner)
+/// First screen row of a pane's content (below the banner of a preview that has one).
+fn origin_row(app: &App, area: Rect, pane: Pane) -> u16 {
+    let banner = pane_preview(app, pane).is_some_and(|p| p.banner.is_some()) && area.height > 1;
+    area.y + u16::from(banner)
 }
 
 /// A left click with Ctrl/Alt held (per `link_click`), or a right click, on a path or URL.
-fn link_intent(m: &MouseEvent, app: &App, main: Rect, link_click: &str) -> Option<Intent> {
+fn link_intent(m: &MouseEvent, app: &App, area: Rect, pane: Pane, link_click: &str) -> Option<Intent> {
     let wanted = match m.kind {
         Kind::Down(Button::Left) => mouse::is_link_click(m.code, link_click),
         Kind::Down(Button::Right) => link_click != "off",
@@ -1186,26 +1382,26 @@ fn link_intent(m: &MouseEvent, app: &App, main: Rect, link_click: &str) -> Optio
     if !wanted {
         return None;
     }
-    let origin = origin_row(app, main);
-    if m.row < origin || m.row >= main.y + main.height || m.col >= main.width {
+    let origin = origin_row(app, area, pane);
+    if m.row < origin || m.row >= area.y + area.height || m.col < area.x || m.col >= area.x + area.width {
         return None;
     }
-    let (rows, wrapped) = area_rows(app, main);
-    links::link_at(&rows, &wrapped, m.row - origin, m.col).map(Intent::OpenLink)
+    let (rows, wrapped) = area_rows(app, area, pane);
+    links::link_at(&rows, &wrapped, m.row - origin, m.col - area.x).map(|l| Intent::OpenLink(l, pane))
 }
 
 /// Where relative paths in the active tab's output point: a preview's own folder, else the
 /// shell's working directory.
-async fn link_cwd(app: &App, backend: &Backend) -> Option<String> {
+async fn link_cwd(app: &App, backend: &Backend, pane: Pane) -> Option<String> {
     let tab = &app.tabs[app.active];
-    if let Some(p) = &tab.preview {
+    if let Some(p) = pane_preview(app, pane) {
         return std::path::Path::new(&p.path).parent().filter(|_| p.path.starts_with('/')).map(|d| d.to_string_lossy().into_owned());
     }
     crate::cwd::tab_cwd(backend, tab.compat.cwd.as_deref(), tab.handle.as_ref().and_then(|h| h.pid()), app.sessions.get(&tab.id).map(String::as_str)).await
 }
 
 /// Work out what a link means and what to ask the user, without doing anything yet.
-async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link, open_cfg: &OpenCfg, confirm: bool) -> LinkOutcome {
+async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link, pane: Pane, open_cfg: &OpenCfg, confirm: bool) -> LinkOutcome {
     match &link.kind {
         LinkKind::Url(u) => {
             let lower = u.to_ascii_lowercase();
@@ -1227,7 +1423,7 @@ async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link,
         }
         LinkKind::Path { path, line, .. } => {
             let remote = matches!(backend, Backend::Remote(_));
-            let cwd = link_cwd(app, backend).await;
+            let cwd = link_cwd(app, backend, pane).await;
             let root = backend.resolve("").await.unwrap_or_default();
             let home = if remote { root.clone() } else { dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default() };
             let mut found = None;
@@ -1308,8 +1504,10 @@ async fn apply_outcome<'a>(
     match o {
         LinkOutcome::Message(m) => *message = Some(m),
         LinkOutcome::Preview(abs, line) => {
-            if let Err(e) = open_preview(app, backend, &abs, read_cap, opts, line).await {
-                *message = Some(format!("could not open: {e}"));
+            match open_preview(app, backend, &abs, read_cap, opts, line).await {
+                Ok(Placement::TabNarrow) => *message = Some("narrow: opened in a tab".into()),
+                Ok(_) => {}
+                Err(e) => *message = Some(format!("could not open: {e}")),
             }
         }
         LinkOutcome::Confirm(c, p) => {

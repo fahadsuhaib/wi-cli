@@ -27,6 +27,11 @@ pub struct Defaults {
     /// Ask before opening a file in its native app, opening a link, or downloading from a box:
     /// `always` (default) or `never`.
     pub confirm_open: String,
+    /// Where a file preview opens from a shell tab: `right` (default), `left`, or `tab` (a
+    /// separate full-screen preview tab).
+    pub preview_side: String,
+    /// Width of the side preview pane as a percentage of the window (clamped to 25..75).
+    pub preview_width_pct: u16,
 }
 
 impl Default for Defaults {
@@ -45,6 +50,8 @@ impl Default for Defaults {
             agent_start: "ask".into(),
             link_click: "any".into(),
             confirm_open: "always".into(),
+            preview_side: "right".into(),
+            preview_width_pct: 50,
         }
     }
 }
