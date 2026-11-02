@@ -5,6 +5,7 @@ mod compat;
 mod config;
 mod cwd;
 mod exec;
+mod explorer_data;
 mod input;
 mod keys;
 mod links;
@@ -66,6 +67,7 @@ async fn real_main() -> Result<()> {
             print!("{HELP}");
             return Ok(());
         }
+        Some("__ls") => return explorer_data::ls_cmd().await,
         _ => {}
     }
     let cfg = config::Config::load()?;
