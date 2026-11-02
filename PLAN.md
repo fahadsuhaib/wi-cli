@@ -50,6 +50,12 @@ Shared: one results/list widget (also used by prompts), every search is a menu A
 3. Relative paths resolve against the tab's working directory (OSC 7 if the shell sends it; the tmux pane path for remote tabs; /proc or lsof for local tabs), then the workspace root. Candidates are checked with a bounded stat before opening.
 4. Complex files (images, PDF, Office, archives, audio/video, HTML, other binaries) open in the native app: `open` on macOS, `xdg-open` on Linux. Remote files are fetched over SFTP into `~/.cache/wicli/<box>/` (streamed in 64 KB chunks, `.part` then rename, size+mtime reuse, confirm above 100 MB, Esc cancels, total cache capped) and then opened locally. This is the M3 download engine, built first for this purpose.
 5. Config: `link_click = ctrl | alt | cmd | any | none`, `[open] native_ext` / `preview_ext` overrides.
+Privacy and safety rules (user requirement, 2026-11-02): nothing leaves wi without an explicit yes.
+- A confirmation dialog (Y/N or click) comes before any native open, any URL open, and any download from a remote box. It shows the full sanitised path or URL, the size, and where the file comes from. Setting `confirm_open = always` (default) | `never`.
+- Opening is delegated to the OS: only `open` (macOS) / `xdg-open` (Linux) with the path as one argument, never through a shell, never executing the file ourselves.
+- Only known-safe document and media types are opened natively; programs and installers (app, command, pkg, dmg, exe, msi, bat, jar, appimage, deb, rpm, ...) and unknown binaries are refused with a message.
+- Files fetched from a remote box get the macOS quarantine attribute so Gatekeeper's own checks apply when the OS opens them.
+- Previews inside wi are read-only renders of a file the user explicitly clicked; they need no extra confirmation.
 Work split: links engine (pure path/URL detection, `src/links.rs`), opener (classification, native open, remote fetch cache, `src/opener.rs`), then one integration pass (mouse modifiers, hint mode, cwd resolution, goto-line).
 
 ## Phase B: Remote M1 completion
