@@ -1845,6 +1845,10 @@ fn swap_sides(app: &mut App) {
 
 /// Remember the pinned-pane layout for this workspace.
 fn save_layout(app: &App, state: &mut agents::State, key: &str) {
+    // Only workspaces that use pinned panes get an entry (a side preview's width is not kept).
+    if app.pinned.is_none() && !state.panes.contains_key(key) {
+        return;
+    }
     let (kind, target) = match pinned_idx(app).map(|i| &app.tabs[i]) {
         Some(t) if t.preview.as_ref().is_some_and(|p| p.kind != crate::preview::Kind::Diff) => ("preview", t.preview.as_ref().map(|p| p.path.clone()).unwrap_or_default()),
         Some(t) if t.preview.is_some() => ("", String::new()),
