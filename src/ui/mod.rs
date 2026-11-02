@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Preview,
+    Git,
     Download,
     OpenLocal,
     NewTab,
@@ -41,6 +42,7 @@ pub fn menu_items(remote: bool) -> Vec<&'static MenuItem> {
 
 pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Preview a file", key: 'p', action: Action::Preview, remote_only: false },
+    MenuItem { label: "Git changes", key: 'g', action: Action::Git, remote_only: false },
     MenuItem { label: "Download", key: 'd', action: Action::Download, remote_only: true },
     MenuItem { label: "Open local copy", key: 'o', action: Action::OpenLocal, remote_only: false },
     MenuItem { label: "New shell tab", key: 'n', action: Action::NewTab, remote_only: false },
@@ -235,7 +237,8 @@ pub fn draw(f: &mut Frame, v: &View) {
     let preview_hint = v.preview.map(|p| {
         let total = p.display_len();
         let last = (p.top + preview_rows).min(total);
-        format!(" arrows scroll · W wrap · R reload · Esc back to shell   lines {}-{} of {}", (p.top + 1).min(total), last, total)
+        let files = if p.kind == crate::preview::Kind::Diff { "N/P file · " } else { "" };
+        format!(" arrows scroll · {files}W wrap · R reload · Esc back   lines {}-{} of {}", (p.top + 1).min(total), last, total)
     });
     let hint = match (v.menu, v.message) {
         _ if v.ask.is_some() => " Enter starts · E edits the command · N not now · X never here".to_string(),

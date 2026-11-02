@@ -1,5 +1,6 @@
 //! Read-only file previews rendered on the client. The box (or disk) only serves bytes.
 
+pub mod diff;
 pub mod keys;
 mod json;
 mod markdown;
@@ -16,6 +17,8 @@ pub enum Kind {
     Markdown,
     Table,
     Json,
+    /// Git changes: status summary and coloured diff.
+    Diff,
     /// Binary or otherwise not shown: a small info card instead.
     Stub,
 }
@@ -38,6 +41,8 @@ pub struct Preview {
     pub left: usize,
     /// Tab that was active when this preview opened; Esc returns there.
     pub from_tab: usize,
+    /// Line indices where each changed file starts (Diff only), for N/P.
+    pub jumps: Vec<usize>,
     wrapped: Option<(u16, Vec<Line<'static>>)>,
 }
 
@@ -82,6 +87,7 @@ impl Preview {
             top: 0,
             left: 0,
             from_tab: 0,
+            jumps: Vec::new(),
             wrapped: None,
         };
         // Content wins over the extension: a binary file named notes.txt is never shown as text.
@@ -126,6 +132,52 @@ impl Preview {
             }
         }
         p
+    }
+
+    /// The Git changes view built from a snapshot of git's output.
+    pub fn from_git(snap: &diff::Snapshot) -> Preview {
+        let r = diff::render(snap);
+        Preview {
+            path: "git:changes".to_string(),
+            title: "git".to_string(),
+            kind: Kind::Diff,
+            banner: snap.truncated.then(|| format!("diff truncated at {}: showing the first part only", human(crate::exec::OUT_CAP as u64))),
+            lines: r.lines,
+            gutter: 0,
+            wrap: false,
+            top: 0,
+            left: 0,
+            from_tab: 0,
+            jumps: r.jumps,
+            wrapped: None,
+        }
+    }
+
+    /// Display-line positions of the file starts (in wrapped rows when wrapping is on).
+    fn jump_rows(&self) -> Vec<usize> {
+        match (&self.wrapped, self.wrap) {
+            (Some((w, _)), true) => {
+                let mut pos = Vec::new();
+                let mut row = 0;
+                for (i, l) in self.lines.iter().enumerate() {
+                    if self.jumps.contains(&i) {
+                        pos.push(row);
+                    }
+                    row += wrap_line(l, self.gutter, *w as usize).len();
+                }
+                pos
+            }
+            _ => self.jumps.clone(),
+        }
+    }
+
+    /// Scroll so the next (or previous) file starts at the top.
+    fn jump_file(&mut self, forward: bool, page: usize) {
+        let rows = self.jump_rows();
+        let target = if forward { rows.iter().copied().find(|&r| r > self.top) } else { rows.iter().copied().rev().find(|&r| r < self.top) };
+        if let Some(t) = target {
+            self.top = t.min(self.max_top(page));
+        }
     }
 
     /// Number of display lines for the given width (wrapped lines when wrapping is on).
@@ -174,6 +226,8 @@ impl Preview {
                 }
             }
             Wrap => self.toggle_wrap(),
+            NextFile => self.jump_file(true, page),
+            PrevFile => self.jump_file(false, page),
             Reload | Back => return false,
         }
         true
@@ -336,6 +390,44 @@ mod tests {
     fn horizontal_slice_keeps_gutter() {
         let line = Line::from(vec![Span::raw("  1 "), Span::raw("abcdefghij")]);
         assert_eq!(plain(&slice_line(&line, 4, 3, 9)), "  1 defgh");
+    }
+
+    fn git_view() -> Preview {
+        let diff = (0..3).map(|i| format!("diff --git a/f{i} b/f{i}\n@@ -1 +1 @@\n-a\n+b\n")).collect::<String>();
+        Preview::from_git(&diff::Snapshot { status: "## main\n".into(), diff, ..Default::default() })
+    }
+
+    #[test]
+    fn n_and_p_jump_between_files() {
+        let mut p = git_view();
+        assert_eq!(p.kind, Kind::Diff);
+        let starts = p.jumps.clone();
+        assert_eq!(starts.len(), 3);
+        p.navigate(keys::PvKey::NextFile, 3);
+        assert_eq!(p.top, starts[0]);
+        p.navigate(keys::PvKey::NextFile, 3);
+        assert_eq!(p.top, starts[1]);
+        p.navigate(keys::PvKey::PrevFile, 3);
+        assert_eq!(p.top, starts[0]);
+        p.navigate(keys::PvKey::PrevFile, 3);
+        assert_eq!(p.top, starts[0], "no earlier file: stays put");
+    }
+
+    #[test]
+    fn file_jumps_work_when_wrapped() {
+        let mut p = git_view();
+        p.toggle_wrap();
+        p.layout(10, 3);
+        p.navigate(keys::PvKey::NextFile, 3);
+        let first = p.top;
+        p.navigate(keys::PvKey::NextFile, 3);
+        assert!(p.top > first);
+    }
+
+    #[test]
+    fn truncated_git_view_has_banner() {
+        let p = Preview::from_git(&diff::Snapshot { truncated: true, ..Default::default() });
+        assert!(p.banner.unwrap().contains("truncated"));
     }
 
     #[test]

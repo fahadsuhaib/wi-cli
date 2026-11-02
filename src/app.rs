@@ -104,7 +104,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
     let mut pasting: Option<(bool, bool)> = None;
     let mut message: Option<String> = None;
-    let (name, detail) = ws.title();
+    let (name, base_detail) = ws.title();
+    // Branch for the header: asked once now and again when the Git view opens or reloads; no timers.
+    let mut detail = base_detail.clone();
+    if let Ok(Some(b)) = tokio::time::timeout(Duration::from_secs(2), backend.git_branch()).await {
+        detail = header_detail(&base_detail, &b);
+    }
     let remote = ws.is_remote();
     let items = menu_items(remote);
     let opts = Opts { csv_rows: cfg.defaults.csv_rows };
@@ -313,7 +318,13 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 dirty = true;
                                 if back { go_back(&mut app); }
                                 if reload {
-                                    message = match reload_preview(&mut app, backend, read_cap, &opts).await {
+                                    let is_git = app.tabs[app.active].preview.as_ref().is_some_and(|p| p.kind == crate::preview::Kind::Diff);
+                                    let res = if is_git {
+                                        reload_git(&mut app, backend).await.map(|b| { detail = header_detail(&base_detail, &b); })
+                                    } else {
+                                        reload_preview(&mut app, backend, read_cap, &opts).await
+                                    };
+                                    message = match res {
                                         Ok(()) => Some("reloaded".to_string()),
                                         Err(e) => Some(format!("reload failed: {e}")),
                                     };
@@ -503,6 +514,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     }
                                     Action::Scroll if app.tabs[app.active].is_preview() => message = Some("scroll a preview with the arrow keys and PgUp/PgDn".into()),
                                     Action::Scroll => mode = Mode::Scroll,
+                                    Action::Git => match open_git(&mut app, backend).await {
+                                        Ok(b) => detail = header_detail(&base_detail, &b),
+                                        Err(e) => message = Some(format!("Git changes: {e}")),
+                                    },
                                     Action::Preview => mode = Mode::Prompt(Prompt::default()),
                                     Action::NewTab => {
                                         let (c, r) = shell_size(app.tabs.len() + 1)?;
@@ -624,6 +639,50 @@ async fn open_preview(app: &mut App, backend: &Backend, input: &str, cap: usize,
     app.active = app.tabs.len() - 1;
     resize_all(app)?; // the tab strip may have just appeared
     Ok(())
+}
+
+fn header_detail(base: &str, branch: &str) -> String {
+    format!("{base}  ({branch})")
+}
+
+fn git_tab(app: &App) -> Option<usize> {
+    app.tabs.iter().position(|t| t.preview.as_ref().is_some_and(|p| p.kind == crate::preview::Kind::Diff))
+}
+
+/// Open (or refresh and switch to) the Git changes tab. Returns the branch for the header.
+async fn open_git(app: &mut App, backend: &Backend) -> Result<String> {
+    let snap = backend.git_snapshot().await?;
+    let branch = backend.git_branch().await.unwrap_or_else(|| "?".into());
+    let mut p = Preview::from_git(&snap);
+    p.from_tab = app.active;
+    if let Some(i) = git_tab(app) {
+        if i != app.active { switch_to(app, i); }
+        let old = app.tabs[i].preview.as_ref().map(|o| o.from_tab);
+        p.from_tab = old.unwrap_or(p.from_tab);
+        app.tabs[i].preview = Some(p);
+        return Ok(branch);
+    }
+    let id = app.next_id;
+    app.next_id += 1;
+    app.tabs.push(Tab::new_preview(id, p));
+    app.active = app.tabs.len() - 1;
+    resize_all(app)?;
+    Ok(branch)
+}
+
+/// Re-run git for the active Git tab, keeping the scroll position.
+async fn reload_git(app: &mut App, backend: &Backend) -> Result<String> {
+    let snap = backend.git_snapshot().await?;
+    let branch = backend.git_branch().await.unwrap_or_else(|| "?".into());
+    let Some(old) = app.tabs[app.active].preview.as_ref() else { return Ok(branch) };
+    let (top, left, wrap, from) = (old.top, old.left, old.wrap, old.from_tab);
+    let mut p = Preview::from_git(&snap);
+    p.top = top;
+    p.left = left;
+    if p.wrap != wrap { p.toggle_wrap(); p.left = left; }
+    p.from_tab = from;
+    app.tabs[app.active].preview = Some(p);
+    Ok(branch)
 }
 
 /// Re-read the file shown in the active preview tab, keeping scroll position and wrap setting.
