@@ -20,7 +20,10 @@ pub struct Tab {
     pub fallback: String,
     pub compat: crate::compat::Compat,
     pub parser: vt100::Parser,
-    pub handle: ShellHandle,
+    /// None for preview tabs.
+    pub handle: Option<ShellHandle>,
+    /// Some for preview tabs; those have no shell and ignore the terminal emulator.
+    pub preview: Option<crate::preview::Preview>,
     /// New output arrived while this tab was in the background.
     pub activity: bool,
     /// Background tab with unseen output that has since stopped.
@@ -40,7 +43,8 @@ impl Tab {
             title,
             compat: Default::default(),
             parser: vt100::Parser::new(nz(rows), nz(cols), scrollback),
-            handle,
+            handle: Some(handle),
+            preview: None,
             activity: false,
             quiet: false,
             last_output: std::time::Instant::now(),
@@ -51,9 +55,43 @@ impl Tab {
     pub fn output(&mut self, data: &[u8]) {
         let reply = self.compat.feed(&mut self.parser, data);
         if !reply.is_empty() {
-            self.handle.write(reply);
+            self.write(reply);
         }
         self.title = self.compat.title.clone().unwrap_or_else(|| self.fallback.clone());
+    }
+
+    /// A read-only file preview tab.
+    pub fn new_preview(id: usize, preview: crate::preview::Preview) -> Self {
+        let handle = None;
+        Self {
+            id,
+            fallback: preview.title.clone(),
+            title: preview.title.clone(),
+            compat: Default::default(),
+            parser: vt100::Parser::new(nz(1), nz(1), 0),
+            handle,
+            preview: Some(preview),
+            activity: false,
+            quiet: false,
+            last_output: std::time::Instant::now(),
+        }
+    }
+
+    pub fn is_preview(&self) -> bool {
+        self.preview.is_some()
+    }
+
+    /// Send input to this tab's shell. Preview tabs have none.
+    pub fn write(&self, bytes: Vec<u8>) {
+        if let Some(h) = &self.handle {
+            h.write(bytes);
+        }
+    }
+
+    pub fn close(&self) {
+        if let Some(h) = &self.handle {
+            h.close();
+        }
     }
 
     pub fn state(&self, is_active: bool) -> TabState {
@@ -79,7 +117,9 @@ impl Tab {
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.parser.screen_mut().set_size(nz(rows), nz(cols));
-        self.handle.resize(cols, rows);
+        if let Some(h) = &self.handle {
+            h.resize(cols, rows);
+        }
     }
 }
 

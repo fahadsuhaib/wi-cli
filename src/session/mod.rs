@@ -48,6 +48,8 @@ impl client::Handler for Client {
 
 pub struct Session {
     pub handle: Handle<Client>,
+    /// SFTP subsystem channel on the same connection, opened on first use.
+    sftp: tokio::sync::OnceCell<russh_sftp::client::SftpSession>,
 }
 
 fn default_identities() -> Vec<PathBuf> {
@@ -93,10 +95,22 @@ impl Session {
                 .authenticate_publickey(b.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), hash))
                 .await?;
             if res.success() {
-                return Ok(Self { handle });
+                return Ok(Self { handle, sftp: tokio::sync::OnceCell::new() });
             }
         }
         bail!("authentication failed for {}@{}", b.user, b.host)
+    }
+
+    /// SFTP session over the existing connection (no second login, nothing installed on the box).
+    pub async fn sftp(&self) -> Result<&russh_sftp::client::SftpSession> {
+        self.sftp
+            .get_or_try_init(|| async {
+                let ch = self.handle.channel_open_session().await?;
+                ch.request_subsystem(true, "sftp").await?;
+                let s = russh_sftp::client::SftpSession::new(ch.into_stream()).await?;
+                Ok::<_, anyhow::Error>(s)
+            })
+            .await
     }
 
     /// Open an interactive shell on a PTY of the given size.

@@ -51,7 +51,20 @@ pub const MENU: &[MenuItem] = &[
     MenuItem { label: "Quit", key: 'q', action: Action::Quit, remote_only: false },
 ];
 
+/// State of the "open a file" prompt.
+#[derive(Default, Clone)]
+pub struct Prompt {
+    pub input: String,
+    /// Completion candidates to show (directories end in `/`).
+    pub shown: Vec<String>,
+    /// Total number of matches, which may exceed what is shown.
+    pub total: usize,
+    pub error: Option<String>,
+}
+
 pub struct View<'a> {
+    pub preview: Option<&'a crate::preview::Preview>,
+    pub prompt: Option<&'a Prompt>,
     pub screen: &'a vt100::Screen,
     pub name: &'a str,
     pub detail: &'a str,
@@ -146,19 +159,46 @@ pub fn draw(f: &mut Frame, v: &View) {
         f.render_widget(Paragraph::new(Line::from(spans)), strip);
     }
 
-    f.render_widget(ScreenWidget(v.screen), main);
+    let mut preview_rows = 0usize;
+    if let Some(p) = v.preview {
+        let (banner_area, body) = if p.banner.is_some() {
+            let [b, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main);
+            (Some(b), body)
+        } else {
+            (None, main)
+        };
+        if let (Some(b), Some(text)) = (banner_area, p.banner.as_deref()) {
+            f.render_widget(Paragraph::new(format!(" {text}")).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)), b);
+        }
+        preview_rows = body.height as usize;
+        f.render_widget(Paragraph::new(p.visible(body.height as usize, body.width as usize)), body);
+    } else {
+        f.render_widget(ScreenWidget(v.screen), main);
+    }
 
     let scroll_hint = v.scroll.map(|(n, m)| format!(" scroll: arrows, PgUp/PgDn, Home/End   Esc exits   scrollback {n}/{m}"));
+    let preview_hint = v.preview.map(|p| {
+        let total = p.display_len();
+        let last = (p.top + preview_rows).min(total);
+        format!(" arrows scroll · W wrap · R reload · Esc back to shell   lines {}-{} of {}", (p.top + 1).min(total), last, total)
+    });
     let hint = match (v.menu, v.message) {
+        _ if v.prompt.is_some() => " Tab completes · Enter opens · Esc cancels".to_string(),
         _ if scroll_hint.is_some() => scroll_hint.unwrap_or_default(),
+        (None, None) if preview_hint.is_some() => preview_hint.unwrap_or_default(),
         (Some(_), _) => " arrows + Enter, a letter, or a tab number   Esc closes".to_string(),
         (None, Some(m)) => format!(" {m}"),
         (None, None) => format!(" {}  menu", v.menu_label),
     };
     f.render_widget(Paragraph::new(hint).style(bar), status);
 
+    if let Some(pr) = v.prompt {
+        draw_prompt(f, main, pr);
+        return;
+    }
     match v.menu {
         Some(sel) => draw_menu(f, main, sel, v.remote),
+        None if v.preview.is_some() => {}
         None if !v.screen.hide_cursor() && v.scroll.is_none() => {
             let (r, c) = v.screen.cursor_position();
             if r < main.height && c < main.width {
@@ -210,4 +250,25 @@ fn left_trim(s: &str, max: usize) -> String {
     }
     let keep = max.saturating_sub(1);
     format!("…{}", s.chars().skip(n - keep).collect::<String>())
+}
+
+fn draw_prompt(f: &mut Frame, main: Rect, p: &Prompt) {
+    let more = p.total.saturating_sub(p.shown.len());
+    let rows = p.shown.len() + usize::from(more > 0) + usize::from(p.error.is_some()) + 1;
+    let h = (rows as u16).min(main.height);
+    let area = Rect::new(main.x, main.y + main.height - h, main.width, h);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut lines: Vec<Line> = p.shown.iter().map(|s| Line::from(Span::styled(format!("   {s}"), dim))).collect();
+    if more > 0 {
+        lines.push(Line::from(Span::styled(format!("   … {more} more"), dim)));
+    }
+    if let Some(e) = &p.error {
+        lines.push(Line::from(Span::styled(format!(" {e}"), Style::default().fg(Color::Red))));
+    }
+    let label = " open file: ";
+    lines.push(Line::from(vec![Span::styled(label, Style::default().add_modifier(Modifier::BOLD)), Span::raw(p.input.clone())]));
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(Color::Black)), area);
+    let x = area.x + (label.chars().count() + unicode_width::UnicodeWidthStr::width(p.input.as_str())) as u16;
+    f.set_cursor_position((x.min(area.x + area.width.saturating_sub(1)), area.y + area.height - 1));
 }

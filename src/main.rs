@@ -5,6 +5,7 @@ mod input;
 mod link;
 mod preview;
 mod scroll;
+mod files;
 mod session;
 mod tab;
 mod term;

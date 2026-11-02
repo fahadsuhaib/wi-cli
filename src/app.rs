@@ -4,7 +4,9 @@ use crate::input::{InEv, PasteFilter};
 use crate::scroll::{self, ScrollKey};
 use crate::config::{Config, parse_prefix_key, prefix_label};
 use crate::tab::Tab;
-use crate::ui::{self, Action, View, menu_items};
+use crate::files::complete;
+use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
+use crate::ui::{self, Action, Prompt, View, menu_items};
 use crate::workspace::{Backend, Event, Workspace, spawn_shell};
 use anyhow::{Result, bail};
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -18,6 +20,7 @@ use tokio::time::sleep_until;
 
 enum Mode {
     Shell,
+    Prompt(Prompt),
     Menu(usize),
     /// Browsing scrollback of the active tab.
     Scroll,
@@ -96,6 +99,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let (name, detail) = ws.title();
     let remote = ws.is_remote();
     let items = menu_items(remote);
+    let opts = Opts { csv_rows: cfg.defaults.csv_rows };
+    let read_cap = cfg.defaults.preview_read_kb as usize * 1024;
     let frame = Duration::from_secs_f64(1.0 / fps.clamp(1, 120) as f64);
     let mut last_draw = Instant::now() - frame;
     let mut dirty = true;
@@ -133,9 +138,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     Mode::Scroll => { let s = app.tabs[app.active].parser.screen(); Some((s.scrollback(), s.scrollback_len())) }
                     _ => None,
                 };
+                let (pcols, prows) = shell_size(app.tabs.len())?;
+                if let Some(p) = app.tabs[app.active].preview.as_mut() {
+                    let h = prows as usize - usize::from(p.banner.is_some() && prows > 1);
+                    p.layout(pcols, h);
+                }
                 let strip: Vec<(String, bool, crate::tab::TabState)> = app.tabs.iter().enumerate()
                     .map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active))).collect();
                 let view = View {
+                    preview: app.tabs[app.active].preview.as_ref(),
+                    prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
                     screen: app.tabs[app.active].parser.screen(),
                     name: &name,
                     detail: &detail,
@@ -173,18 +185,22 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                   let bytes = match ev {
                     InEv::Keys(b) => b,
                     InEv::PasteStart => {
-                        let fwd = matches!(mode, Mode::Shell);
+                        let fwd = matches!(mode, Mode::Shell) && !app.tabs[app.active].is_preview();
                         let wrap = app.tabs[app.active].parser.screen().bracketed_paste();
-                        if fwd && wrap { app.tabs[app.active].handle.write(b"\x1b[200~".to_vec()); }
+                        if fwd && wrap { app.tabs[app.active].write(b"\x1b[200~".to_vec()); }
                         pasting = Some((fwd, wrap));
                         continue;
                     }
                     InEv::PasteData(b) => {
-                        if matches!(pasting, Some((true, _))) { app.tabs[app.active].handle.write(b); }
+                        if let Mode::Prompt(p) = &mut mode {
+                            p.input.push_str(&String::from_utf8_lossy(&b).replace(['\r', '\n'], ""));
+                            p.error = None;
+                            dirty = true;
+                        } else if matches!(pasting, Some((true, _))) { app.tabs[app.active].write(b); }
                         continue;
                     }
                     InEv::PasteEnd => {
-                        if pasting == Some((true, true)) { app.tabs[app.active].handle.write(b"\x1b[201~".to_vec()); }
+                        if pasting == Some((true, true)) { app.tabs[app.active].write(b"\x1b[201~".to_vec()); }
                         pasting = None;
                         continue;
                     }
@@ -207,16 +223,102 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             chunk = &[];
                         }
                         Mode::Shell => {
-                            if let Some(pos) = chunk.iter().position(|&x| x == menu_key) {
-                                if pos > 0 { app.tabs[app.active].handle.write(chunk[..pos].to_vec()); }
-                                mode = Mode::Menu(0);
-                                message = None;
+                            let (head, after_menu) = match chunk.iter().position(|&x| x == menu_key) {
+                                Some(pos) => (&chunk[..pos], Some(&chunk[pos + 1..])),
+                                None => (chunk, None),
+                            };
+                            if app.tabs[app.active].is_preview() {
+                                let rows = shell_size(app.tabs.len())?.1 as usize;
+                                let (mut back, mut reload) = (false, false);
+                                if let Some(p) = app.tabs[app.active].preview.as_mut() {
+                                    let page = rows - usize::from(p.banner.is_some() && rows > 1);
+                                    for k in pvkeys::parse(head) {
+                                        match k {
+                                            PvKey::Back => back = true,
+                                            PvKey::Reload => reload = true,
+                                            k => { p.navigate(k, page); }
+                                        }
+                                    }
+                                }
                                 dirty = true;
-                                chunk = &chunk[pos + 1..];
-                            } else {
-                                app.tabs[app.active].handle.write(chunk.to_vec());
-                                chunk = &[];
+                                if back { go_back(&mut app); }
+                                if reload {
+                                    message = match reload_preview(&mut app, backend, read_cap, &opts).await {
+                                        Ok(()) => Some("reloaded".to_string()),
+                                        Err(e) => Some(format!("reload failed: {e}")),
+                                    };
+                                }
+                            } else if !head.is_empty() {
+                                app.tabs[app.active].write(head.to_vec());
                             }
+                            match after_menu {
+                                Some(rest) => {
+                                    mode = Mode::Menu(0);
+                                    message = None;
+                                    dirty = true;
+                                    chunk = rest;
+                                }
+                                None => chunk = &[],
+                            }
+                        }
+                        Mode::Prompt(ref mut pr) => {
+                            let (mut cancel, mut complete_now, mut open_now) = (false, false, false);
+                            let mut run: Vec<u8> = Vec::new();
+                            let mut i = 0;
+                            while i < chunk.len() {
+                                let b = chunk[i];
+                                if b >= 0x20 && b != 0x7f && b != menu_key {
+                                    run.push(b);
+                                    i += 1;
+                                    continue;
+                                }
+                                pr.input.push_str(&String::from_utf8_lossy(&std::mem::take(&mut run)));
+                                match b {
+                                    0x1b => {
+                                        if matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) {
+                                            i += 2;
+                                            while i < chunk.len() && !(0x40..=0x7e).contains(&chunk[i]) { i += 1; }
+                                        } else {
+                                            cancel = true;
+                                        }
+                                    }
+                                    b'\r' | b'\n' => { open_now = true; break; }
+                                    b'\t' => { complete_now = true; break; }
+                                    0x7f | 0x08 => { pr.input.pop(); }
+                                    0x15 => pr.input.clear(),
+                                    x if x == menu_key => cancel = true,
+                                    _ => {}
+                                }
+                                pr.error = None;
+                                i += 1;
+                            }
+                            pr.input.push_str(&String::from_utf8_lossy(&run));
+                            if !run.is_empty() || i > 0 { pr.error = None; }
+                            if complete_now {
+                                let dir = crate::files::split_input(&pr.input).0.to_string();
+                                match backend.list_dir(&dir).await {
+                                    Ok(l) => {
+                                        let c = complete(&pr.input, &l.entries);
+                                        pr.input = c.input;
+                                        pr.shown = c.shown;
+                                        pr.total = c.total;
+                                        if l.truncated {
+                                            pr.error = Some(format!("directory has more than {} entries; completion is partial", crate::files::LIST_CAP));
+                                        }
+                                    }
+                                    Err(e) => pr.error = Some(format!("{e}")),
+                                }
+                            }
+                            if open_now && !pr.input.trim().is_empty() {
+                                let path = pr.input.trim().to_string();
+                                match open_preview(&mut app, backend, &path, read_cap, &opts).await {
+                                    Ok(()) => cancel = true,
+                                    Err(e) => pr.error = Some(format!("{path}: {e}")),
+                                }
+                            }
+                            if cancel { mode = Mode::Shell; }
+                            dirty = true;
+                            chunk = &[];
                         }
                         Mode::Menu(ref mut sel) => {
                             let mut chosen: Option<Action> = None;
@@ -250,7 +352,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     } else {
                                         format!("local workspace · {detail} · {} tab(s)", app.tabs.len())
                                     }),
+                                    Action::Scroll if app.tabs[app.active].is_preview() => message = Some("scroll a preview with the arrow keys and PgUp/PgDn".into()),
                                     Action::Scroll => mode = Mode::Scroll,
+                                    Action::Preview => mode = Mode::Prompt(Prompt::default()),
                                     Action::NewTab => {
                                         let (c, r) = shell_size(app.tabs.len() + 1)?;
                                         let had_strip = app.tabs.len() > 1;
@@ -266,7 +370,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     Action::PrevTab => { let n = (app.active + app.tabs.len() - 1) % app.tabs.len(); switch_to(&mut app, n); }
                                     Action::CloseTab => {
                                         let id = app.tabs[app.active].id;
-                                        app.tabs[app.active].handle.close();
+                                        app.tabs[app.active].close();
                                         if remove_tab(&mut app, id)? { return finish(&app, backend).await; }
                                     }
                                     other => message = Some(format!("{other:?} arrives in a later milestone")),
@@ -351,10 +455,52 @@ fn remove_tab(app: &mut App, id: usize) -> Result<bool> {
 
 async fn finish(app: &App, backend: &Backend) -> Result<()> {
     for t in &app.tabs {
-        t.handle.close();
+        t.close();
     }
     backend.close().await;
     // Give the shell tasks a moment to kill their children before we exit.
     tokio::time::sleep(Duration::from_millis(150)).await;
     Ok(())
+}
+
+/// Open `input` (relative to the workspace) in a new preview tab and switch to it.
+async fn open_preview(app: &mut App, backend: &Backend, input: &str, cap: usize, opts: &Opts) -> Result<()> {
+    let abs = backend.resolve(input).await?;
+    let (bytes, total) = backend.read_prefix(&abs, cap).await?;
+    let mut p = Preview::build(&abs, &bytes, total, opts);
+    p.from_tab = app.active;
+    let id = app.next_id;
+    app.next_id += 1;
+    app.tabs.push(Tab::new_preview(id, p));
+    app.active = app.tabs.len() - 1;
+    resize_all(app)?; // the tab strip may have just appeared
+    Ok(())
+}
+
+/// Re-read the file shown in the active preview tab, keeping scroll position and wrap setting.
+async fn reload_preview(app: &mut App, backend: &Backend, cap: usize, opts: &Opts) -> Result<()> {
+    let Some(old) = app.tabs[app.active].preview.as_ref() else { return Ok(()) };
+    let (path, top, left, wrap, from) = (old.path.clone(), old.top, old.left, old.wrap, old.from_tab);
+    let (bytes, total) = backend.read_prefix(&path, cap).await?;
+    let mut p = Preview::build(&path, &bytes, total, opts);
+    p.top = top;
+    p.left = left;
+    if p.wrap != wrap {
+        p.toggle_wrap();
+        p.left = left;
+    }
+    p.from_tab = from;
+    app.tabs[app.active].preview = Some(p);
+    Ok(())
+}
+
+/// Esc in a preview: return to the tab it was opened from, or the first shell.
+fn go_back(app: &mut App) {
+    let from = app.tabs[app.active].preview.as_ref().map(|p| p.from_tab).unwrap_or(0);
+    let target = if from < app.tabs.len() && from != app.active && !app.tabs[from].is_preview() {
+        from
+    } else {
+        app.tabs.iter().position(|t| !t.is_preview()).unwrap_or(0)
+    };
+    switch_to(app, target);
 }
