@@ -53,7 +53,7 @@ os.write(fd, MENU); pump(0.5)
 pos = find("Previous tab")
 check("menu is open", pos is not None)
 click(pos[0] + 2, pos[1])
-check("clicking a menu entry runs it (Previous tab -> tab 1)", "FIRSTTAB" in text() and "menu" not in text().lower().split("\n")[0])
+check("clicking a menu entry runs it (Previous tab -> tab 1)", "FIRSTTAB" in text() and find("Previous tab") is None)
 os.write(fd, MENU); pump(0.5)
 click(2, 20)   # outside the menu box
 check("clicking outside the menu closes it", find("Previous tab") is None)

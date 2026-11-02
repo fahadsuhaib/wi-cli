@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::agents::{self, Agent, Decision};
-use crate::ui::{self, Action, Ask, Confirm, Hint, MenuItem, Prompt, PromptKind, View, hint_labels, menu_items_for, sanitize};
+use crate::ui::{self, Action, Ask, Confirm, Hint, MenuItem, Prompt, PromptKind, View, MenuState, hint_labels, menu_items_for, sanitize};
 use crate::cwd::Activity;
 use crate::files::{anchor, complete_dirs};
 use ratatui::layout::Rect;
@@ -42,7 +42,7 @@ enum Mode {
     Fetch,
     /// Every path and link on screen is labelled with a letter.
     Hints(HintState),
-    Menu(usize),
+    Menu(MenuState),
     /// Browsing scrollback of the active tab.
     Scroll,
     /// The "search in files" query prompt.
@@ -95,8 +95,14 @@ fn paste_search(mode: &mut Mode, text: &str) -> bool {
 enum Key {
     Up,
     Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Enter,
     Esc,
+    Backspace,
+    Tab,
     Char(char),
     MenuPressed,
 }
@@ -108,18 +114,35 @@ fn parse_keys(buf: &[u8], menu_key: u8) -> Vec<Key> {
         let b = buf[i];
         match b {
             0x1b if buf.get(i + 1) == Some(&b'[') || buf.get(i + 1) == Some(&b'O') => {
-                match buf.get(i + 2) {
+                // Skip the parameters up to the final byte.
+                let mut j = i + 2;
+                while j < buf.len() && !(0x40..=0x7e).contains(&buf[j]) {
+                    j += 1;
+                }
+                let params = &buf[(i + 2).min(buf.len())..j.min(buf.len())];
+                match buf.get(j) {
                     Some(b'A') => keys.push(Key::Up),
                     Some(b'B') => keys.push(Key::Down),
+                    Some(b'H') => keys.push(Key::Home),
+                    Some(b'F') => keys.push(Key::End),
+                    Some(b'~') => match params.first() {
+                        Some(b'1' | b'7') => keys.push(Key::Home),
+                        Some(b'4' | b'8') => keys.push(Key::End),
+                        Some(b'5') => keys.push(Key::PageUp),
+                        Some(b'6') => keys.push(Key::PageDown),
+                        _ => {}
+                    },
                     _ => {}
                 }
-                i += 3;
+                i = j + 1;
                 continue;
             }
             0x1b => keys.push(Key::Esc),
             b'\r' | b'\n' => keys.push(Key::Enter),
+            0x7f | 0x08 => keys.push(Key::Backspace),
+            b'\t' => keys.push(Key::Tab),
             c if c == menu_key => keys.push(Key::MenuPressed),
-            c if c.is_ascii_graphic() => keys.push(Key::Char((c as char).to_ascii_lowercase())),
+            c if c.is_ascii_graphic() || c == b' ' => keys.push(Key::Char(c as char)),
             _ => {}
         }
         i += 1;
@@ -296,7 +319,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
             }
             _ = sleep_until(due.into()), if dirty => {
                 if std::mem::take(&mut sel_reset) { sel = None; }
-                let menu = match mode { Mode::Menu(i) => Some(i), _ => None };
+                let menu = match &mode { Mode::Menu(st) => Some(st.clone()), _ => None };
                 let scroll = match mode {
                     Mode::Scroll | Mode::OutFind(_) => { let s = app.tabs[app.active].parser.screen(); Some((s.scrollback(), s.scrollback_len())) }
                     _ => None,
@@ -569,6 +592,27 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         }
                                     }
                                 }
+                                Intent::MenuPick(i) => {
+                                    if let Mode::Menu(st) = &mut mode {
+                                        let entries = ui::menu_entries(&ui::menu_rows(&items, &st.filter));
+                                        if let Some(pos) = entries.iter().position(|&e| e == i) {
+                                            st.sel = pos;
+                                            out.extend(b"\r");
+                                        }
+                                    }
+                                }
+                                Intent::MenuFilter => {
+                                    if let Mode::Menu(st) = &mut mode { st.filtering = true; dirty = true; }
+                                }
+                                Intent::MenuClose => { mode = Mode::Shell; dirty = true; }
+                                Intent::MenuWheel(d) => {
+                                    if let Mode::Menu(st) = &mut mode {
+                                        let n = ui::menu_entries(&ui::menu_rows(&items, &st.filter)).len();
+                                        st.sel = (st.sel.min(n.saturating_sub(1)) as isize + d).clamp(0, n.saturating_sub(1) as isize) as usize;
+                                        st.top = ui::menu_layout(main, &items, st).top;
+                                        dirty = true;
+                                    }
+                                }
                                 Intent::ListPick(row) => {
                                     let picked = match &mut mode {
                                         Mode::Results(r) => {
@@ -692,7 +736,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             }
                             match after_menu {
                                 Some(rest) => {
-                                    mode = Mode::Menu(0);
+                                    mode = Mode::Menu(MenuState::default());
                                     message = None;
                                     dirty = true;
                                     chunk = rest;
@@ -1142,26 +1186,48 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             dirty = true;
                             chunk = &[];
                         }
-                        Mode::Menu(ref mut sel) => {
+                        Mode::Menu(ref mut st) => {
                             let mut chosen: Option<Action> = None;
                             let mut jump: Option<usize> = None;
                             let mut close = false;
+                            let main = main_rect(&app)?;
+                            let mut entries = ui::menu_entries(&ui::menu_rows(&items, &st.filter));
+                            let page = ui::menu_layout(main, &items, st).list_h.saturating_sub(2).max(1);
                             for k in parse_keys(chunk, menu_key) {
+                                let n = entries.len();
                                 match k {
-                                    Key::Up => *sel = (*sel + items.len() - 1) % items.len(),
-                                    Key::Down => *sel = (*sel + 1) % items.len(),
-                                    Key::Enter => chosen = Some(items[*sel].action),
+                                    Key::Up if n > 0 => st.sel = (st.sel.min(n - 1) + n - 1) % n,
+                                    Key::Down if n > 0 => st.sel = (st.sel.min(n - 1) + 1) % n,
+                                    Key::PageUp if n > 0 => st.sel = st.sel.min(n - 1).saturating_sub(page),
+                                    Key::PageDown if n > 0 => st.sel = (st.sel.min(n - 1) + page).min(n - 1),
+                                    Key::Home => st.sel = 0,
+                                    Key::End => st.sel = n.saturating_sub(1),
+                                    Key::Enter => {
+                                        if let Some(&i) = entries.get(st.sel) { chosen = Some(items[i].action); }
+                                    }
+                                    Key::Esc if !st.filter.is_empty() => { st.filter.clear(); st.sel = 0; }
+                                    Key::Esc if st.filtering => st.filtering = false,
                                     Key::Esc | Key::MenuPressed => close = true,
+                                    Key::Backspace if st.filtering => { st.filter.pop(); st.sel = 0; }
+                                    Key::Tab if !st.filtering => st.filtering = true,
+                                    Key::Char(' ') if !st.filtering => st.filtering = true,
+                                    Key::Char(c) if st.filtering => {
+                                        if c != ' ' || !st.filter.is_empty() { st.filter.push(c); st.sel = 0; }
+                                    }
                                     Key::Char(c) => {
+                                        let c = c.to_ascii_lowercase();
                                         if let Some(d) = c.to_digit(10).filter(|d| (1..=9).contains(d)) {
                                             jump = Some(d as usize - 1);
                                         } else if let Some(item) = items.iter().find(|m| m.key == c) {
                                             chosen = Some(item.action);
                                         }
                                     }
+                                    _ => {}
                                 }
+                                entries = ui::menu_entries(&ui::menu_rows(&items, &st.filter));
                                 if chosen.is_some() || jump.is_some() || close { break; }
                             }
+                            st.top = ui::menu_layout(main, &items, st).top;
                             if let Some(i) = jump {
                                 mode = Mode::Shell;
                                 if i < app.tabs.len() { switch_to(&mut app, i); }
@@ -1869,6 +1935,14 @@ enum Intent {
     PickCandidate(usize),
     /// A click on a row of the results list or the file finder (row within the list area).
     ListPick(usize),
+    /// A click on a menu entry (index into the menu's items).
+    MenuPick(usize),
+    /// A click on the menu's filter row.
+    MenuFilter,
+    /// A click outside the menu.
+    MenuClose,
+    /// Mouse wheel over the menu: move the selection this many entries.
+    MenuWheel(isize),
 }
 
 /// What a mouse event means right now. Pure so it can be tested without a terminal.
@@ -1876,20 +1950,17 @@ enum Intent {
 fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], main: Rect, selecting: Option<Pane>, link_click: &str) -> Intent {
     let hit = |r: Rect| inside(r, m.col, m.row);
     match mode {
-        Mode::Menu(_) => {
-            let r = ui::menu_rect(main, items.len());
+        Mode::Menu(st) => {
+            let lay = ui::menu_layout(main, items, st);
             match m.kind {
-                Kind::Down(_) if hit(r) => {
-                    // Rows 1..=n inside the border are the entries.
-                    let idx = m.row.saturating_sub(r.y + 1) as usize;
-                    match items.get(idx) {
-                        Some(it) if m.row > r.y => Intent::Synth(vec![it.key as u8]),
-                        _ => Intent::None,
-                    }
-                }
-                Kind::Down(_) => Intent::Synth(vec![0x1b]),
-                Kind::WheelUp => Intent::Synth(b"\x1b[A".to_vec()),
-                Kind::WheelDown => Intent::Synth(b"\x1b[B".to_vec()),
+                Kind::Down(_) => match ui::menu_hit(&lay, m.col, m.row) {
+                    ui::MenuHit::Item(i) => Intent::MenuPick(i),
+                    ui::MenuHit::Filter => Intent::MenuFilter,
+                    ui::MenuHit::Inert => Intent::None,
+                    ui::MenuHit::Outside => Intent::MenuClose,
+                },
+                Kind::WheelUp => Intent::MenuWheel(-3),
+                Kind::WheelDown => Intent::MenuWheel(3),
                 _ => Intent::None,
             }
         }
