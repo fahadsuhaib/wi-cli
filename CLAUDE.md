@@ -1,6 +1,6 @@
 # wicli (`wi`)
 
-Lightweight terminal workspace for working with AI coding tools (Claude Code, Codex) locally or on a remote box, replacing VS Code for that workflow: great terminal, tabs, quick previews and diffs of what the AI produced. No debugger, LSP or built-in editor. It should be able to build itself. Read `PLAN.md` for the roadmap and `/Users/fahad/Downloads/Devbox terminal client implementation spec.md` for the original spec (names there say "devbox"; we use wicli/`wi`).
+Lightweight terminal workspace for working with AI coding tools (Claude Code, Codex) locally or on a remote box, replacing VS Code for that workflow: great terminal, tabs, quick previews and diffs of what the AI produced. No debugger, LSP or built-in editor. It should be able to build itself. Read `PLAN.md` for the roadmap and `PLAN-OVERVIEW.md` for the developer-convenience feature plan (overview tab, progress, clipboard bins, send-to-agent, checkpoints) and `/Users/fahad/Downloads/Devbox terminal client implementation spec.md` for the original spec (names there say "devbox"; we use wicli/`wi`).
 
 ## Rules
 - Keys must stay simple and memorable: letters, arrows, Enter, Esc, Tab. No symbol keys, no chords. One global menu key opens an arrow-key menu with underlined letters.
