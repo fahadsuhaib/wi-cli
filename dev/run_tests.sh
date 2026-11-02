@@ -17,7 +17,7 @@ for t in dev/pty_*.py; do
   [ -e "$t" ] || continue
   case "$(basename "$t")" in pty_drive.py) continue;; esac  # interactive driver, not a test
   step "$t local" "$PY" -I "$t" "$S" local
-  if grep -q remote "$t"; then
+  if grep -q '^# remote: yes' "$t"; then
     if (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; then step "$t remote" "$PY" -I "$t" "$S" remote
     else results+=("SKIP $t remote (test box not reachable on 127.0.0.1:2222)"); fi
   fi

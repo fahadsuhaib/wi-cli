@@ -1,4 +1,4 @@
-# usage: python dev/pty_input.py <scratch-dir-with-test.toml> local|remote   (needs pyte)
+# usage: python dev/pty_input.py <scratch-dir-with-test.toml> local   (needs pyte)
 # Checks scrollback mode and bracketed paste handling.
 import os, pty, sys, time, select, struct, fcntl, termios, pyte
 S, mode = sys.argv[1], sys.argv[2]

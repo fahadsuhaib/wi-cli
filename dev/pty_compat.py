@@ -1,4 +1,4 @@
-# usage: python dev/pty_compat.py <scratch-dir-with-test.toml> local|remote   (needs pyte)
+# usage: python dev/pty_compat.py <scratch-dir-with-test.toml> local   (needs pyte)
 import os, pty, sys, time, select, struct, fcntl, termios, pyte
 S, mode = sys.argv[1], sys.argv[2]
 MENU = b"\x00"  # Ctrl-Space

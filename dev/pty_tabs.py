@@ -1,4 +1,5 @@
 # usage: python dev/pty_tabs.py <scratch-dir-with-test.toml> local|remote   (needs pyte)
+# remote: yes
 import os, pty, sys, time, select, struct, fcntl, termios, pyte
 S, mode = sys.argv[1], sys.argv[2]
 MENU = b"\x00"  # Ctrl-Space
@@ -28,7 +29,10 @@ os.write(fd, b"echo ONE$((1+1))\n"); pump(1)
 check("tab 1 runs command", "ONE2" in text())
 check("no tab strip with one tab", "shell 1" not in text().split("\n")[1])
 os.write(fd, MENU + b"n"); pump(1.5)
-check("tab strip appears", "1 shell 1" in text() and "2 shell 2" in text())
+import re
+strip = text().split("\n")[1]
+# titles may be set by the shell prompt (OSC), so only require two numbered entries
+check("tab strip appears", re.search(r"\b1 \S.*\b2 \S", strip) is not None)
 os.write(fd, b"echo TWO$((2+2))\n"); pump(1)
 check("tab 2 runs command", "TWO4" in text())
 check("tab 2 does not show tab 1 output", "ONE2" not in text())
@@ -37,7 +41,7 @@ check("jump to tab 1 by number", "ONE2" in text() and "TWO4" not in text())
 os.write(fd, MENU + b"t"); pump(0.8)
 check("next tab", "TWO4" in text())
 os.write(fd, MENU + b"c"); pump(1)
-check("close tab returns to tab 1", "ONE2" in text() and "2 shell 2" not in text())
+check("close tab returns to tab 1", "ONE2" in text() and not re.search(r"\b1 \S.*\b2 \S", text().split("\n")[1]))
 os.write(fd, MENU + b"q"); pump(1.5)
 p, _ = os.waitpid(pid, os.WNOHANG)
 check("quit exits", p != 0)
