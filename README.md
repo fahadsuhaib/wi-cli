@@ -1,7 +1,5 @@
 # wi
 
-[![CI](https://github.com/fahadsuhaib/wi-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/fahadsuhaib/wi-cli/actions/workflows/ci.yml)
-
 `wi` is a lightweight terminal workspace for working with AI coding tools (Claude Code, Codex), on your own machine
 or on a remote box over SSH. It gives you a good terminal with tabs, plus quick previews and diffs of what the AI
 produced. It has no debugger, no LSP and no built-in editor. Nothing is installed on the remote box beyond sshd.
