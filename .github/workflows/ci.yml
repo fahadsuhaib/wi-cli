@@ -4,7 +4,7 @@ name: CI
 # pseudo-terminal, so they run in parallel shards on separate machines against one shared debug build.
 #
 #   build      -> compile once, lint, unit tests; uploads the binary          (~3 min, gates everything)
-#   pty        -> 4 shards of the terminal scripts, local and remote          (~6-8 min each, in parallel)
+#   pty        -> 6 shards of the terminal scripts, local and remote          (~5 min each, in parallel)
 #   macos      -> build, lint, unit tests on macOS                            (~3 min, runs in parallel)
 #   macos-pty  -> terminal scripts on macOS, informational only               (does not fail the run)
 
@@ -54,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4 # the scripts live in dev/
       - name: Get the binary built above
@@ -64,6 +64,10 @@ jobs:
           path: target/debug
       - name: Make the binary executable
         run: chmod +x target/debug/wi && target/debug/wi --version
+      - name: Start building the remote test box in the background
+        run: |
+          ssh-keygen -t ed25519 -N "" -f dev/id_test -C wicli-ci
+          (docker build -t devbox-test dev && docker run -d --name devbox-test -p 2222:22 devbox-test) > "$RUNNER_TEMP/box.log" 2>&1 &
       - name: Install tools used by the pty tests
         run: |
           sudo apt-get update
@@ -72,17 +76,13 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/scratch/venv"
           "$RUNNER_TEMP/scratch/venv/bin/pip" install pyte
-      - name: Generate the test SSH key
-        run: ssh-keygen -t ed25519 -N "" -f dev/id_test -C wicli-ci
-      - name: Start the remote test box
+      - name: Wait for the remote test box
         run: |
-          docker build -t devbox-test dev
-          docker run -d --name devbox-test -p 2222:22 devbox-test
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 120); do
             if (exec 3<>/dev/tcp/127.0.0.1/2222) 2>/dev/null; then echo "test box is up"; exit 0; fi
             sleep 1
           done
-          docker logs devbox-test
+          cat "$RUNNER_TEMP/box.log"; docker logs devbox-test || true
           echo "test box did not answer on port 2222" >&2
           exit 1
       - name: Write test.toml
@@ -98,10 +98,10 @@ jobs:
           identity = "$GITHUB_WORKSPACE/dev/id_test"
           known_hosts = "$S/known_hosts"
           EOF
-      - name: Terminal scripts, shard ${{ matrix.shard }} of 4
+      - name: Terminal scripts, shard ${{ matrix.shard }} of 6
         env:
           SKIP_BUILD: "1"
-          SHARD: ${{ matrix.shard }}/4
+          SHARD: ${{ matrix.shard }}/6
         run: bash dev/run_tests.sh "$RUNNER_TEMP/scratch" 2>&1 | tee "$RUNNER_TEMP/tests.log"; exit "${PIPESTATUS[0]}"
       - name: Upload the log
         if: always()
@@ -153,5 +153,6 @@ jobs:
       - name: Local-mode terminal scripts, shard ${{ matrix.shard }} of 2
         env:
           SKIP_BUILD: "1"
+          LOCAL_ONLY: "1"
           SHARD: ${{ matrix.shard }}/2
         run: bash dev/run_tests.sh "$RUNNER_TEMP/scratch"

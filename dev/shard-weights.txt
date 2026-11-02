@@ -1,0 +1,32 @@
+# seconds per terminal script run, measured on a GitHub runner (CI run 1); used to balance CI shards.
+# format: <script> <local|remote> <seconds>   (scripts not listed get a default weight)
+dev/pty_agents.py local 32
+dev/pty_compat.py local 21
+dev/pty_fetch.py local 0
+dev/pty_fetch.py remote 6
+dev/pty_git.py local 21
+dev/pty_git.py remote 17
+dev/pty_input.py local 20
+dev/pty_keys.py local 63
+dev/pty_keys.py remote 65
+dev/pty_links.py local 34
+dev/pty_links.py remote 27
+dev/pty_markdown.py local 24
+dev/pty_markdown.py remote 27
+dev/pty_mouse.py local 16
+dev/pty_preview.py local 22
+dev/pty_preview.py remote 23
+dev/pty_quiet.py local 8
+dev/pty_remote.py local 0
+dev/pty_remote.py remote 26
+dev/pty_robust.py local 10
+dev/pty_search.py local 138
+dev/pty_search.py remote 146
+dev/pty_select.py local 13
+dev/pty_split.py local 80
+dev/pty_split.py remote 86
+dev/pty_tabdir.py local 68
+dev/pty_tabdir.py remote 120
+dev/pty_tabs.py local 9
+dev/pty_tabs.py remote 9
+dev/pty_theme.py local 60
