@@ -471,7 +471,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
             (false, false) => "",
         };
         let back = if split.is_some() { "Esc to the shell · Q closes" } else { "Esc back · Q closes" };
-        format!(" arrows scroll · {files}F find · W wrap · R reload · {back}   lines {}-{} of {}", (p.top + 1).min(total), last, total)
+        format!(" lines {}-{} of {}  ·  arrows scroll · {files}F find · W wrap · R reload · {back}", (p.top + 1).min(total), last, total)
     });
     let status_text = v.status.map(|t| format!(" {t}"));
     let hint = match (v.menu, v.message) {
