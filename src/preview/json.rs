@@ -1,6 +1,7 @@
 //! JSON: pretty-printed and coloured. Returns None when the text is not valid JSON.
 
-use ratatui::style::{Color, Style};
+use crate::theme::theme;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 pub fn render(body: &str) -> Option<Vec<Line<'static>>> {
@@ -23,7 +24,7 @@ fn colour_line(line: &str) -> Line<'static> {
             let end = (j + 1).min(chars.len());
             let tok: String = chars[i..end].iter().collect();
             let is_key = chars.get(end) == Some(&':');
-            spans.push(Span::styled(tok, Style::default().fg(if is_key { Color::Cyan } else { Color::Green })));
+            spans.push(Span::styled(tok, Style::default().fg(if is_key { theme().json_key } else { theme().json_string })));
             i = end;
         } else if c.is_ascii_digit() || c == '-' || c.is_ascii_alphabetic() {
             let mut j = i;
@@ -31,7 +32,7 @@ fn colour_line(line: &str) -> Line<'static> {
                 j += 1;
             }
             let tok: String = chars[i..j].iter().collect();
-            spans.push(Span::styled(tok, Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(tok, Style::default().fg(theme().json_number)));
             i = j;
         } else {
             let mut j = i;

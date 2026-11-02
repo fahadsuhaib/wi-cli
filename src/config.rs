@@ -32,6 +32,10 @@ pub struct Defaults {
     pub preview_side: String,
     /// Width of the side preview pane as a percentage of the window (clamped to 25..75).
     pub preview_width_pct: u16,
+    /// Colour theme: `auto` (ask the terminal, then COLORFGBG, then dark), `dark` or `light`.
+    pub theme: String,
+    /// Map the terminal's named ANSI colours (0-15) in shell tabs to the theme palette.
+    pub ansi_remap: bool,
 }
 
 impl Default for Defaults {
@@ -52,6 +56,8 @@ impl Default for Defaults {
             confirm_open: "always".into(),
             preview_side: "right".into(),
             preview_width_pct: 50,
+            theme: "auto".into(),
+            ansi_remap: true,
         }
     }
 }

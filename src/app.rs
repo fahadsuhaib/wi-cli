@@ -128,6 +128,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
         open_tab(&mut app, backend, &events_tx, cols, rows).await?;
     }
 
+    // Theme first: it may ask the terminal for its background (OSC 11, ~150 ms at most).
+    crate::setup_theme(cfg);
     let _guard = TermGuard::enter(cfg.defaults.mouse)?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut stdin = tokio::io::stdin();
@@ -835,6 +837,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         let _ = std::io::Write::write_all(&mut o, if mouse_on { mouse::ENABLE } else { mouse::DISABLE });
                                         let _ = std::io::Write::flush(&mut o);
                                         message = Some(if mouse_on { "mouse on".to_string() } else { "mouse off: select and copy text natively".to_string() });
+                                    }
+                                    Action::Theme => {
+                                        let k = crate::theme::kind().other();
+                                        crate::theme::set_kind(k);
+                                        agent_state.theme = Some(k.name().to_string());
+                                        message = Some(match agent_state.save() {
+                                            Ok(()) if crate::theme::Kind::parse(&cfg.defaults.theme).is_some() => format!("theme: {} (config theme = \"{}\" wins on restart)", k.name(), cfg.defaults.theme),
+                                            Ok(()) => format!("theme: {}", k.name()),
+                                            Err(e) => format!("theme: {} (could not save: {e})", k.name()),
+                                        });
                                     }
                                     Action::SwitchPane => {
                                         let main = main_rect(&app)?;

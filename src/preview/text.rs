@@ -1,6 +1,7 @@
 //! Plain text, logs and source code: line numbers, tabs expanded, control characters made visible.
 
-use ratatui::style::{Modifier, Style};
+use crate::theme::theme;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 /// Returns the lines and the gutter width (characters) so wrapping and scrolling can keep it fixed.
@@ -8,7 +9,7 @@ pub fn render(body: &str) -> (Vec<Line<'static>>, usize) {
     let count = body.lines().count().max(1);
     let digits = count.to_string().len();
     let gutter = digits + 2;
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let dim = Style::default().fg(theme().gutter);
     let lines = body
         .lines()
         .enumerate()

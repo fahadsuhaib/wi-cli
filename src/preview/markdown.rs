@@ -1,7 +1,8 @@
 //! Markdown to styled lines with pulldown-cmark. Images become `[image: alt]` placeholders.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use crate::theme::theme;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 struct W {
@@ -32,7 +33,7 @@ impl W {
         }
         let mut spans = Vec::new();
         if self.quote > 0 {
-            spans.push(Span::styled("│ ".repeat(self.quote), Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled("│ ".repeat(self.quote), Style::default().fg(theme().md_quote)));
         }
         spans.append(&mut self.cur);
         self.lines.push(Line::from(spans));
@@ -49,16 +50,17 @@ impl W {
 fn heading_style(l: HeadingLevel) -> Style {
     let base = Style::default().add_modifier(Modifier::BOLD);
     match l {
-        HeadingLevel::H1 => base.fg(Color::Magenta).add_modifier(Modifier::UNDERLINED),
-        HeadingLevel::H2 => base.fg(Color::Cyan),
-        _ => base.fg(Color::Blue),
+        HeadingLevel::H1 => base.fg(theme().md_h1).add_modifier(Modifier::UNDERLINED),
+        HeadingLevel::H2 => base.fg(theme().md_h2),
+        _ => base.fg(theme().md_h3),
     }
 }
 
 pub fn render(src: &str) -> Vec<Line<'static>> {
     let mut w = W { lines: vec![], cur: vec![], styles: vec![], lists: vec![], quote: 0, in_code: false, table: None, cell: None, link: vec![] };
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let dim = Style::default().fg(theme().dim);
+    let rule = Style::default().fg(theme().md_rule);
     for ev in Parser::new_ext(src, opts) {
         match ev {
             Event::Start(tag) => match tag {
@@ -94,14 +96,14 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
                         _ => "• ".to_string(),
                     };
                     w.cur.push(Span::raw("  ".repeat(depth)));
-                    w.cur.push(Span::styled(marker, Style::default().fg(Color::Yellow)));
+                    w.cur.push(Span::styled(marker, Style::default().fg(theme().md_bullet)));
                 }
                 Tag::Emphasis => w.styles.push(Style::default().add_modifier(Modifier::ITALIC)),
                 Tag::Strong => w.styles.push(Style::default().add_modifier(Modifier::BOLD)),
                 Tag::Strikethrough => w.styles.push(Style::default().add_modifier(Modifier::CROSSED_OUT)),
                 Tag::Link { dest_url, .. } => {
                     w.link.push(dest_url.to_string());
-                    w.styles.push(Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED));
+                    w.styles.push(Style::default().fg(theme().md_link).add_modifier(Modifier::UNDERLINED));
                 }
                 Tag::Image { .. } => w.push("[image: "),
                 Tag::Table(_) => w.table = Some(Vec::new()),
@@ -167,8 +169,8 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
                 } else if w.in_code {
                     for l in t.trim_end_matches('\n').split('\n') {
                         w.lines.push(Line::from(vec![
-                            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(l.replace('\t', "    "), Style::default().fg(Color::Gray)),
+                            Span::styled("  │ ", Style::default().fg(theme().md_rule)),
+                            Span::styled(l.replace('\t', "    "), Style::default().fg(theme().md_code)),
                         ]));
                     }
                 } else {
@@ -179,7 +181,7 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
                 if let Some(c) = w.cell.as_mut() {
                     c.push_str(&t);
                 } else {
-                    w.cur.push(Span::styled(t.to_string(), Style::default().fg(Color::Yellow)));
+                    w.cur.push(Span::styled(t.to_string(), Style::default().fg(theme().md_code)));
                 }
             }
             Event::SoftBreak => {
@@ -188,7 +190,7 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
             Event::HardBreak => w.flush(),
             Event::Rule => {
                 w.flush();
-                w.lines.push(Line::from(Span::styled("─".repeat(40), dim)));
+                w.lines.push(Line::from(Span::styled("─".repeat(40), rule)));
                 w.blank();
             }
             Event::TaskListMarker(done) => w.cur.push(Span::raw(if done { "[x] " } else { "[ ] " })),
@@ -217,16 +219,16 @@ fn render_table(w: &mut W, rows: Vec<Vec<String>>) {
         let mut spans = Vec::new();
         for (i, wd) in widths.iter().enumerate() {
             let c = r.get(i).map(String::as_str).unwrap_or("");
-            let st = if ri == 0 { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() };
+            let st = if ri == 0 { Style::default().fg(theme().table_header).add_modifier(Modifier::BOLD) } else { Style::default() };
             spans.push(Span::styled(format!("{c}{}", " ".repeat(wd.saturating_sub(c.width()))), st));
             if i + 1 < widths.len() {
-                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(" │ ", Style::default().fg(theme().table_sep)));
             }
         }
         w.lines.push(Line::from(spans));
         if ri == 0 {
             let rule: Vec<String> = widths.iter().map(|n| "─".repeat(*n)).collect();
-            w.lines.push(Line::from(Span::styled(rule.join("─┼─"), Style::default().fg(Color::DarkGray))));
+            w.lines.push(Line::from(Span::styled(rule.join("─┼─"), Style::default().fg(theme().table_sep))));
         }
     }
 }

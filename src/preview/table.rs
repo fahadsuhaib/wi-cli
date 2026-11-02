@@ -1,5 +1,6 @@
 //! CSV / TSV: an aligned table (RFC 4180 parsing), header styled, first N rows only.
 
+use crate::theme::theme;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -68,8 +69,8 @@ pub fn render(body: &str, delim: u8, rows: usize, total: u64, truncated: bool) -
             widths[i] = widths[i].max(f.width());
         }
     }
-    let bold = Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let bold = Style::default().fg(theme().table_header).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let dim = Style::default().fg(theme().table_sep);
     let mut lines = Vec::new();
     for (ri, r) in recs.iter().enumerate() {
         let mut spans = Vec::new();
