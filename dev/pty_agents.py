@@ -5,7 +5,7 @@ S = sys.argv[1]
 MENU = b"\x00"
 cfgfile = S + "/agents.toml"
 statefile = S + "/state.toml"   # sits next to the config file
-open(cfgfile, "w").write('[agents.claude]\ncommand = "echo FAKE_CLAUDE_STARTED"\ncommands = ["echo SECOND_CMD"]\n')
+open(cfgfile, "w").write('[defaults]\nkey_protocol = "off"  # no new-line hint over the "started:" status line\n\n[agents.claude]\ncommand = "echo FAKE_CLAUDE_STARTED"\ncommands = ["echo SECOND_CMD"]\n')
 proj = S + "/agentws"; plain = S + "/plainws"
 for d in (proj, plain):
     shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
