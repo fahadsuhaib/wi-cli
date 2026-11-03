@@ -106,10 +106,29 @@ fn default_port() -> u16 {
     22
 }
 
-/// Your usual way of starting an agent, e.g. `claude --continue`.
-#[derive(Debug, Deserialize, Clone)]
+/// Your usual ways of starting an agent, e.g. `claude --continue`.
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct AgentCfg {
+    /// One usual command.
+    #[serde(default)]
     pub command: String,
+    /// Several commands, offered after `command` in the start list.
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+impl AgentCfg {
+    /// `command` first, then `commands`; blanks and repeats dropped.
+    pub fn all(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for c in std::iter::once(&self.command).chain(self.commands.iter()) {
+            let c = c.trim();
+            if !c.is_empty() && !out.iter().any(|o| o == c) {
+                out.push(c.to_string());
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

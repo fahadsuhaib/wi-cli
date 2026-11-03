@@ -359,22 +359,7 @@ pub fn menu_hit(l: &MenuLayout, col: u16, row: u16) -> MenuHit {
     }
 }
 
-/// The "start an agent?" prompt.
-#[derive(Clone)]
-pub struct Ask {
-    pub agents: Vec<crate::agents::Agent>,
-    pub commands: Vec<String>,
-    pub sel: usize,
-    /// Some while the command is being edited.
-    pub editing: Option<String>,
-}
-
-impl Ask {
-    pub fn new(agents: Vec<crate::agents::Agent>, cfg: &crate::config::Config, state: &crate::agents::State, key: &str) -> Ask {
-        let commands = agents.iter().map(|a| crate::agents::command_for(*a, cfg, state, key)).collect();
-        Ask { agents, commands, sel: 0, editing: None }
-    }
-}
+pub use crate::ask::Ask;
 
 /// What the prompt is asking for.
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -1004,30 +989,94 @@ fn draw_prompt(f: &mut Frame, main: Rect, p: &Prompt) {
 }
 
 fn draw_ask(f: &mut Frame, main: Rect, a: &Ask) {
-    let w = 72.min(main.width);
-    let h = (a.agents.len() as u16 + 5).min(main.height);
-    let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
     let t = theme();
     let dim = Style::default().fg(t.dialog_dim);
-    let mut lines = vec![Line::from(Span::styled(" Start an agent here. Your choice is remembered for this workspace.", dim)), Line::from("")];
-    for (i, ag) in a.agents.iter().enumerate() {
+    let editing = a.edit.is_some();
+    let w = 76.min(main.width);
+    let inner_w = w.saturating_sub(2) as usize;
+    // border 2 + intro 1 + list + bottom (hint 2, or field 6)
+    let bottom: u16 = if editing { 6 } else { 2 };
+    let list_h = (a.rows() as u16).min(main.height.saturating_sub(3 + bottom).max(1)).min(10) as usize;
+    let h = (3 + list_h as u16 + bottom).min(main.height);
+    let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
+    // keep the selection in view
+    let mut top = a.scroll.get().min(a.rows().saturating_sub(list_h));
+    if a.sel < top { top = a.sel; }
+    if a.sel >= top + list_h { top = a.sel + 1 - list_h; }
+    a.scroll.set(top);
+
+    let pad = |s: String| -> String {
+        let n = unicode_width::UnicodeWidthStr::width(s.as_str());
+        if n >= inner_w { s.chars().take(inner_w).collect() } else { format!("{s}{}", " ".repeat(inner_w - n)) }
+    };
+    let mut lines = vec![Line::from(Span::styled(" Pick how to start it. The choice is remembered for this folder.", dim))];
+    let n_opt = a.options.len();
+    for i in top..(top + list_h).min(a.rows()) {
         let sel = i == a.sel;
-        let base = if sel { Style::default().bg(t.menu_sel_bg).fg(t.menu_sel_fg) } else { Style::default() };
-        let cmd = match (&a.editing, sel) {
-            (Some(buf), true) => format!("{buf}▏"),
-            _ => a.commands[i].clone(),
+        let (text, tag, bold) = if i < n_opt {
+            let o = &a.options[i];
+            (format!("{:<7} {}", o.agent.short(), sanitize(&o.command)), if o.last_here { "last used here".to_string() } else { String::new() }, true)
+        } else {
+            match i - n_opt {
+                0 => ("Other command…".to_string(), "O".to_string(), false),
+                1 => ("Not now".to_string(), "N".to_string(), false),
+                _ => ("Never here".to_string(), "X".to_string(), false),
+            }
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", if sel { "›" } else { " " }), base),
-            Span::styled(format!("{:<12}", ag.label()), base.add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {cmd} "), base),
-        ]));
+        let left = format!(" {} {}", if sel { "›" } else { " " }, text);
+        let tagw = unicode_width::UnicodeWidthStr::width(tag.as_str());
+        let gap = inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(left.as_str()) + tagw + 1);
+        let row = pad(format!("{left}{}{tag} ", " ".repeat(gap)));
+        let mut st = if editing { dim } else { Style::default() };
+        if sel && !editing { st = Style::default().bg(t.menu_sel_bg).fg(t.menu_sel_fg); }
+        if bold && sel && !editing { st = st.add_modifier(Modifier::BOLD); }
+        lines.push(Line::from(Span::styled(row, st)));
     }
     lines.push(Line::from(""));
-    let hint = if a.editing.is_some() { " type the command, Enter starts it, Esc cancels" } else { " Enter start · E edit · N not now · X never here" };
-    lines.push(Line::from(Span::styled(hint, dim)));
+    let mut cursor = None;
+    if let Some(e) = &a.edit {
+        let label = format!(" Command:  starts as {} (Tab switches)", e.agent.label());
+        lines.push(Line::from(vec![Span::styled(" Command:", Style::default().add_modifier(Modifier::BOLD)), Span::styled(label[" Command:".len()..].to_string(), dim)]));
+        let bw = inner_w.saturating_sub(2);
+        let fw = bw.saturating_sub(2); // text cells inside the box
+        let bs = Style::default().fg(t.dialog_border).add_modifier(Modifier::BOLD);
+        lines.push(Line::from(Span::styled(format!(" ┌{}┐", "─".repeat(bw.saturating_sub(2))), bs)));
+        // scroll the text horizontally so the cursor stays inside the box
+        let chars: Vec<char> = e.buf.chars().collect();
+        let mut start = 0;
+        while start < e.cur && chars[start..e.cur].iter().map(|c| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0)).sum::<usize>() > fw.saturating_sub(1) { start += 1; }
+        let mut shown = String::new();
+        let mut used = 0;
+        for c in &chars[start..] {
+            let cw = unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0);
+            if used + cw > fw { break; }
+            shown.push(*c);
+            used += cw;
+        }
+        let before: usize = chars[start..e.cur].iter().map(|c| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0)).sum();
+        lines.push(Line::from(vec![
+            Span::styled(" │", bs),
+            Span::raw(format!("{shown}{}", " ".repeat(fw.saturating_sub(used)))),
+            Span::styled("│", bs),
+        ]));
+        lines.push(Line::from(Span::styled(format!(" └{}┘", "─".repeat(bw.saturating_sub(2))), bs)));
+        let (hint, st) = match &a.error {
+            Some(e) => (format!(" {e}"), Style::default().fg(t.error)),
+            None => (" Type the command · Enter start · Esc back to the list".to_string(), dim),
+        };
+        lines.push(Line::from(Span::styled(hint, st)));
+        // row of the text line: top border row + intro + list + blank + label + box top
+        let y = area.y + 1 + 1 + list_h as u16 + 1 + 1 + 1;
+        cursor = Some((area.x + 1 + 2 + before as u16, y));
+    } else {
+        lines.push(Line::from(Span::styled(" ↑↓ choose · Enter start · E edit · Esc not now", dim)));
+    }
+    let title = format!(" Start an agent in {} ", sanitize(&a.folder.chars().take(30).collect::<String>()));
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(" start an agent ", t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(&title, t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
+    if let Some(c) = cursor {
+        f.set_cursor_position(c);
+    }
 }
 
 fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {

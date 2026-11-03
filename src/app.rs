@@ -423,7 +423,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 Err(e) => format!("could not start {}: {e}", ag.key()),
             });
         }
-        Decision::Ask(list) => mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key)),
+        Decision::Ask(list) => mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key, &ask_ctx.dir)),
     }
 
     // The pinned-pane layout remembered for this workspace.
@@ -969,10 +969,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         } else if paste_search(&mut mode, &String::from_utf8_lossy(&b).replace(['\r', '\n'], "")) {
                             dirty = true;
                         } else if let Mode::Ask(x) = &mut mode {
-                            if let Some(buf) = x.editing.as_mut() {
-                                buf.push_str(&String::from_utf8_lossy(&b).replace(['\r', '\n'], ""));
-                                dirty = true;
-                            }
+                            x.paste(&String::from_utf8_lossy(&b).replace(['\r', '\n'], ""));
+                            dirty = true;
                         } else if matches!(pasting, Some((true, _))) { app.tabs[app.active].write(b); }
                         continue;
                     }
@@ -1344,7 +1342,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     let mut list = agents::detect(backend, &dir).await;
                                     if list.is_empty() { list = agents::ALL.to_vec(); }
                                     ask_ctx = AskCtx { key: agents::workspace_key(ws, &dir), dir, tab: None };
-                                    mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key));
+                                    mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key, &ask_ctx.dir));
                                 }
                             }
                             dirty = true;
@@ -1451,55 +1449,18 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             chunk = &[];
                         }
                         Mode::Ask(ref mut ask) => {
-                            // None = still deciding, Some(None) = not now, Some(Some(i)) = start agent i, plus `never`.
-                            let (mut start, mut later, mut never) = (None::<usize>, false, false);
-                            let mut i = 0;
-                            while i < chunk.len() {
-                                let b = chunk[i];
-                                if let Some(buf) = ask.editing.as_mut() {
-                                    match b {
-                                        b'\r' | b'\n' => {
-                                            let cmd = buf.trim().to_string();
-                                            if !cmd.is_empty() { ask.commands[ask.sel] = cmd; start = Some(ask.sel); }
-                                            ask.editing = None;
-                                            break;
-                                        }
-                                        0x1b if !matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) => { ask.editing = None; }
-                                        0x1b => { i += 2; while i < chunk.len() && !(0x40..=0x7e).contains(&chunk[i]) { i += 1; } }
-                                        0x7f | 0x08 => { buf.pop(); }
-                                        0x15 => buf.clear(),
-                                        c if c >= 0x20 => {
-                                            // keep multi-byte characters whole
-                                            let end = (i + 4).min(chunk.len());
-                                            let take = chunk[i..end].iter().position(|&x| x < 0x20 || x == 0x7f).unwrap_or(end - i);
-                                            buf.push_str(&String::from_utf8_lossy(&chunk[i..i + take]));
-                                            i += take - 1;
-                                        }
-                                        _ => {}
-                                    }
-                                } else {
-                                    match b {
-                                        0x1b if matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) => {
-                                            match chunk.get(i + 2) {
-                                                Some(b'A') => ask.sel = (ask.sel + ask.agents.len() - 1) % ask.agents.len(),
-                                                Some(b'B') => ask.sel = (ask.sel + 1) % ask.agents.len(),
-                                                _ => {}
-                                            }
-                                            i += 2;
-                                        }
-                                        0x1b => { later = true; break; }
-                                        b'\r' | b'\n' | b's' | b'S' => { start = Some(ask.sel); break; }
-                                        b'e' | b'E' => { ask.editing = Some(ask.commands[ask.sel].clone()); }
-                                        b'n' | b'N' => { later = true; break; }
-                                        b'x' | b'X' => { never = true; break; }
-                                        d @ b'1'..=b'9' if ((d - b'1') as usize) < ask.agents.len() => { ask.sel = (d - b'1') as usize; }
-                                        _ => {}
-                                    }
-                                }
-                                i += 1;
+                            let mut outcome = None;
+                            for k in crate::ask::parse(chunk) {
+                                if let Some(o) = ask.key(k) { outcome = Some(o); break; }
                             }
-                            if let Some(idx) = start {
-                                let (ag, cmd) = (ask.agents[idx], ask.commands[idx].clone());
+                            let (mut start, mut later, mut never) = (None::<(Agent, String)>, false, false);
+                            match outcome {
+                                Some(crate::ask::AskOutcome::Start(a, c)) => start = Some((a, c)),
+                                Some(crate::ask::AskOutcome::Later) => later = true,
+                                Some(crate::ask::AskOutcome::Never) => never = true,
+                                None => {}
+                            }
+                            if let Some((ag, cmd)) = start {
                                 mode = Mode::Shell;
                                 agent_state.remember(&ask_ctx.key, ag.key(), &cmd);
                                 if let Err(e) = agent_state.save() { message = Some(format!("could not save choice: {e}")); }
@@ -1616,7 +1577,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             if cancel { mode = Mode::Shell; }
                             if let Some((list, ctx)) = ask_req {
                                 ask_ctx = ctx;
-                                mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key));
+                                mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key, &ask_ctx.dir));
                             }
                             dirty = true;
                             chunk = &[];
@@ -1708,7 +1669,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         let mut list = agents::detect(backend, &dir).await;
                                         if list.is_empty() { list = agents::ALL.to_vec(); }
                                         ask_ctx = AskCtx { key: agents::workspace_key(ws, &dir), dir, tab: None };
-                                        mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key));
+                                        mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key, &ask_ctx.dir));
                                     }
                                     Action::Mouse => {
                                         mouse_on = !mouse_on;

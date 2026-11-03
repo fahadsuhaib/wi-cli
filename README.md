@@ -108,13 +108,25 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
     preview_refresh_debounce_ms = 5000  # wait this long after the last change before reloading
 
     [agents.claude]
-    command = "claude --continue"
+    command = "claude --continue"                  # your usual command, listed first
+    commands = ["claude", "cc", "claude-work"]     # more entry points (optional); same for [agents.codex]
 
     [[box]]
     name = "dev"
     host = "dev.example.com"
     user = "me"
     identity = "~/.ssh/id_ed25519"
+
+### Starting an agent
+
+In a folder with `CLAUDE.md`, `.claude`, `AGENTS.md` or `.codex`, wi asks once how to start the agent (menu, then A,
+"Start / change agent" asks from any folder). The popup is one list, each row an agent and its exact command:
+the command used here last time ("last used here"), your `[agents.*]` commands, the ones you used recently
+(8 per agent), then plain `claude` and `codex`. Up/Down and Enter start the selected row. `O` (or the "Other
+command..." row) opens a boxed text field with a real cursor: type any command (Left/Right/Home/End, Backspace,
+Delete, paste), Tab switches which agent it counts as, Enter starts it, Esc goes back to the list. `E` edits the
+selected row's command as a starting point. `N` or Esc is "Not now", `X` is "Never here". What you start is
+remembered for the folder and skips the question next time.
 
 A file preview that is on screen (side pane, preview tab or pinned pane) refreshes by itself when the file
 changes on disk: wi checks the modification time and size of the visible file once a second (every two on a

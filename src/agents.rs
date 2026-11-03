@@ -37,6 +37,14 @@ impl Agent {
         }
     }
 
+    /// Short name for list rows.
+    pub fn short(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude",
+            Agent::Codex => "Codex",
+        }
+    }
+
     pub fn from_key(k: &str) -> Option<Agent> {
         ALL.into_iter().find(|a| a.key() == k)
     }
@@ -75,6 +83,9 @@ pub struct State {
     /// Last command used per agent, offered as the default in new workspaces.
     #[serde(default)]
     pub last_command: BTreeMap<String, String>,
+    /// Commands recently used per agent, newest first, at most `COMMANDS_MAX`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub recent_commands: BTreeMap<String, Vec<String>>,
     /// Folders recently opened as a tab, most recent first, per workspace (`recents_key`).
     #[serde(default)]
     pub recent: BTreeMap<String, Vec<String>>,
@@ -103,6 +114,9 @@ pub struct PaneLayout {
     #[serde(default)]
     pub target: String,
 }
+
+/// How many recent commands are kept per agent.
+pub const COMMANDS_MAX: usize = 8;
 
 /// How many recent folders are kept per workspace.
 pub const RECENT_MAX: usize = 10;
@@ -144,7 +158,24 @@ impl State {
         self.workspace.insert(key.to_string(), Remembered { agent: agent.to_string(), command: command.to_string() });
         if agent != "none" && !command.is_empty() {
             self.last_command.insert(agent.to_string(), command.to_string());
+            let list = self.recent_commands.entry(agent.to_string()).or_default();
+            list.retain(|c| c != command);
+            list.insert(0, command.to_string());
+            list.truncate(COMMANDS_MAX);
         }
+    }
+
+    /// Recent commands for an agent, newest first; a `last_command` from an older state file
+    /// that is not in the list yet comes last.
+    pub fn commands_for(&self, agent: Agent) -> Vec<String> {
+        let mut v = self.recent_commands.get(agent.key()).cloned().unwrap_or_default();
+        if let Some(c) = self.last_command.get(agent.key())
+            && !c.is_empty()
+            && !v.contains(c)
+        {
+            v.push(c.clone());
+        }
+        v
     }
 }
 
@@ -174,10 +205,49 @@ pub fn command_for(agent: Agent, cfg: &Config, state: &State, key: &str) -> Stri
     {
         return r.command.clone();
     }
-    if let Some(c) = cfg.agents.get(agent.key()) {
-        return c.command.clone();
+    if let Some(c) = cfg.agents.get(agent.key()).and_then(|c| c.all().into_iter().next()) {
+        return c;
     }
     state.last_command.get(agent.key()).cloned().unwrap_or_else(|| agent.key().to_string())
+}
+
+/// One row of the start list: an agent and the exact command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartOption {
+    pub agent: Agent,
+    pub command: String,
+    /// This is what was started last in this folder.
+    pub last_here: bool,
+}
+
+/// The commands to offer, in order: what this folder remembers, then per agent (the ones
+/// `detected` in the folder first) the configured commands, the recent ones and the plain
+/// program name. Repeats are dropped. Every agent is always offered.
+pub fn start_options(detected: &[Agent], cfg: &Config, state: &State, key: &str) -> Vec<StartOption> {
+    let mut out: Vec<StartOption> = Vec::new();
+    let add = |out: &mut Vec<StartOption>, agent: Agent, command: &str, last_here: bool| {
+        let command = command.trim();
+        if !command.is_empty() && !out.iter().any(|o| o.agent == agent && o.command == command) {
+            out.push(StartOption { agent, command: command.to_string(), last_here });
+        }
+    };
+    if let Some(r) = state.workspace.get(key)
+        && let Some(a) = Agent::from_key(&r.agent)
+    {
+        add(&mut out, a, &r.command, true);
+    }
+    let order: Vec<Agent> = detected.iter().copied().chain(ALL.into_iter().filter(|a| !detected.contains(a))).collect();
+    let order: Vec<Agent> = order.iter().enumerate().filter(|(i, a)| !order[..*i].contains(a)).map(|(_, a)| *a).collect();
+    for a in order {
+        for c in cfg.agents.get(a.key()).map(|c| c.all()).unwrap_or_default() {
+            add(&mut out, a, &c, false);
+        }
+        for c in state.commands_for(a) {
+            add(&mut out, a, &c, false);
+        }
+        add(&mut out, a, a.key(), false);
+    }
+    out
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -245,7 +315,7 @@ mod tests {
         assert_eq!(command_for(Agent::Claude, &cfg, &st, "k"), "claude");
         st.last_command.insert("claude".into(), "claude --continue".into());
         assert_eq!(command_for(Agent::Claude, &cfg, &st, "k"), "claude --continue");
-        cfg.agents.insert("claude".into(), crate::config::AgentCfg { command: "claude --model opus".into() });
+        cfg.agents.insert("claude".into(), crate::config::AgentCfg { command: "claude --model opus".into(), ..Default::default() });
         assert_eq!(command_for(Agent::Claude, &cfg, &st, "k"), "claude --model opus");
         st.remember("k", "claude", "claude --resume");
         assert_eq!(command_for(Agent::Claude, &cfg, &st, "k"), "claude --resume");
@@ -302,5 +372,66 @@ mod tests {
         assert_eq!(back.workspace["local:/p"], rem("claude", "claude -c"));
         assert_eq!(back.workspace["box:b"].agent, "none");
         assert_eq!(back.last_command["claude"], "claude -c");
+    }
+
+    fn opts(detected: &[Agent], cfg: &Config, st: &State) -> Vec<(Agent, String, bool)> {
+        start_options(detected, cfg, st, "k").into_iter().map(|o| (o.agent, o.command, o.last_here)).collect()
+    }
+
+    #[test]
+    fn options_plain_defaults_offer_both_agents() {
+        let o = opts(&[Agent::Codex], &Config::default(), &State::default());
+        assert_eq!(o, vec![(Agent::Codex, "codex".into(), false), (Agent::Claude, "claude".into(), false)]);
+    }
+
+    #[test]
+    fn options_order_remembered_config_recent_default() {
+        let mut cfg = Config::default();
+        cfg.agents.insert("claude".into(), crate::config::AgentCfg { command: "cc".into(), commands: vec!["claude --continue".into(), "cc".into()] });
+        let mut st = State::default();
+        st.remember("other", "claude", "claude --resume");
+        st.remember("other", "claude", "claude --dangerously-skip-permissions");
+        st.remember("k", "claude", "claude --continue");
+        let o = opts(&[Agent::Claude], &cfg, &st);
+        let cmds: Vec<&str> = o.iter().map(|x| x.1.as_str()).collect();
+        assert_eq!(cmds, ["claude --continue", "cc", "claude --dangerously-skip-permissions", "claude --resume", "claude", "codex"]);
+        assert!(o[0].2 && o.iter().filter(|x| x.2).count() == 1, "only the remembered one is marked");
+    }
+
+    #[test]
+    fn options_remembered_other_agent_comes_first() {
+        let mut st = State::default();
+        st.remember("k", "codex", "codex --full-auto");
+        let o = opts(&[Agent::Claude], &Config::default(), &st);
+        assert_eq!(o[0], (Agent::Codex, "codex --full-auto".into(), true));
+        assert_eq!(o[1].1, "claude");
+    }
+
+    #[test]
+    fn recent_commands_capped_deduped_and_migrated() {
+        let mut st = State::default();
+        for i in 0..12 {
+            st.remember("k", "claude", &format!("claude --n{i}"));
+        }
+        st.remember("k", "claude", "claude --n5");
+        let r = st.commands_for(Agent::Claude);
+        assert_eq!(r.len(), COMMANDS_MAX);
+        assert_eq!(r[0], "claude --n5");
+        assert_eq!(r.iter().filter(|c| *c == "claude --n5").count(), 1);
+        let old: State = toml::from_str("[last_command]\nclaude = \"cc\"\n").unwrap();
+        assert!(old.recent_commands.is_empty());
+        assert_eq!(old.commands_for(Agent::Claude), vec!["cc"]);
+        let o = opts(&[Agent::Claude], &Config::default(), &old);
+        assert_eq!(o[0].1, "cc");
+        let back: State = toml::from_str(&toml::to_string_pretty(&st).unwrap()).unwrap();
+        assert_eq!(back.commands_for(Agent::Claude), r);
+    }
+
+    #[test]
+    fn config_commands_list_and_command_both_work() {
+        let c: Config = toml::from_str("[agents.claude]\ncommand = \"a\"\n[agents.codex]\ncommands = [\"b\", \"c\"]\n").unwrap();
+        assert_eq!(c.agents["claude"].all(), vec!["a"]);
+        assert_eq!(c.agents["codex"].all(), vec!["b", "c"]);
+        assert_eq!(command_for(Agent::Codex, &c, &State::default(), "k"), "b");
     }
 }
