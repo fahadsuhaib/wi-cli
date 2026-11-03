@@ -1,6 +1,6 @@
 # usage: python dev/pty_theme.py <scratch-dir> local   (needs pyte)
-# Themes: dark / light / auto (OSC 11 answered by this harness), live toggle from the menu and
-# persistence in state.toml, ANSI remap, 256-colour fallback, and theme colours in the previews.
+# Themes: dark / light / auto (OSC 11 answered by this harness), the menu cycle auto -> dark -> light -> auto
+# and persistence in state.toml (auto saves nothing), ANSI remap, 256-colour fallback, and theme colours in the previews.
 # Every scenario gets its own config directory so state.toml never leaks between them.
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, pyte
 from pyte.graphics import FG_BG_256
@@ -52,11 +52,12 @@ def check(name, cond):
 
 class Run:
     """One wi in a pty. `answer` is written back when wi asks for the terminal background."""
-    def __init__(self, tag, cfg_text="", answer=None, colorterm="truecolor", env_extra=None, fresh=True):
+    def __init__(self, tag, cfg_text="", answer=None, colorterm="truecolor", env_extra=None, fresh=True, state_text=None):
         self.cfgdir = S + "/theme_" + tag
         if fresh: shutil.rmtree(self.cfgdir, ignore_errors=True)
         os.makedirs(self.cfgdir, exist_ok=True)
         open(self.cfgdir + "/config.toml", "w").write(cfg_text)
+        if state_text is not None: open(self.cfgdir + "/state.toml", "w").write(state_text)
         env = {k: v for k, v in os.environ.items() if k not in ("COLORFGBG", "COLORTERM")}
         env.update(WICLI_CONFIG=self.cfgdir + "/config.toml", TERM="xterm-256color", **(env_extra or {}))
         if colorterm: env["COLORTERM"] = colorterm
@@ -130,25 +131,53 @@ r = Run("fgbgdark", answer=None, env_extra={"COLORFGBG": "15;0"})
 check("auto: COLORFGBG 15;0 picks dark", r.header_bg() == T["dark"]["bar_bg"])
 r.quit()
 
-# ------------------------------------------------------------ menu toggle and persistence
+# ------------------------------------------------------------ menu cycle and persistence
+def saved(r):
+    p = r.cfgdir + "/state.toml"
+    return open(p).read() if os.path.exists(p) else ""
 r = Run("toggle", '[defaults]\ntheme = "auto"\n', answer=DARK_REPLY)
-check("toggle: starts dark", r.header_bg() == T["dark"]["bar_bg"])
+check("cycle: starts dark (terminal answered dark)", r.header_bg() == T["dark"]["bar_bg"])
 r.send(MENU, 0.6)
-check("toggle: the menu lists Theme", "Theme" in r.text())
+check("cycle: the menu shows the mode and what auto picked", "Theme: auto (dark)" in r.text())
 r.send(b"y", 0.8)
-check("toggle: menu Y switches to light live", r.header_bg() == T["light"]["bar_bg"] and r.status_bg() == T["light"]["status_bg"])
-st = open(r.cfgdir + "/state.toml").read() if os.path.exists(r.cfgdir + "/state.toml") else ""
-check("toggle: the choice is saved in state.toml", 'theme = "light"' in st)
+check("cycle: first Y goes auto -> dark", r.header_bg() == T["dark"]["bar_bg"] and 'theme = "dark"' in saved(r))
+r.send(MENU, 0.6)
+check("cycle: the label now reads Theme: dark", "Theme: dark" in r.text() and "auto (" not in r.text())
+r.send(b"y", 0.8)
+check("cycle: second Y goes dark -> light live", r.header_bg() == T["light"]["bar_bg"] and r.status_bg() == T["light"]["status_bg"])
+check("cycle: light is saved in state.toml", 'theme = "light"' in saved(r))
 r.send(MENU + b"y", 0.8)
-check("toggle: again switches back to dark", r.header_bg() == T["dark"]["bar_bg"])
-r.send(MENU + b"y", 0.8)
+check("cycle: third Y goes light -> auto and re-detects at once (terminal said dark)", r.header_bg() == T["dark"]["bar_bg"])
+check("cycle: auto saves nothing (the override is cleared)", "theme" not in saved(r))
+check("cycle: the status line says what auto did", "theme: auto -> dark" in r.text())
+r.send(MENU, 0.6)
+check("cycle: label back to auto (dark)", "Theme: auto (dark)" in r.text())
+r.send(b"\x1b", 0.4)
+r.send(MENU + b"y", 0.6); r.send(MENU + b"y", 0.8)   # dark, then light: saved again
 r.quit()
 r = Run("toggle", '[defaults]\ntheme = "auto"\n', answer=DARK_REPLY, fresh=False)
-check("toggle: a restart with theme = auto restores light", r.header_bg() == T["light"]["bar_bg"])
-check("toggle: and does not ask the terminal again", not r.asked)
+check("cycle: a restart with theme = auto restores the saved light", r.header_bg() == T["light"]["bar_bg"])
 r.quit()
 r = Run("toggle", '[defaults]\ntheme = "dark"\n', fresh=False)
-check("toggle: an explicit config theme beats the saved choice", r.header_bg() == T["dark"]["bar_bg"])
+check("cycle: an explicit config theme beats the saved choice", r.header_bg() == T["dark"]["bar_bg"])
+r.quit()
+
+# The reported bug: a light terminal stuck on a saved dark. Cycling back to auto fixes it live,
+# and the next start detects the terminal again.
+r = Run("stuck", '[defaults]\ntheme = "auto"\n', answer=LIGHT_REPLY, state_text='theme = "dark"\n')
+check("stuck: the saved dark wins at start", r.header_bg() == T["dark"]["bar_bg"])
+r.send(MENU + b"y", 0.8)
+check("stuck: Y goes dark -> light", r.header_bg() == T["light"]["bar_bg"])
+r.send(MENU + b"y", 0.8)
+check("stuck: Y again goes to auto, which is light on this terminal", r.header_bg() == T["light"]["bar_bg"] and "theme: auto -> light" in r.text())
+check("stuck: the saved override is gone", "theme" not in saved(r))
+r.quit()
+r = Run("stuck", '[defaults]\ntheme = "auto"\n', answer=LIGHT_REPLY, fresh=False)
+check("stuck: the next start asks the terminal and picks light", r.asked and r.header_bg() == T["light"]["bar_bg"])
+r.quit()
+r = Run("stuckfgbg", '[defaults]\ntheme = "auto"\n', answer=None, env_extra={"COLORFGBG": "0;15"}, state_text='theme = "dark"\n')
+r.send(MENU + b"y", 0.8); r.send(MENU + b"y", 0.8)
+check("auto with a silent terminal falls back to COLORFGBG live", r.header_bg() == T["light"]["bar_bg"] and "COLORFGBG" in r.text())
 r.quit()
 
 # ------------------------------------------------------------ ANSI remap and untouched colours

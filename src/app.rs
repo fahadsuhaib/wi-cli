@@ -203,6 +203,60 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     for name in &restored {
         open_tab_in(&mut app, backend, &events_tx, cols, rows, Some(name), None).await?;
     }
+    // A restart (menu "Restart wi", or after an update) left the layout in state.toml: reopen it.
+    let mut restore: Option<crate::restart::Snapshot> = None;
+    let mut restore_ids: Vec<Option<usize>> = Vec::new();
+    if std::env::var_os(crate::restart::MARKER).is_some() {
+        // SAFETY: still single-threaded here as far as env access goes; nothing else reads it.
+        unsafe { std::env::remove_var(crate::restart::MARKER) };
+        let mut st = agents::State::load();
+        if let Some(mut sn) = st.restart.take() {
+            let _ = st.save();
+            if sn.key == agents::workspace_key(ws, &app.root) {
+                sn.clamp();
+                restore = Some(sn);
+            }
+        }
+    }
+    if let Some(sn) = &restore {
+        let st = agents::State::load();
+        if !sn.side.is_empty() { app.side = Side::parse(&sn.side); }
+        if (crate::tab::PCT_MIN..=crate::tab::PCT_MAX).contains(&sn.pct) { app.pct = sn.pct; }
+        app.pin_side = if sn.pin_side == "left" { Side::Left } else { Side::Right };
+        let ropts = Opts { csv_rows: cfg.defaults.csv_rows };
+        let rcap = cfg.defaults.preview_read_kb as usize * 1024;
+        let (c, r) = shell_size(sn.tabs.len().max(1))?;
+        for t in &sn.tabs {
+            let mut id = None;
+            if t.kind == "preview" {
+                if let Ok((bytes, total)) = backend.read_prefix(&t.path, rcap).await {
+                    let p = Preview::build(&t.path, &bytes, total, &ropts);
+                    let nid = app.next_id;
+                    app.next_id += 1;
+                    app.tabs.push(Tab::new_preview(nid, p));
+                    id = Some(nid);
+                }
+            } else if restored.is_empty() {
+                // Local shells (and remote ones without tmux) start fresh where they were.
+                let dir = if t.cwd.is_empty() { None } else { Some(t.cwd.as_str()) };
+                let nid = app.next_id;
+                if open_tab_in(&mut app, backend, &events_tx, c, r, None, dir).await.is_ok() {
+                    id = Some(nid);
+                    if t.kind == "agent" && let Some(ag) = Agent::from_key(&t.agent) {
+                        let key = agents::workspace_key(ws, &t.cwd);
+                        let cmd = agents::command_for(ag, cfg, &st, &key);
+                        let idx = app.tabs.len() - 1;
+                        run_agent_in(&mut app, idx, ag, &cmd);
+                    }
+                }
+            }
+            restore_ids.push(id);
+        }
+        if let Some(Some(id)) = restore_ids.get(sn.active) && let Some(i) = app.tabs.iter().position(|t| t.id == *id) {
+            app.active = i;
+        }
+        refresh_labels(&mut app);
+    }
     if app.tabs.is_empty() {
         open_tab(&mut app, backend, &events_tx, cols, rows).await?;
     }
@@ -222,6 +276,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut mode = Mode::Shell;
     let mut mouse_on = cfg.defaults.mouse;
     let mut agent_state = agents::State::load();
+    let mut theme_mode = crate::theme::Mode::at_start(&cfg.defaults.theme, agent_state.theme.as_deref());
+    // "Update wi" runs on worker threads and reports back here; one at a time.
+    let (upd_tx, mut upd_rx) = mpsc::unbounded_channel::<UpdEv>();
+    let mut updating = false;
+    let mut upd_held: Option<UpdEv> = None;
     let mut ask_ctx = AskCtx { key: agents::workspace_key(ws, &app.root), dir: app.root.clone(), tab: None };
     let rkey = agents::recents_key(ws);
     let pane_key = agents::workspace_key(ws, &app.root);
@@ -247,7 +306,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
     let mut pasting: Option<(bool, bool)> = None;
     let mut message: Option<String> = None;
-    if ws.is_remote() && !backend.has_tmux() {
+    if restore.is_some() {
+        message = Some(format!("wi restarted: {} tab(s) back", app.tabs.len()));
+    } else if ws.is_remote() && !backend.has_tmux() {
         message = Some("no tmux on this box (or use_tmux = false): plain shells, quitting ends them".into());
     } else if !restored.is_empty() {
         message = Some(format!("reattached {} running session(s)", restored.len()));
@@ -257,7 +318,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     // once (and again when the Git view opens or reloads); no timers.
     let mut detail = base_detail.clone();
     let remote = ws.is_remote();
-    let items = menu_items_for(remote, backend.has_tmux());
+    ui::set_theme_mode(theme_mode);
+    let mut items = menu_items_for(remote, backend.has_tmux());
     ui::set_tmux_menu(backend.has_tmux());
     let opts = Opts { csv_rows: cfg.defaults.csv_rows };
     let read_cap = cfg.defaults.preview_read_kb as usize * 1024;
@@ -273,7 +335,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     // Recognise Claude Code / Codex workspaces: start the remembered agent, or ask the first time.
     let root = app.root.clone();
     let detected = agents::detect(backend, &root).await;
-    match agents::decide(&cfg.defaults.agent_start, &detected, agent_state.workspace.get(&ask_ctx.key)) {
+    let decision = if restore.is_some() { Decision::Nothing } else { agents::decide(&cfg.defaults.agent_start, &detected, agent_state.workspace.get(&ask_ctx.key)) };
+    match decision {
         Decision::Nothing => {}
         Decision::Start(ag) => {
             let cmd = agents::command_for(ag, cfg, &agent_state, &ask_ctx.key);
@@ -286,7 +349,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     }
 
     // The pinned-pane layout remembered for this workspace.
-    if let Some(l) = agent_state.panes.get(&pane_key).cloned() {
+    if let Some(sn) = restore.as_ref().filter(|s| s.pinned.is_some()) {
+        let keep = app.tabs[app.active].id;
+        if let Some(Some(id)) = sn.pinned.and_then(|p| restore_ids.get(p)) {
+            let ps = app.pin_side;
+            match pin_tab(&mut app, backend, &events_tx, *id, ps).await {
+                Ok(()) => if keep != *id && let Some(i) = app.tabs.iter().position(|t| t.id == keep) { app.active = i; sync_pin(&mut app); },
+                Err(e) => message = Some(format!("pinned pane not restored: {e}")),
+            }
+        }
+    } else if restore.is_none() && let Some(l) = agent_state.panes.get(&pane_key).cloned() {
         app.pin_side = if l.side == "left" { Side::Left } else { Side::Right };
         if (crate::tab::PCT_MIN..=crate::tab::PCT_MAX).contains(&l.pct) { app.pct = l.pct; }
         let pinned = match l.kind.as_str() {
@@ -324,6 +396,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     }
 
     loop {
+        // An update answer that arrived while another screen was open waits for the shell.
+        if matches!(mode, Mode::Shell) && let Some(ev) = upd_held.take() {
+            on_update_event(ev, &mut mode, &mut pending, &mut message, &mut app, &mut updating, &opts, remote, backend.has_tmux());
+            dirty = true;
+        }
         // Keep the header on the active tab's folder and that folder's branch.
         if let Some(fi) = folder_tab(&app) {
             let (fid, fdir) = (app.tabs[fi].id, app.tabs[fi].dir.as_str());
@@ -1117,13 +1194,41 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             }
                             if yes {
                                 mode = Mode::Shell;
-                                if let Some(p) = pending.take() {
-                                    run_pending(p, backend, ws, &mut mode, &mut fetching, &mut message);
+                                match pending.take() {
+                                    Some(Pending::UpdateCheck) => {
+                                        updating = true;
+                                        message = Some("update: checking github.com ...".into());
+                                        let tx = upd_tx.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            let _ = tx.send(UpdEv::Checked(crate::update::check(env!("CARGO_PKG_VERSION"))));
+                                        });
+                                    }
+                                    Some(Pending::UpdateApply(rel)) => {
+                                        message = Some("update: starting download ...".into());
+                                        let tx = upd_tx.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            let mut status = |s: String| { let _ = tx.send(UpdEv::Status(format!("update: {s}"))); };
+                                            let r = crate::update::install(&rel, &mut status);
+                                            let _ = tx.send(UpdEv::Installed(r));
+                                        });
+                                    }
+                                    Some(Pending::Restart { .. }) => {
+                                        message = Some(do_restart(&app, backend, ws, &mut agent_state, mouse_on).await);
+                                        if keys_on { crate::term::enable_key_protocol(); }
+                                        repaint = true;
+                                    }
+                                    Some(p) => run_pending(p, backend, ws, &mut mode, &mut fetching, &mut message),
+                                    None => {}
                                 }
                             } else if no {
                                 mode = Mode::Shell;
+                                if matches!(pending, Some(Pending::UpdateApply(_))) { updating = false; }
+                                message = Some(match pending {
+                                    Some(Pending::Restart { updated: Some(v) }) => format!("Updated to {v} — restart wi when convenient"),
+                                    Some(Pending::Restart { updated: None }) => "restart wi when convenient".to_string(),
+                                    _ => "cancelled".to_string(),
+                                });
                                 pending = None;
-                                message = Some("cancelled".into());
                             }
                             dirty = true;
                             chunk = &[];
@@ -1444,14 +1549,49 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         message = Some(if mouse_on { "mouse on".to_string() } else { "mouse off: select and copy text natively".to_string() });
                                     }
                                     Action::Theme => {
-                                        let k = crate::theme::kind().other();
+                                        use crate::theme::{Mode as TM, auto_kind, kind_from_colorfgbg};
+                                        theme_mode = theme_mode.next();
+                                        let fgbg = std::env::var("COLORFGBG").ok();
+                                        let (k, how) = match theme_mode {
+                                            TM::Dark => (crate::theme::Kind::Dark, String::new()),
+                                            TM::Light => (crate::theme::Kind::Light, String::new()),
+                                            // Not asked again live (the reply would arrive on the stdin wi reads):
+                                            // the answer from start-up, else COLORFGBG, else dark.
+                                            TM::Auto => {
+                                                let det = crate::theme::detected();
+                                                let how = if det.is_some() { "terminal background seen at start" }
+                                                    else if fgbg.as_deref().and_then(kind_from_colorfgbg).is_some() { "COLORFGBG" }
+                                                    else { "terminal did not say, so dark" };
+                                                (auto_kind(det, fgbg.as_deref()), format!(" ({how}; re-detected on every start)"))
+                                            }
+                                        };
                                         crate::theme::set_kind(k);
-                                        agent_state.theme = Some(k.name().to_string());
+                                        ui::set_theme_mode(theme_mode);
+                                        items = menu_items_for(remote, backend.has_tmux());
+                                        agent_state.theme = theme_mode.saved();
+                                        let cfg_note = if crate::theme::Kind::parse(&cfg.defaults.theme).is_some() { format!(" (config theme = \"{}\" wins on restart)", cfg.defaults.theme) } else { String::new() };
                                         message = Some(match agent_state.save() {
-                                            Ok(()) if crate::theme::Kind::parse(&cfg.defaults.theme).is_some() => format!("theme: {} (config theme = \"{}\" wins on restart)", k.name(), cfg.defaults.theme),
-                                            Ok(()) => format!("theme: {}", k.name()),
-                                            Err(e) => format!("theme: {} (could not save: {e})", k.name()),
+                                            Ok(()) => format!("theme: {}{}{how}{cfg_note}", theme_mode.name(), if theme_mode == TM::Auto { format!(" -> {}", k.name()) } else { String::new() }),
+                                            Err(e) => format!("theme: {} (could not save: {e})", theme_mode.name()),
                                         });
+                                    }
+                                    Action::Restart => {
+                                        mode = restart_dialog(&app, remote, backend.has_tmux(), None);
+                                        pending = Some(Pending::Restart { updated: None });
+                                    }
+                                    Action::Update => {
+                                        if updating {
+                                            message = Some("an update is already running".into());
+                                        } else {
+                                            let mut lines = vec![
+                                                "This contacts github.com to check the latest release of".to_string(),
+                                                format!("{} and nothing else. Nothing is sent until you confirm.", crate::update::REPO),
+                                                "It updates this computer's wi, never a remote box. Your tabs stay open.".to_string(),
+                                            ];
+                                            if let Some(u) = crate::update::override_url() { lines.push(format!("(test source: {u})")); }
+                                            mode = Mode::Confirm(Confirm { title: "Update wi: check for a new version?".into(), lines, yes: "Check".into() });
+                                            pending = Some(Pending::UpdateCheck);
+                                        }
                                     }
                                     Action::SwitchPane => {
                                         let main = main_rect(&app)?;
@@ -1633,6 +1773,14 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 dirty = true;
             }
             _ = tokio::time::sleep(Duration::from_millis(250)), if fetching.is_some() => { dirty = true; }
+            Some(ev) = upd_rx.recv() => {
+                if matches!(ev, UpdEv::Status(_)) || matches!(mode, Mode::Shell) {
+                    on_update_event(ev, &mut mode, &mut pending, &mut message, &mut app, &mut updating, &opts, remote, backend.has_tmux());
+                } else {
+                    upd_held = Some(ev);
+                }
+                dirty = true;
+            }
             _ = sigterm.recv() => return finish(&app, backend).await,
             _ = sighup.recv() => return finish(&app, backend).await,
             _ = sigint.recv() => return finish(&app, backend).await,
@@ -2227,6 +2375,142 @@ enum Pending {
     OpenLocal(std::path::PathBuf),
     /// Download from the box into the cache, then open.
     Fetch { remote: String },
+    /// Update wi: contact GitHub to look for a newer release.
+    UpdateCheck,
+    /// Update wi: download, verify and install this release.
+    UpdateApply(crate::update::Release),
+    /// Restart wi in place; `updated` is the version just installed, if any.
+    Restart { updated: Option<String> },
+}
+
+/// What an update worker thread reports.
+enum UpdEv {
+    Status(String),
+    Checked(Result<crate::update::Checked, String>),
+    Installed(Result<crate::update::Installed, String>),
+}
+
+fn restart_dialog(app: &App, remote: bool, tmux: bool, updated: Option<&str>) -> Mode {
+    Mode::Confirm(Confirm {
+        title: match updated {
+            Some(v) => format!("Updated to {v}. Restart wi now?"),
+            None => "Restart wi now?".into(),
+        },
+        lines: vec![crate::restart::summary(app.tabs.len(), remote, tmux), "No: keep running; restart wi when convenient.".into()],
+        yes: "Restart".into(),
+    })
+}
+
+/// The session as it is now, for the restarted wi.
+async fn build_snapshot(app: &App, backend: &Backend, ws: &Workspace) -> crate::restart::Snapshot {
+    use crate::restart::{SnapTab, Snapshot};
+    let where_ = if ws.is_remote() { "remote" } else { "local" };
+    let mut tabs = Vec::new();
+    for t in &app.tabs {
+        if let Some(p) = &t.preview {
+            if p.path.starts_with('/') {
+                tabs.push(SnapTab { kind: "preview".into(), backend: where_.into(), title: t.title.clone(), path: p.path.clone(), ..Default::default() });
+            } else {
+                tabs.push(SnapTab { kind: "preview".into(), backend: where_.into(), title: t.title.clone(), ..Default::default() });
+            }
+            continue;
+        }
+        let cwd = crate::cwd::tab_cwd(backend, t.compat.cwd.as_deref(), t.handle.as_ref().and_then(|h| h.pid()), app.sessions.get(&t.id).map(String::as_str)).await.unwrap_or_else(|| t.dir.clone());
+        tabs.push(SnapTab {
+            kind: if t.agent.is_some() { "agent" } else { "shell" }.into(),
+            backend: where_.into(),
+            cwd,
+            title: t.title.clone(),
+            agent: t.agent.clone().unwrap_or_default(),
+            path: String::new(),
+        });
+    }
+    Snapshot {
+        key: agents::workspace_key(ws, &app.root),
+        active: app.active,
+        pinned: app.pinned.and_then(|id| app.tabs.iter().position(|t| t.id == id)),
+        pin_side: app.pin_side.name().into(),
+        side: app.side.name().into(),
+        pct: app.pct,
+        tabs,
+    }
+}
+
+/// Save the layout and exec this same file again. Only returns when that failed (the terminal
+/// is put back and wi keeps running); the text says why.
+async fn do_restart(app: &App, backend: &Backend, ws: &Workspace, state: &mut agents::State, mouse_on: bool) -> String {
+    use std::os::unix::process::CommandExt;
+    let exe = match std::env::current_exe() {
+        Ok(p) => std::path::PathBuf::from(crate::restart::strip_deleted(&p.to_string_lossy())),
+        Err(e) => return format!("could not restart: {e}"),
+    };
+    if !exe.is_file() {
+        return format!("could not restart: {} is missing", exe.display());
+    }
+    state.restart = Some(build_snapshot(app, backend, ws).await);
+    if let Err(e) = state.save() {
+        state.restart = None;
+        return format!("could not restart: cannot save the layout ({e})");
+    }
+    crate::term::restore_terminal();
+    let err = std::process::Command::new(&exe).args(std::env::args_os().skip(1)).env(crate::restart::MARKER, "1").exec();
+    state.restart = None;
+    let _ = state.save();
+    if let Ok(g) = TermGuard::enter(mouse_on) { std::mem::forget(g); }
+    format!("could not restart: {err} (wi keeps running)")
+}
+
+/// Act on a worker's report: ask the second question, or tell the result.
+#[allow(clippy::too_many_arguments)]
+fn on_update_event(ev: UpdEv, mode: &mut Mode, pending: &mut Option<Pending>, message: &mut Option<String>, app: &mut App, updating: &mut bool, opts: &Opts, remote: bool, tmux: bool) {
+    use crate::update::{Checked, Installed};
+    match ev {
+        UpdEv::Status(s) => *message = Some(s),
+        UpdEv::Checked(Err(e)) => {
+            *updating = false;
+            *message = Some(format!("update: {e}"));
+        }
+        UpdEv::Checked(Ok(Checked::UpToDate(v))) => {
+            *updating = false;
+            *message = Some(format!("wi {v} is up to date"));
+        }
+        UpdEv::Checked(Ok(Checked::Newer(rel))) => {
+            let cur = env!("CARGO_PKG_VERSION");
+            let size = rel.size.map(|n| format!("downloads ~{:.1} MB, ", n as f64 / 1_048_576.0)).unwrap_or_else(|| "downloads the release archive, ".into());
+            *mode = Mode::Confirm(Confirm {
+                title: format!("Update {cur} -> {}?", rel.version),
+                lines: vec![format!("{size}verifies SHA256, replaces this binary."), "Open tabs keep running; restart wi afterwards.".into()],
+                yes: "Update".into(),
+            });
+            *pending = Some(Pending::UpdateApply(rel));
+        }
+        UpdEv::Installed(Err(e)) => {
+            *updating = false;
+            *message = Some(format!("update failed: {e}"));
+        }
+        UpdEv::Installed(Ok(Installed::Done(v))) => {
+            *updating = false;
+            *message = Some(format!("Updated to {v} — restart wi to use it"));
+            *mode = restart_dialog(app, remote, tmux, Some(&v));
+            *pending = Some(Pending::Restart { updated: Some(v) });
+        }
+        UpdEv::Installed(Ok(Installed::NeedsSudo { tmp, target, version })) => {
+            *updating = false;
+            let text = format!(
+                "wi {version} is downloaded and verified, but its folder is not writable by you:\n{}\n\nwi does not use sudo. Run this in a shell tab (one command), then restart wi:\n\n{}\n",
+                target.parent().unwrap_or(&target).display(),
+                crate::update::sudo_command(&tmp, &target)
+            );
+            let p = Preview::build("wi-update.txt", text.as_bytes(), text.len() as u64, opts);
+            let id = app.next_id;
+            app.next_id += 1;
+            app.tabs.push(Tab::new_preview(id, p));
+            app.active = app.tabs.len() - 1;
+            sync_pin(app);
+            let _ = resize_all(app);
+            *message = Some("update: install folder is not writable; the command to run is in the wi-update.txt tab".to_string());
+        }
+    }
 }
 
 struct HintState {
@@ -2695,6 +2979,7 @@ fn run_pending<'a>(p: Pending, backend: &'a Backend, ws: &Workspace, mode: &mut 
                 Err(e) => e,
             });
         }
+        Pending::UpdateCheck | Pending::UpdateApply(_) | Pending::Restart { .. } => {} // started by the Confirm handler
         Pending::Fetch { remote } => {
             let box_name = match ws {
                 Workspace::Remote(b) => b.name.clone(),

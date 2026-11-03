@@ -78,6 +78,9 @@ pub struct State {
     /// Folders recently opened as a tab, most recent first, per workspace (`recents_key`).
     #[serde(default)]
     pub recent: BTreeMap<String, Vec<String>>,
+    /// Session layout written by "Restart wi" and consumed (removed) by the restarted wi.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<crate::restart::Snapshot>,
     /// Pinned-pane layout per workspace (`workspace_key`).
     #[serde(default)]
     pub panes: BTreeMap<String, PaneLayout>,

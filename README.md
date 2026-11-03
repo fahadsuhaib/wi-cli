@@ -38,7 +38,8 @@ wi supports macOS and Linux.
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
   `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation
 - Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
-- Search in files, find file, find in output; dark and light themes
+- Search in files, find file, find in output; dark and light themes (Y cycles auto, dark, light; auto follows your terminal)
+- Update wi from the menu (search "update"): asks before contacting github.com, checks the SHA256, replaces the binary, then offers to restart wi with the same tabs ("Restart wi" does the restart alone)
 
 ## Keys
 
@@ -54,7 +55,7 @@ wi supports macOS and Linux.
 | K | Find file | S | Scroll |
 | U | Find in output | W | Switch pane |
 | A | Start / change agent | V | Close preview |
-| M | Mouse on/off | Y | Theme dark / light |
+| M | Mouse on/off | Y | Theme: cycles auto, dark, light |
 | R | Reconnect (remote) | I / Q | Info / quit |
 
 Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOARD.md).

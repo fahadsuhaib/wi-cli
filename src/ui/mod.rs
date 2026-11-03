@@ -28,8 +28,12 @@ pub enum Action {
     NextTab,
     PrevTab,
     Mouse,
-    /// Switch between the dark and light theme.
+    /// Cycle the theme: auto, dark, light.
     Theme,
+    /// Check for a newer wi release and install it (local binary only, after confirmations).
+    Update,
+    /// Restart wi in place (the same tabs come back).
+    Restart,
     Agent,
     CloseTab,
     Reconnect,
@@ -79,6 +83,33 @@ pub fn menu_items(remote: bool) -> Vec<&'static MenuItem> {
 pub const DETACH_ITEM: MenuItem = MenuItem { label: "Detach (keep sessions)", key: 'q', action: Action::Quit, remote_only: true, section: "SESSION", keywords: &["quit", "exit", "disconnect", "leave"] };
 pub const END_ITEM: MenuItem = MenuItem { label: "End sessions and quit", key: 'e', action: Action::EndAndQuit, remote_only: true, section: "SESSION", keywords: &["quit", "exit", "kill", "close"] };
 
+const fn theme_entry(label: &'static str) -> MenuItem {
+    MenuItem { label, key: 'y', action: Action::Theme, remote_only: false, section: "VIEW", keywords: &["dark", "light", "auto", "colour", "color"] }
+}
+static THEME_ITEMS: [MenuItem; 4] = [
+    theme_entry("Theme: auto (dark)"),
+    theme_entry("Theme: auto (light)"),
+    theme_entry("Theme: dark"),
+    theme_entry("Theme: light"),
+];
+
+/// The theme entry showing the current mode (and, for auto, what it picked).
+pub fn theme_item(mode: theme::Mode, kind: theme::Kind) -> &'static MenuItem {
+    &THEME_ITEMS[match (mode, kind) {
+        (theme::Mode::Auto, theme::Kind::Dark) => 0,
+        (theme::Mode::Auto, theme::Kind::Light) => 1,
+        (theme::Mode::Dark, _) => 2,
+        (theme::Mode::Light, _) => 3,
+    }]
+}
+
+/// Swap the menu's theme entry for the one that shows `mode`.
+pub fn set_theme_item(items: &mut [&'static MenuItem], mode: theme::Mode, kind: theme::Kind) {
+    if let Some(slot) = items.iter_mut().find(|m| m.action == Action::Theme) {
+        *slot = theme_item(mode, kind);
+    }
+}
+
 static TMUX_MENU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Tell the menu that shells live in tmux (set once after connecting).
@@ -86,9 +117,22 @@ pub fn set_tmux_menu(on: bool) {
     TMUX_MENU.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+static THEME_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Tell the menu which theme mode is set (its entry shows it).
+pub fn set_theme_mode(m: theme::Mode) {
+    let v = match m { theme::Mode::Auto => 0, theme::Mode::Dark => 1, theme::Mode::Light => 2 };
+    THEME_MODE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn theme_mode() -> theme::Mode {
+    match THEME_MODE.load(std::sync::atomic::Ordering::Relaxed) { 1 => theme::Mode::Dark, 2 => theme::Mode::Light, _ => theme::Mode::Auto }
+}
+
 /// Menu entries for a workspace, with the Quit entry replaced by Detach / End for tmux boxes.
 pub fn menu_items_for(remote: bool, tmux: bool) -> Vec<&'static MenuItem> {
     let mut items = menu_items(remote);
+    set_theme_item(&mut items, theme_mode(), theme::kind());
     if tmux && let Some(i) = items.iter().position(|m| m.action == Action::Quit) {
         items[i] = &DETACH_ITEM;
         items.insert(i + 1, &END_ITEM);
@@ -125,12 +169,14 @@ pub const MENU: &[MenuItem] = &[
     mi("Swap pane sides", NO_KEY, Action::SwapSides, false, "TABS", &["pane", "split", "flip", "left", "right", "move"]),
     mi("Unsplit (unpin)", NO_KEY, Action::Unsplit, false, "TABS", &["pane", "split", "single", "pin", "close"]),
     mi("Scroll", 's', Action::Scroll, false, "VIEW", &["history", "back", "up", "scrollback"]),
-    mi("Theme dark / light", 'y', Action::Theme, false, "VIEW", &["dark", "light", "colour", "color"]),
+    mi("Theme: auto", 'y', Action::Theme, false, "VIEW", &["dark", "light", "auto", "colour", "color"]),
     mi("Mouse on/off", 'm', Action::Mouse, false, "VIEW", &["select", "copy", "click"]),
     mi("Start / change agent", 'a', Action::Agent, false, "AGENT", &["claude", "codex", "ai", "assistant"]),
     mi("Info", 'i', Action::Info, false, "SESSION", &["status", "folder", "box", "about"]),
     mi("Reconnect", 'r', Action::Reconnect, true, "SESSION", &["connection", "ssh", "retry"]),
     mi("Download", 'd', Action::Download, true, "SESSION", &["fetch", "copy", "save", "file"]),
+    mi("Update wi", NO_KEY, Action::Update, false, "SESSION", &["upgrade", "new", "version", "release", "download", "latest"]),
+    mi("Restart wi", NO_KEY, Action::Restart, false, "SESSION", &["reload", "relaunch", "again", "new version"]),
     mi("Quit", 'q', Action::Quit, false, "SESSION", &["exit", "detach", "disconnect", "leave"]),
 ];
 
@@ -1006,12 +1052,30 @@ mod tests {
         assert_eq!(first_label(&items, "grep"), Some("Search in files"));
         assert_eq!(first_label(&items, "srch"), Some("Search in files"));
         assert_eq!(first_label(&items, "sf"), Some("Search in files"));
-        assert_eq!(first_label(&items, "theme"), Some("Theme dark / light"));
-        assert_eq!(first_label(&items, "dark"), Some("Theme dark / light"));
+        assert!(first_label(&items, "theme").is_some_and(|l| l.starts_with("Theme: ")));
+        assert!(first_label(&items, "dark").is_some_and(|l| l.starts_with("Theme: ")));
         assert_eq!(first_label(&items, "claude"), Some("Start / change agent"));
         assert!(menu_rows(&items, "zzzq").is_empty());
         // No headers while filtering.
         assert!(menu_rows(&items, "tab").iter().all(|r| matches!(r, Row::Item(_))));
+    }
+
+    #[test]
+    fn update_is_findable_and_theme_label_shows_mode() {
+        let items = menu_items_for(false, false);
+        assert_eq!(first_label(&items, "update"), Some("Update wi"));
+        assert_eq!(first_label(&items, "upgrade"), Some("Update wi"));
+        let mut items = items;
+        let (a, d, l) = (theme::Kind::Dark, theme::Kind::Dark, theme::Kind::Light);
+        set_theme_item(&mut items, theme::Mode::Auto, l);
+        assert_eq!(first_label(&items, "theme"), Some("Theme: auto (light)"));
+        set_theme_item(&mut items, theme::Mode::Auto, a);
+        assert_eq!(first_label(&items, "theme"), Some("Theme: auto (dark)"));
+        set_theme_item(&mut items, theme::Mode::Dark, d);
+        assert_eq!(first_label(&items, "theme"), Some("Theme: dark"));
+        set_theme_item(&mut items, theme::Mode::Light, l);
+        assert_eq!(first_label(&items, "theme"), Some("Theme: light"));
+        assert_eq!(items.iter().filter(|m| m.key == 'y').count(), 1);
     }
 
     #[test]

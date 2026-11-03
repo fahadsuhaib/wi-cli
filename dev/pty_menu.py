@@ -20,8 +20,8 @@ env.pop("COLORFGBG", None)
 SECTIONS = ["FILES", "SEARCH", "TABS", "VIEW", "AGENT", "SESSION"]
 LOCAL = ["Preview a file", "Find file", "Git changes", "Open path on screen", "Search in files", "Find in output",
          "New shell tab", "New tab in folder", "Change folder of this tab", "Next tab", "Previous tab", "Close tab",
-         "Switch pane", "Close preview", "Scroll", "Theme dark / light", "Mouse on/off", "Start / change agent",
-         "Info", "Quit"]
+         "Switch pane", "Close preview", "Scroll", "Theme: auto (dark)", "Mouse on/off", "Start / change agent",
+         "Info", "Update wi", "Restart wi", "Quit"]
 REMOTE = [l for l in LOCAL if l != "Quit"] + ["Reconnect", "Download", "Detach (keep sessions)", "End sessions and quit"]
 LABELS = REMOTE if remote else LOCAL
 
@@ -147,7 +147,7 @@ check("Esc 2: leaves filter mode (hint back)", "Space: search" in t.text() and m
 t.send(b"\x1b", 0.5)
 check("Esc 3: closes the menu", not menu_open(t))
 open_menu(t); t.send(b" theme", 0.5)
-check("filter 'theme' finds Theme", "Theme dark / light" in t.text())
+check("filter 'theme' finds Theme", "Theme: " in t.text())
 t.send(b"\x1b\x1b", 0.8); t.send(b"\x1b", 0.5)
 check("menu closed again", not menu_open(t))
 

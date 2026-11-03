@@ -30,7 +30,7 @@ Done when: Claude Code runs in one tab, `cargo test` in another, you can scroll 
 
 ## Phase A3: Unified look on macOS and Linux (added 2026-11-02)
 Goal: the same experience in any terminal app. Fonts belong to the terminal, so wi unifies what it controls.
-1. Theme system (user asked for dark and light first): fixed RGB palette with 256-colour fallback; `theme = dark | light | auto` (auto asks the terminal for its background via OSC 11, falling back to COLORFGBG, then dark) plus a menu entry to switch live; a `terminal` mode (use the terminal's own palette) later. All colours in ui, previews, diffs go through the theme.
+1. Theme system (user asked for dark and light first): fixed RGB palette with 256-colour fallback; `theme = dark | light | auto` (auto asks the terminal for its background via OSC 11, falling back to COLORFGBG, then dark) plus a menu entry (Y) that cycles auto, dark, light live (auto saves nothing, so the next start detects again); a `terminal` mode (use the terminal's own palette) later. All colours in ui, previews, diffs go through the theme.
 2. Remap ANSI 0-15 inside shell tabs to the theme palette (config switch, default on) so agent output looks the same everywhere.
 3. Glyph set with ASCII fallback for non-UTF-8 / console terminals.
 4. `wi --print-terminal-config <app>` for Terminal.app, iTerm2, Ghostty, Kitty, WezTerm, Alacritty, GNOME Terminal (font, size, Option-as-Meta); short docs on Ctrl-Space capture.

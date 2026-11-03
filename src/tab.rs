@@ -22,6 +22,13 @@ pub enum Side {
 }
 
 impl Side {
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Right => "right",
+            Side::Left => "left",
+            Side::Tab => "tab",
+        }
+    }
     /// Parse the `preview_side` setting; anything unknown means the default, right.
     pub fn parse(s: &str) -> Side {
         match s.trim().to_ascii_lowercase().as_str() {

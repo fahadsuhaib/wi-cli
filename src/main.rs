@@ -14,6 +14,7 @@ mod link;
 mod mouse;
 mod opener;
 mod preview;
+mod restart;
 mod scroll;
 mod search;
 mod select;
@@ -25,6 +26,7 @@ mod theme;
 mod transfer;
 mod tui;
 mod ui;
+mod update;
 mod workspace;
 
 use anyhow::{Result, bail};
@@ -101,12 +103,11 @@ async fn real_main() -> Result<()> {
 pub fn setup_theme(cfg: &config::Config) {
     let saved = agents::State::load().theme;
     let fgbg = std::env::var("COLORFGBG").ok();
-    let kind = theme::resolve(
-        &cfg.defaults.theme,
-        saved.as_deref(),
-        || term::query_background().map(theme::kind_from_rgb),
-        fgbg.as_deref(),
-    );
+    // Unless the config fixes the theme, ask the terminal even when a choice is saved: the answer
+    // is what switching the menu back to `auto` uses later.
+    let asked = if theme::Kind::parse(&cfg.defaults.theme).is_some() { None } else { term::query_background().map(theme::kind_from_rgb) };
+    theme::set_detected(asked);
+    let kind = theme::resolve(&cfg.defaults.theme, saved.as_deref(), || asked, fgbg.as_deref());
     let truecolor = theme::colorterm_is_truecolor(std::env::var("COLORTERM").ok().as_deref());
     theme::init(kind, truecolor, cfg.defaults.ansi_remap);
 }

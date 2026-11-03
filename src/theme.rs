@@ -27,12 +27,6 @@ impl Kind {
             _ => None,
         }
     }
-    pub fn other(self) -> Kind {
-        match self {
-            Kind::Dark => Kind::Light,
-            Kind::Light => Kind::Dark,
-        }
-    }
     pub fn theme(self) -> Theme {
         match self {
             Kind::Dark => DARK,
@@ -434,7 +428,73 @@ pub fn resolve(config: &str, saved: Option<&str>, ask_terminal: impl FnOnce() ->
     if let Some(k) = saved.and_then(Kind::parse) {
         return k;
     }
-    ask_terminal().or_else(|| colorfgbg.and_then(kind_from_colorfgbg)).unwrap_or(Kind::Dark)
+    auto_kind(ask_terminal(), colorfgbg)
+}
+
+/// What `auto` means: the terminal's answer, else `COLORFGBG`, else dark.
+pub fn auto_kind(asked: Option<Kind>, colorfgbg: Option<&str>) -> Kind {
+    asked.or_else(|| colorfgbg.and_then(kind_from_colorfgbg)).unwrap_or(Kind::Dark)
+}
+
+/// The theme setting as the menu cycles it: auto, dark, light, auto.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Auto,
+    Dark,
+    Light,
+}
+
+impl Mode {
+    pub fn next(self) -> Mode {
+        match self {
+            Mode::Auto => Mode::Dark,
+            Mode::Dark => Mode::Light,
+            Mode::Light => Mode::Auto,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Auto => "auto",
+            Mode::Dark => "dark",
+            Mode::Light => "light",
+        }
+    }
+    /// The value kept in the state file: `auto` keeps nothing, so the next start detects again.
+    pub fn saved(self) -> Option<String> {
+        match self {
+            Mode::Auto => None,
+            m => Some(m.name().to_string()),
+        }
+    }
+    /// The mode in force at start: an explicit config theme, else the saved choice, else auto.
+    pub fn at_start(config: &str, saved: Option<&str>) -> Mode {
+        match Kind::parse(config).or_else(|| saved.and_then(Kind::parse)) {
+            Some(Kind::Dark) => Mode::Dark,
+            Some(Kind::Light) => Mode::Light,
+            None => Mode::Auto,
+        }
+    }
+}
+
+/// What the terminal said its background was at start (0 none, 1 dark, 2 light). Used when the
+/// menu switches back to `auto` while wi runs: asking again would race wi's own reading of stdin.
+static DETECTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_detected(k: Option<Kind>) {
+    let v = match k {
+        None => 0,
+        Some(Kind::Dark) => 1,
+        Some(Kind::Light) => 2,
+    };
+    DETECTED.store(v, Ordering::Relaxed);
+}
+
+pub fn detected() -> Option<Kind> {
+    match DETECTED.load(Ordering::Relaxed) {
+        1 => Some(Kind::Dark),
+        2 => Some(Kind::Light),
+        _ => None,
+    }
 }
 
 // ---- Contrast ----
@@ -586,6 +646,43 @@ mod tests {
         }
         assert_ne!(DARK.bar_bg, LIGHT.bar_bg);
         assert_ne!(DARK.ansi[1], LIGHT.ansi[1]);
+    }
+
+    #[test]
+    fn mode_cycles_auto_dark_light_and_saves_nothing_for_auto() {
+        assert_eq!(Mode::Auto.next(), Mode::Dark);
+        assert_eq!(Mode::Dark.next(), Mode::Light);
+        assert_eq!(Mode::Light.next(), Mode::Auto);
+        assert_eq!(Mode::Auto.saved(), None);
+        assert_eq!(Mode::Dark.saved().as_deref(), Some("dark"));
+        assert_eq!(Mode::Light.saved().as_deref(), Some("light"));
+    }
+
+    #[test]
+    fn mode_at_start_follows_config_then_saved_then_auto() {
+        assert_eq!(Mode::at_start("auto", None), Mode::Auto);
+        assert_eq!(Mode::at_start("auto", Some("light")), Mode::Light);
+        assert_eq!(Mode::at_start("auto", Some("auto")), Mode::Auto);
+        assert_eq!(Mode::at_start("dark", Some("light")), Mode::Dark);
+        assert_eq!(Mode::at_start("light", None), Mode::Light);
+    }
+
+    #[test]
+    fn auto_kind_prefers_terminal_then_colorfgbg_then_dark() {
+        assert_eq!(auto_kind(Some(Kind::Light), Some("15;0")), Kind::Light);
+        assert_eq!(auto_kind(None, Some("0;15")), Kind::Light);
+        assert_eq!(auto_kind(None, Some("junk")), Kind::Dark);
+        assert_eq!(auto_kind(None, None), Kind::Dark);
+        // A saved "auto" (or anything unknown) is not an override.
+        assert_eq!(resolve("auto", Some("auto"), || Some(Kind::Light), None), Kind::Light);
+    }
+
+    #[test]
+    fn detected_round_trips() {
+        set_detected(Some(Kind::Light));
+        assert_eq!(detected(), Some(Kind::Light));
+        set_detected(None);
+        assert_eq!(detected(), None);
     }
 
     #[test]
