@@ -108,11 +108,11 @@ pub fn setup_theme(cfg: &config::Config) {
     let fgbg = std::env::var("COLORFGBG").ok();
     // Unless the config fixes the theme, ask the terminal even when a choice is saved: the answer
     // is what switching the menu back to `auto` uses later.
-    let asked = if theme::Kind::parse(&cfg.defaults.theme).is_some() { None } else { term::query_background().map(theme::kind_from_rgb) };
+    let asked = if theme::index_of(&cfg.defaults.theme).is_some() { None } else { term::query_background().map(theme::kind_from_rgb) };
     theme::set_detected(asked);
-    let kind = theme::resolve(&cfg.defaults.theme, saved.as_deref(), || asked, fgbg.as_deref());
+    let chosen = theme::resolve(&cfg.defaults.theme, saved.as_deref(), || asked, fgbg.as_deref());
     let truecolor = theme::colorterm_is_truecolor(std::env::var("COLORTERM").ok().as_deref());
-    theme::init(kind, truecolor, cfg.defaults.ansi_remap, cfg.defaults.paint_background);
+    theme::init(chosen, truecolor, cfg.defaults.ansi_remap, cfg.defaults.paint_background);
 }
 
 /// Dev command: `wi fetch <box> <remote-path> [--yes]` downloads through the opener cache.

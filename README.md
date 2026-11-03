@@ -43,7 +43,7 @@ wi supports macOS and Linux.
 - Pinned panes: pin any tab beside the active one (menu: search "pin"); ⇄ swaps left/right, ✕ unpins; the layout is remembered per workspace (needs 101+ columns)
 - Previews refresh by themselves when the file changes on disk (see Configuration)
 - Search in files, find file, find in output
-- Themes: dark and light; Y cycles auto, dark, light. The chosen theme paints the whole window, shell included, so a light theme looks light on a dark terminal; auto follows your terminal's colours on each start
+- Themes: `dark`, `light` and fourteen more modelled on VS Code's (see Themes below); Y opens a picker that previews each one live. The chosen theme paints the whole window, shell included, so a light theme looks light on a dark terminal; auto follows your terminal's colours on each start
 - Update wi from the menu (search "update"): asks before contacting github.com, checks the SHA256, replaces the binary, then offers to restart wi with the same tabs ("Restart wi" does the restart alone)
 
 ## Keys
@@ -63,7 +63,7 @@ New line in an agent tab: Alt+Enter works in every terminal (Shift+Enter only wh
 | U | Find in output | W | Switch pane |
 | A | Start / change agent | V | Close preview |
 | X | Explorer | | |
-| M | Mouse on/off | Y | Theme: cycles auto, dark, light |
+| M | Mouse on/off | Y | Theme picker |
 | R | Reconnect (remote) | I / Q | Info / quit |
 
 Inside a preview: arrows and PgUp/PgDn scroll, F find, W wrap, M markdown source, R reload, H recent files, Esc back, Q close.
@@ -80,6 +80,20 @@ Pin any tab beside the one you are working in, for example a Claude tab on the r
 The terminal must be at least 101 columns wide, otherwise wi shows one pane. The layout is remembered per workspace.
 While a tab is pinned, links and previews open as ordinary tabs. The explorer cannot be pinned, and a pinned local shell
 starts fresh after a restart.
+
+## Themes
+
+Menu, then Y (or search "theme") opens the theme picker: `Auto`, then the dark themes, then the light ones, each with a small colour swatch and the current one marked. Up and Down preview a theme live on the whole window, Enter applies it and remembers it (in `~/.config/wicli/state.toml`), Esc puts the old one back; typing letters narrows the list. Choosing `Auto` clears the remembered choice, so wi follows your terminal's background again on the next start.
+
+| Dark | Light |
+| --- | --- |
+| `dark` (wi's own) | `light` (wi's own) |
+| `dark-modern`, `dark-plus` | `light-modern`, `light-plus` |
+| `monokai`, `abyss`, `kimbie-dark`, `red` | `solarized-light`, `quiet-light` |
+| `solarized-dark`, `tomorrow-night-blue` | `high-contrast-light` |
+| `high-contrast` | |
+
+The colours come from VS Code's built-in themes (the shell's 16 ANSI colours from each theme's terminal colours), mapped onto wi's roles. Colours that would be hard to read on a theme's background are nudged toward white or black until text reaches a 4.5:1 contrast ratio (7:1 in the two high-contrast themes). `theme = "monokai"` (any name above, case does not matter) in `[defaults]` of the config sets one for good and wins over the picker's saved choice; an unknown name falls back to `auto` with a note in the status line. `paint_background = false` still leaves the terminal's own colours in the shell area.
 
 ## Menu items without a key
 
@@ -102,7 +116,7 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
 `~/.config/wicli/config.toml` (override with `WICLI_CONFIG`). A small example:
 
     [defaults]
-    theme = "auto"          # auto, dark or light
+    theme = "auto"          # auto or a theme name (see Themes)
     paint_background = true # wi paints the whole window (shell included) in the theme's
                             # colours; false leaves default colours to your terminal
     preview_side = "right"  # right, left or tab

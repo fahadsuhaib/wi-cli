@@ -1,7 +1,10 @@
 //! Colour themes. Every colour wi draws itself comes from a semantic role here, so wi looks the
 //! same in every terminal (the terminal's own 16-colour palette is never relied on for chrome).
-//! Two built-in themes, `dark` and `light`; true colour is quantised to the xterm 256-colour cube
-//! when the terminal does not advertise true colour.
+//! `dark` and `light` are wi's own; the others are modelled on VS Code's built-in themes (see
+//! `table.rs`). True colour is quantised to the xterm 256-colour cube when the terminal does not
+//! advertise true colour.
+
+mod table;
 
 use ratatui::style::Color;
 use std::sync::RwLock;
@@ -20,13 +23,6 @@ impl Kind {
             Kind::Light => "light",
         }
     }
-    pub fn parse(s: &str) -> Option<Kind> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "dark" => Some(Kind::Dark),
-            "light" => Some(Kind::Light),
-            _ => None,
-        }
-    }
     pub fn theme(self) -> Theme {
         match self {
             Kind::Dark => DARK,
@@ -39,6 +35,9 @@ impl Kind {
 /// foreground colours drawn over `bg` (previews, dialogs) or over the bar they sit in.
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
+    /// Config / state value (`monokai`) and the name shown in the picker (`Monokai`).
+    pub name: &'static str,
+    pub label: &'static str,
     pub kind: Kind,
     /// Canvas behind previews.
     pub bg: Color,
@@ -148,6 +147,8 @@ const fn c(rgb: u32) -> Color {
 }
 
 pub const DARK: Theme = Theme {
+    name: "dark",
+    label: "Dark",
     kind: Kind::Dark,
     bg: c(0x1c1f26),
     fg: c(0xd7dae0),
@@ -229,6 +230,8 @@ pub const DARK: Theme = Theme {
 };
 
 pub const LIGHT: Theme = Theme {
+    name: "light",
+    label: "Light",
     kind: Kind::Light,
     bg: c(0xfafafa),
     fg: c(0x24292f),
@@ -311,6 +314,29 @@ pub const LIGHT: Theme = Theme {
     ],
 };
 
+/// Every theme, in picker order: the dark ones, then the light ones.
+pub const ALL: [Theme; 16] = {
+    let mut out = [DARK; 16];
+    let mut i = 0;
+    while i < 9 {
+        out[1 + i] = table::build(&table::SPECS[i]);
+        i += 1;
+    }
+    out[10] = LIGHT;
+    let mut i = 0;
+    while i < 5 {
+        out[11 + i] = table::build(&table::SPECS[9 + i]);
+        i += 1;
+    }
+    out
+};
+
+/// Index into `ALL` of the theme called `name` (case and `-`/`_`/space insensitive).
+pub fn index_of(name: &str) -> Option<usize> {
+    let n = name.trim().to_ascii_lowercase().replace(['_', ' '], "-");
+    ALL.iter().position(|t| t.name == n)
+}
+
 static CURRENT: RwLock<Theme> = RwLock::new(DARK);
 static TRUECOLOR: AtomicBool = AtomicBool::new(true);
 static ANSI_REMAP: AtomicBool = AtomicBool::new(true);
@@ -321,8 +347,8 @@ pub fn theme() -> Theme {
     *CURRENT.read().unwrap_or_else(|e| e.into_inner())
 }
 
-pub fn set_kind(k: Kind) {
-    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = k.theme();
+pub fn set_theme(t: Theme) {
+    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = t;
 }
 
 pub fn kind() -> Kind {
@@ -330,8 +356,8 @@ pub fn kind() -> Kind {
 }
 
 /// Startup configuration: theme, whether the terminal does true colour, and the ANSI remap switch.
-pub fn init(k: Kind, truecolor: bool, ansi_remap: bool, paint: bool) {
-    set_kind(k);
+pub fn init(t: Theme, truecolor: bool, ansi_remap: bool, paint: bool) {
+    set_theme(t);
     PAINT.store(paint, Ordering::Relaxed);
     TRUECOLOR.store(truecolor, Ordering::Relaxed);
     ANSI_REMAP.store(ansi_remap, Ordering::Relaxed);
@@ -451,15 +477,12 @@ pub fn kind_from_colorfgbg(v: &str) -> Option<Kind> {
 
 /// Which theme to start with. `config` is the `theme` setting, `saved` the last live choice in the
 /// state file, `ask_terminal` is called (at most once) only for `auto` without a saved choice.
-/// An explicit config value always wins.
-pub fn resolve(config: &str, saved: Option<&str>, ask_terminal: impl FnOnce() -> Option<Kind>, colorfgbg: Option<&str>) -> Kind {
-    if let Some(k) = Kind::parse(config) {
-        return k;
+/// An explicit config name always wins; unknown names count as `auto`.
+pub fn resolve(config: &str, saved: Option<&str>, ask_terminal: impl FnOnce() -> Option<Kind>, colorfgbg: Option<&str>) -> Theme {
+    if let Some(i) = index_of(config).or_else(|| saved.and_then(index_of)) {
+        return ALL[i];
     }
-    if let Some(k) = saved.and_then(Kind::parse) {
-        return k;
-    }
-    auto_kind(ask_terminal(), colorfgbg)
+    auto_kind(ask_terminal(), colorfgbg).theme()
 }
 
 /// What `auto` means: the terminal's answer, else `COLORFGBG`, else dark.
@@ -467,27 +490,19 @@ pub fn auto_kind(asked: Option<Kind>, colorfgbg: Option<&str>) -> Kind {
     asked.or_else(|| colorfgbg.and_then(kind_from_colorfgbg)).unwrap_or(Kind::Dark)
 }
 
-/// The theme setting as the menu cycles it: auto, dark, light, auto.
+/// The theme setting: `auto` (follow the terminal) or one of `ALL`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Auto,
-    Dark,
-    Light,
+    Named(usize),
 }
 
 impl Mode {
-    pub fn next(self) -> Mode {
-        match self {
-            Mode::Auto => Mode::Dark,
-            Mode::Dark => Mode::Light,
-            Mode::Light => Mode::Auto,
-        }
-    }
+    /// Config / state value.
     pub fn name(self) -> &'static str {
         match self {
             Mode::Auto => "auto",
-            Mode::Dark => "dark",
-            Mode::Light => "light",
+            Mode::Named(i) => ALL[i].name,
         }
     }
     /// The value kept in the state file: `auto` keeps nothing, so the next start detects again.
@@ -499,11 +514,27 @@ impl Mode {
     }
     /// The mode in force at start: an explicit config theme, else the saved choice, else auto.
     pub fn at_start(config: &str, saved: Option<&str>) -> Mode {
-        match Kind::parse(config).or_else(|| saved.and_then(Kind::parse)) {
-            Some(Kind::Dark) => Mode::Dark,
-            Some(Kind::Light) => Mode::Light,
-            None => Mode::Auto,
+        index_of(config).or_else(|| saved.and_then(index_of)).map_or(Mode::Auto, Mode::Named)
+    }
+    /// The theme this mode paints with. `auto` is not asked of the terminal again while wi runs
+    /// (the reply would arrive on the stdin wi reads): the answer from start-up, else COLORFGBG,
+    /// else dark.
+    pub fn theme(self) -> Theme {
+        match self {
+            Mode::Named(i) => ALL[i],
+            Mode::Auto => auto_kind(detected(), std::env::var("COLORFGBG").ok().as_deref()).theme(),
         }
+    }
+}
+
+/// A short note when the config or state file names a theme that does not exist (they fall back
+/// to `auto`).
+pub fn unknown_theme_note(config: &str, saved: Option<&str>) -> Option<String> {
+    let bad = |v: &str| !v.trim().is_empty() && !v.trim().eq_ignore_ascii_case("auto") && index_of(v).is_none();
+    if bad(config) {
+        Some(format!("unknown theme \"{}\" in the config, using auto", config.trim()))
+    } else {
+        saved.filter(|v| bad(v)).map(|v| format!("unknown saved theme \"{}\", using auto", v.trim()))
     }
 }
 
@@ -557,12 +588,15 @@ pub fn contrast(a: Color, b: Color) -> f64 {
 mod tests {
     use super::*;
 
-    const ALL: [Kind; 2] = [Kind::Dark, Kind::Light];
+    /// Contrast target for text: WCAG AA, or AAA in the high-contrast themes.
+    fn need(t: &Theme) -> f64 {
+        if t.name.starts_with("high-contrast") { 7.0 } else { 4.5 }
+    }
 
     #[test]
     fn text_roles_have_readable_contrast() {
-        for k in ALL {
-            let t = k.theme();
+        for t in ALL {
+            let k = t;
             let pairs: Vec<(&str, Color, Color)> = vec![
                 ("fg/bg", t.fg, t.bg),
                 ("dim/bg", t.dim, t.bg),
@@ -608,6 +642,9 @@ mod tests {
                 ("error", t.error, t.bg),
                 ("warning", t.warning, t.bg),
                 ("error on dialog", t.error, t.dialog_bg),
+                ("hotkey on dialog", t.menu_hotkey, t.dialog_bg),
+                ("dim on code panel", t.dim, t.md_code_bg),
+                ("dim on canvas size column", t.size_fg, t.bg),
                 ("title bar", t.title_fg, t.title_bg),
                 ("hint line", t.hintline_fg, t.bg),
                 ("hint line keys", t.fg, t.bg),
@@ -621,16 +658,19 @@ mod tests {
                 ("hot", t.hot, t.bg),
             ];
             for (name, fg, bg) in pairs {
+                if t.name == "dark" && name == "dim on code panel" {
+                    continue; // wi's original dark palette predates this pair
+                }
                 let r = contrast(fg, bg);
-                assert!(r >= 4.5, "{} {name}: contrast {r:.2} < 4.5", k.name());
+                assert!(r >= need(&t), "{} {name}: contrast {r:.2} < {}", k.name, need(&t));
             }
         }
     }
 
     #[test]
     fn accent_roles_are_visible() {
-        for k in ALL {
-            let t = k.theme();
+        for t in ALL {
+            let k = t;
             let pairs: Vec<(&str, Color, Color)> = vec![
                 ("menu border", t.menu_border, t.bg),
                 ("dialog border", t.dialog_border, t.bg),
@@ -651,30 +691,44 @@ mod tests {
                 let r = contrast(fg, bg);
                 // The goto-line mark is a background tint: it only has to differ from the canvas.
                 let need = if matches!(name, "goto mark" | "code panel" | "column header on canvas" | "selected row on canvas") { 1.1 } else { 3.0 };
-                assert!(r >= need, "{} {name}: contrast {r:.2} < {need}", k.name());
+                assert!(r >= need, "{} {name}: contrast {r:.2} < {need}", k.name);
             }
             for (i, col) in t.ansi.iter().enumerate() {
                 if matches!(i, 0 | 7 | 15) {
                     continue;
                 }
                 let r = contrast(*col, t.bg);
-                assert!(r >= 3.0, "{} ansi {i}: contrast {r:.2} < 3", k.name());
+                assert!(r >= 3.0, "{} ansi {i}: contrast {r:.2} < 3", k.name);
             }
         }
     }
 
     #[test]
     fn all_16_ansi_colours_are_readable_on_the_canvas() {
-        for k in ALL {
-            let t = k.theme();
+        for t in ALL {
             for (i, col) in t.ansi.iter().enumerate() {
                 let r = contrast(*col, t.bg);
-                // The dark palette is tuned for the shared 3.0 check above; light must hit 4.5.
-                let need = if k == Kind::Light { 4.5 } else { 3.0 };
-                assert!(r >= need || (k == Kind::Dark && matches!(i, 0)), "{} ansi {i}: contrast {r:.2} < {need}", k.name());
+                // Black on a dark canvas only has to stay visible (it is mostly a background
+                // colour); the old dark palette is tuned for 3.0; everything else meets the
+                // theme's text target (light themes darken "white" for the same reason).
+                let need = if i == 0 && t.kind == Kind::Dark { 1.4 } else if t.name == "dark" { 3.0 } else { need(&t) };
+                assert!(r >= need, "{} ansi {i}: contrast {r:.2} < {need}", t.name);
             }
             // A faint (blended) default text must stay legible too.
-            assert!(contrast(blend(t.fg, t.bg), t.bg) >= 3.0, "{} faint text", k.name());
+            assert!(contrast(blend(t.fg, t.bg), t.bg) >= 3.0, "{} faint text", t.name);
+        }
+    }
+
+    #[test]
+    fn ansi_hues_stay_recognisable() {
+        // Adjusting for contrast must not turn red into another colour: red stays red-dominant,
+        // green green-dominant, blue blue-dominant (index 1, 2, 4 and their bright twins).
+        for t in ALL {
+            for (i, ch) in [(1, 0), (9, 0), (2, 1), (10, 1), (4, 2), (12, 2)] {
+                let (r, g, b) = rgb_of(t.ansi[i]);
+                let v = [r, g, b];
+                assert!(v[ch] >= v[(ch + 1) % 3] && v[ch] >= v[(ch + 2) % 3], "{} ansi {i} lost its hue: {v:?}", t.name);
+            }
         }
     }
 
@@ -688,37 +742,89 @@ mod tests {
 
     #[test]
     fn every_theme_defines_every_role_as_rgb_and_themes_differ() {
-        for k in ALL {
-            let t = k.theme();
-            assert_eq!(t.kind, k);
+        for t in ALL {
             // The struct has no optional roles, so a missing role cannot compile; check none is a
             // placeholder (non-RGB) colour and that the palette has 16 distinct entries.
             let dbg = format!("{t:?}");
             assert!(!dbg.contains("Reset") && !dbg.contains("Indexed") && !dbg.contains("Black"), "{dbg}");
             let set: std::collections::HashSet<_> = t.ansi.iter().map(|c| rgb_of(*c)).collect();
-            assert_eq!(set.len(), 16);
+            assert_eq!(set.len(), 16, "{}", t.name);
         }
+        let looks: std::collections::HashSet<_> = ALL.iter().map(|t| format!("{:?}", (t.bg, t.fg, t.bar_bg, t.ansi))).collect();
+        assert_eq!(looks.len(), ALL.len(), "every theme looks different");
         assert_ne!(DARK.bar_bg, LIGHT.bar_bg);
         assert_ne!(DARK.ansi[1], LIGHT.ansi[1]);
     }
 
     #[test]
-    fn mode_cycles_auto_dark_light_and_saves_nothing_for_auto() {
-        assert_eq!(Mode::Auto.next(), Mode::Dark);
-        assert_eq!(Mode::Dark.next(), Mode::Light);
-        assert_eq!(Mode::Light.next(), Mode::Auto);
+    fn every_theme_knows_whether_it_is_dark_or_light() {
+        for (i, t) in ALL.iter().enumerate() {
+            // The canvas decides: this is what OSC 11 replies, COLORFGBG-style logic and the
+            // faint-text blend rely on.
+            assert_eq!(kind_from_rgb({ let (r, g, b) = rgb_of(t.bg); (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0) }), t.kind, "{}", t.name);
+            assert_eq!(t.kind == Kind::Dark, i < 10, "{}: dark themes come first", t.name);
+            // OSC 10 / 11 replies carry this theme's colours.
+            let cv = Some((t.bg, t.fg));
+            let (r, g, b) = rgb_of(t.bg);
+            assert_eq!(osc_color_reply(11, cv).unwrap(), format!("\x1b]11;rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07").into_bytes());
+        }
+        assert_eq!(ALL.iter().filter(|t| t.kind == Kind::Dark).count(), 10);
+        assert_eq!(Kind::Dark.theme().name, "dark");
+        assert_eq!(Kind::Light.theme().name, "light");
+    }
+
+    #[test]
+    fn every_theme_name_round_trips() {
+        let wanted = [
+            "dark", "dark-modern", "dark-plus", "monokai", "solarized-dark", "abyss", "kimbie-dark", "red", "tomorrow-night-blue", "high-contrast",
+            "light", "light-modern", "light-plus", "solarized-light", "quiet-light", "high-contrast-light",
+        ];
+        assert_eq!(ALL.iter().map(|t| t.name).collect::<Vec<_>>(), wanted);
+        for (i, t) in ALL.iter().enumerate() {
+            assert_eq!(index_of(t.name), Some(i));
+            assert_eq!(index_of(&t.name.to_uppercase()), Some(i));
+            assert_eq!(index_of(&format!("  {} ", t.name.replace('-', "_"))), Some(i));
+            assert_eq!(Mode::at_start(t.name, None), Mode::Named(i));
+            assert_eq!(Mode::Named(i).name(), t.name);
+            assert_eq!(Mode::Named(i).saved().as_deref(), Some(t.name));
+            assert_eq!(Mode::at_start("auto", Mode::Named(i).saved().as_deref()), Mode::Named(i));
+            assert_eq!(t.name, t.label.to_lowercase().replace(' ', "-").replace('+', "-plus"), "label of {}", t.name);
+        }
+        assert_eq!(index_of("auto"), None);
+        assert_eq!(index_of("nope"), None);
+        assert_eq!(index_of(""), None);
+    }
+
+    #[test]
+    fn mode_saves_nothing_for_auto() {
         assert_eq!(Mode::Auto.saved(), None);
-        assert_eq!(Mode::Dark.saved().as_deref(), Some("dark"));
-        assert_eq!(Mode::Light.saved().as_deref(), Some("light"));
+        assert_eq!(Mode::Auto.name(), "auto");
+        assert_eq!(Mode::Named(index_of("dark").unwrap()).saved().as_deref(), Some("dark"));
+        assert_eq!(Mode::Named(index_of("light").unwrap()).saved().as_deref(), Some("light"));
     }
 
     #[test]
     fn mode_at_start_follows_config_then_saved_then_auto() {
+        let (dark, light, mono) = (index_of("dark").unwrap(), index_of("light").unwrap(), index_of("monokai").unwrap());
         assert_eq!(Mode::at_start("auto", None), Mode::Auto);
-        assert_eq!(Mode::at_start("auto", Some("light")), Mode::Light);
+        assert_eq!(Mode::at_start("auto", Some("light")), Mode::Named(light));
         assert_eq!(Mode::at_start("auto", Some("auto")), Mode::Auto);
-        assert_eq!(Mode::at_start("dark", Some("light")), Mode::Dark);
-        assert_eq!(Mode::at_start("light", None), Mode::Light);
+        assert_eq!(Mode::at_start("dark", Some("light")), Mode::Named(dark));
+        assert_eq!(Mode::at_start("light", None), Mode::Named(light));
+        assert_eq!(Mode::at_start("Monokai", Some("light")), Mode::Named(mono));
+        // Unknown names fall back (config to saved, saved to auto), never fail.
+        assert_eq!(Mode::at_start("bogus", None), Mode::Auto);
+        assert_eq!(Mode::at_start("bogus", Some("light")), Mode::Named(light));
+        assert_eq!(Mode::at_start("auto", Some("bogus")), Mode::Auto);
+    }
+
+    #[test]
+    fn unknown_names_give_a_note() {
+        assert_eq!(unknown_theme_note("auto", None), None);
+        assert_eq!(unknown_theme_note("", None), None);
+        assert_eq!(unknown_theme_note("monokai", Some("light")), None);
+        assert!(unknown_theme_note("bogus", None).unwrap().contains("bogus"));
+        assert!(unknown_theme_note("auto", Some("old-name")).unwrap().contains("old-name"));
     }
 
     #[test]
@@ -728,7 +834,7 @@ mod tests {
         assert_eq!(auto_kind(None, Some("junk")), Kind::Dark);
         assert_eq!(auto_kind(None, None), Kind::Dark);
         // A saved "auto" (or anything unknown) is not an override.
-        assert_eq!(resolve("auto", Some("auto"), || Some(Kind::Light), None), Kind::Light);
+        assert_eq!(resolve("auto", Some("auto"), || Some(Kind::Light), None).name, "light");
     }
 
     #[test]
@@ -799,12 +905,16 @@ mod tests {
     #[test]
     fn resolution_order() {
         let none = || None;
-        assert_eq!(resolve("light", Some("dark"), || panic!("asked"), None), Kind::Light);
-        assert_eq!(resolve("auto", Some("light"), || panic!("asked"), None), Kind::Light);
-        assert_eq!(resolve("auto", None, || Some(Kind::Light), Some("15;0")), Kind::Light);
-        assert_eq!(resolve("auto", None, none, Some("0;15")), Kind::Light);
-        assert_eq!(resolve("auto", None, none, None), Kind::Dark);
-        assert_eq!(resolve("bogus", None, none, None), Kind::Dark);
+        let name = |t: Theme| t.name;
+        assert_eq!(name(resolve("light", Some("dark"), || panic!("asked"), None)), "light");
+        assert_eq!(name(resolve("monokai", Some("light"), || panic!("asked"), None)), "monokai");
+        assert_eq!(name(resolve("auto", Some("light"), || panic!("asked"), None)), "light");
+        assert_eq!(name(resolve("auto", Some("solarized-light"), || panic!("asked"), None)), "solarized-light");
+        assert_eq!(name(resolve("auto", None, || Some(Kind::Light), Some("15;0"))), "light");
+        assert_eq!(name(resolve("auto", None, none, Some("0;15"))), "light");
+        assert_eq!(name(resolve("auto", None, none, None)), "dark");
+        assert_eq!(name(resolve("bogus", None, none, None)), "dark");
+        assert_eq!(name(resolve("auto", Some("bogus"), none, None)), "dark");
     }
 
     #[test]

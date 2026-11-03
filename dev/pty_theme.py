@@ -1,6 +1,8 @@
 # usage: python dev/pty_theme.py <scratch-dir> local   (needs pyte)
-# Themes: dark / light / auto (OSC 11 answered by this harness), the menu cycle auto -> dark -> light -> auto
-# and persistence in state.toml (auto saves nothing), ANSI remap, 256-colour fallback, and theme colours in the previews.
+# Themes: dark / light / auto (OSC 11 answered by this harness), the theme picker (menu Y: arrows preview live,
+# Enter saves to state.toml, Esc reverts, auto saves nothing), config names and unknown names, the VS Code style
+# themes (monokai, solarized-light, high-contrast ... painted over the whole canvas), ANSI remap, 256-colour
+# fallback, and theme colours in the previews.
 # Every scenario gets its own config directory so state.toml never leaks between them.
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, pyte
 from pyte.graphics import FG_BG_256
@@ -21,6 +23,18 @@ def theme_colors(name):
     d["ansi"] = re.findall(r"c\(0x([0-9a-fA-F]{6})\)", blk.split("ansi:")[1])
     return d
 T = {"dark": theme_colors("DARK"), "light": theme_colors("LIGHT")}
+tab = open(os.path.join(HERE, "..", "src/theme/table.rs")).read()
+def spec_colors(name):
+    blk = tab[tab.index('name: "' + name + '"'):]
+    blk = blk[:blk.index("] },")]
+    d = {k: v for k, v in re.findall(r"(\w+): 0x([0-9a-fA-F]{6})", blk.split("ansi:")[0])}
+    d["ansi"] = re.findall(r"0x([0-9a-fA-F]{6})", blk.split("ansi:")[1])
+    # the roles this script looks at, as src/theme/table.rs derives them
+    d.update(md_h1=d["purple"], json_key=d["cyan"], json_string=d["green"], table_header=d["fg"], diff_add=d["green"], diff_remove=d["red"])
+    return d
+NEW = ["dark-modern", "dark-plus", "monokai", "solarized-dark", "abyss", "kimbie-dark", "red", "tomorrow-night-blue", "high-contrast",
+       "light-modern", "light-plus", "solarized-light", "quiet-light", "high-contrast-light"]
+for n in NEW: T[n] = spec_colors(n)
 
 def quantize(h):
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
@@ -131,58 +145,111 @@ r = Run("fgbgdark", answer=None, env_extra={"COLORFGBG": "15;0"})
 check("auto: COLORFGBG 15;0 picks dark", r.header_bg() == T["dark"]["bar_bg"])
 r.quit()
 
-# ------------------------------------------------------------ menu cycle and persistence
+# ------------------------------------------------------------ the picker and persistence
+DOWN, UP = b"\x1b[B", b"\x1b[A"
 def saved(r):
     p = r.cfgdir + "/state.toml"
     return open(p).read() if os.path.exists(p) else ""
-r = Run("toggle", '[defaults]\ntheme = "auto"\n', answer=DARK_REPLY)
-check("cycle: starts dark (terminal answered dark)", r.header_bg() == T["dark"]["bar_bg"])
+def pick(r, text):
+    """Open the picker, type a filter, press Enter."""
+    r.send(MENU + b"y", 0.7); r.send(text.encode(), 0.5); r.send(b"\r", 0.8)
+r = Run("pick", '[defaults]\ntheme = "auto"\n', answer=DARK_REPLY)
+check("picker: starts dark (terminal answered dark)", r.header_bg() == T["dark"]["bar_bg"])
 r.send(MENU, 0.6)
-check("cycle: the menu shows the mode and what auto picked", "Theme: auto (dark)" in r.text())
+check("picker: the menu label shows the setting", "Theme… auto (dark)" in r.text())
 r.send(b"y", 0.8)
-check("cycle: first Y goes auto -> dark", r.header_bg() == T["dark"]["bar_bg"] and 'theme = "dark"' in saved(r))
+txt = r.text()
+check("picker: lists Auto, group headers and the themes", all(w in txt for w in ("Auto (dark)", "DARK", "LIGHT", "Dark Modern", "Monokai", "Solarized Light", "High Contrast Light", "Tomorrow Night Blue")))
+check("picker: marks the current setting", re.search(r"Auto \(dark\).*●", txt) is not None)
+mrow = r.find("Monokai")
+swatch = {r.cell(x, mrow[1]).bg for x in range(60, 99)} if mrow else set()
+check("picker: each row carries a colour swatch of its theme", {T["monokai"]["bg"], T["monokai"]["fg"], T["monokai"]["red"]} <= swatch)
+r.send(DOWN, 0.6)
+check("picker: first Down goes to Dark (no change yet)", r.header_bg() == T["dark"]["bar_bg"])
+r.send(DOWN, 0.6)
+check("picker: Down previews Dark Modern live", r.header_bg() == T["dark-modern"]["bar_bg"] and r.status_bg() == T["dark-modern"]["status_bg"])
+check("picker: preview saves nothing", "theme" not in saved(r))
+for _ in range(2): r.send(DOWN, 0.5)
+check("picker: Down again previews Monokai", r.header_bg() == T["monokai"]["bar_bg"])
+r.send(b"\x1b", 0.8)
+check("picker: Esc reverts to the original theme", r.header_bg() == T["dark"]["bar_bg"] and "type to filter" not in r.text())
+check("picker: Esc saves nothing", "theme" not in saved(r))
+r.send(MENU + b"y", 0.7)
+for _ in range(12): r.send(DOWN, 0.3)
+check("picker: arrows reach the light group (Light Modern-ish background)", r.header_bg() in {T[n]["bar_bg"] for n in ("light", "light-modern", "light-plus", "solarized-light")})
+r.send(UP, 0.4); r.send(b"\x1b", 0.6)
+check("picker: Esc after moving still reverts", r.header_bg() == T["dark"]["bar_bg"])
+pick(r, "monokai")
+check("picker: typing filters, Enter applies Monokai", r.header_bg() == T["monokai"]["bar_bg"] and r.status_bg() != T["dark"]["status_bg"])
+check("picker: Enter saves the name in state.toml", 'theme = "monokai"' in saved(r))
+check("picker: the status line says so", "theme: monokai" in r.text())
 r.send(MENU, 0.6)
-check("cycle: the label now reads Theme: dark", "Theme: dark" in r.text() and "auto (" not in r.text())
-r.send(b"y", 0.8)
-check("cycle: second Y goes dark -> light live", r.header_bg() == T["light"]["bar_bg"] and r.status_bg() == T["light"]["status_bg"])
-check("cycle: light is saved in state.toml", 'theme = "light"' in saved(r))
-r.send(MENU + b"y", 0.8)
-check("cycle: third Y goes light -> auto and re-detects at once (terminal said dark)", r.header_bg() == T["dark"]["bar_bg"])
-check("cycle: auto saves nothing (the override is cleared)", "theme" not in saved(r))
-check("cycle: the status line says what auto did", "theme: auto -> dark" in r.text())
+check("picker: the menu label now names the theme", "Theme… Monokai" in r.text())
+r.send(b"y", 0.7)
+check("picker: reopened on the current theme (marked)", re.search(r"Monokai.*●", r.text()) is not None)
+r.send(b"\x1b", 0.5)
+pick(r, "solarized li")
+check("picker: a two-word filter finds Solarized Light", r.header_bg() == T["solarized-light"]["bar_bg"] and 'theme = "solarized-light"' in saved(r))
+r.send(MENU + b"y", 0.7); r.send(b"zzzq", 0.4)
+check("picker: a filter with no match says so and Enter keeps it open", "no match" in r.text())
+r.send(b"\r", 0.4)
+check("picker: Enter on no match changes nothing", "no match" in r.text() and 'theme = "solarized-light"' in saved(r))
+r.send(b"\x1b", 0.4); r.send(b"\x1b", 0.6)
+check("picker: Esc clears the filter, Esc again closes", "no match" not in r.text() and r.header_bg() == T["solarized-light"]["bar_bg"])
+r.quit()
+r = Run("pick", '[defaults]\ntheme = "auto"\n', answer=DARK_REPLY, fresh=False)
+check("picker: a restart with theme = auto restores the saved choice", r.header_bg() == T["solarized-light"]["bar_bg"])
+pick(r, "auto")
+check("picker: choosing Auto re-detects at once (terminal said dark)", r.header_bg() == T["dark"]["bar_bg"] and "theme: auto" in r.text())
+check("picker: Auto saves nothing (the override is cleared)", "theme" not in saved(r))
 r.send(MENU, 0.6)
-check("cycle: label back to auto (dark)", "Theme: auto (dark)" in r.text())
+check("picker: label back to auto (dark)", "Theme… auto (dark)" in r.text())
 r.send(b"\x1b", 0.4)
-r.send(MENU + b"y", 0.6); r.send(MENU + b"y", 0.8)   # dark, then light: saved again
 r.quit()
-r = Run("toggle", '[defaults]\ntheme = "auto"\n', answer=DARK_REPLY, fresh=False)
-check("cycle: a restart with theme = auto restores the saved light", r.header_bg() == T["light"]["bar_bg"])
+r = Run("pick", '[defaults]\ntheme = "auto"\n', answer=DARK_REPLY, fresh=False)
+check("picker: the next start asks the terminal again", r.asked and r.header_bg() == T["dark"]["bar_bg"])
+pick(r, "quiet")
 r.quit()
-r = Run("toggle", '[defaults]\ntheme = "dark"\n', fresh=False)
-check("cycle: an explicit config theme beats the saved choice", r.header_bg() == T["dark"]["bar_bg"])
+r = Run("pick", '[defaults]\ntheme = "high-contrast"\n', fresh=False)
+check("config: an explicit config name beats the saved choice", r.header_bg() == T["high-contrast"]["bar_bg"] and not r.asked)
+pick(r, "red")
+check("config: the picker still works and mentions the config", "config theme" in r.text() and r.header_bg() == T["red"]["bar_bg"])
+r.quit()
+for name in NEW:
+    r = Run("cfg_" + name, f'[defaults]\ntheme = "{name}"\n')
+    check(f"config: theme = \"{name}\" paints its bars", r.header_bg() == T[name]["bar_bg"] and r.status_bg() == T[name]["status_bg"] and not r.asked)
+    r.quit()
+r = Run("cfg_case", '[defaults]\ntheme = "Solarized_Dark"\n')
+check("config: names ignore case and _ for -", r.header_bg() == T["solarized-dark"]["bar_bg"])
+r.quit()
+r = Run("unk_cfg", '[defaults]\ntheme = "nonsense"\n', answer=LIGHT_REPLY)
+check("config: an unknown name falls back to auto (light here) with a note", r.header_bg() == T["light"]["bar_bg"] and "unknown theme" in r.text() and "nonsense" in r.text())
+r.quit()
+r = Run("unk_state", '[defaults]\ntheme = "auto"\n', answer=DARK_REPLY, state_text='theme = "zzz"\n')
+check("state: an unknown saved name falls back to auto with a note", r.header_bg() == T["dark"]["bar_bg"] and "unknown saved theme" in r.text())
 r.quit()
 
-# The reported bug: a light terminal stuck on a saved dark. Cycling back to auto fixes it live,
+# The reported bug: a light terminal stuck on a saved dark. Choosing Auto in the picker fixes it live,
 # and the next start detects the terminal again.
 r = Run("stuck", '[defaults]\ntheme = "auto"\n', answer=LIGHT_REPLY, state_text='theme = "dark"\n')
 check("stuck: the saved dark wins at start", r.header_bg() == T["dark"]["bar_bg"])
-r.send(MENU + b"y", 0.8)
-check("stuck: Y goes dark -> light", r.header_bg() == T["light"]["bar_bg"])
-r.send(MENU + b"y", 0.8)
-check("stuck: Y again goes to auto, which is light on this terminal", r.header_bg() == T["light"]["bar_bg"] and "theme: auto -> light" in r.text())
+pick(r, "light")
+check("stuck: picking Light goes light", r.header_bg() == T["light"]["bar_bg"])
+pick(r, "auto")
+check("stuck: picking Auto is light on this terminal", r.header_bg() == T["light"]["bar_bg"] and "theme: auto" in r.text())
 check("stuck: the saved override is gone", "theme" not in saved(r))
 r.quit()
 r = Run("stuck", '[defaults]\ntheme = "auto"\n', answer=LIGHT_REPLY, fresh=False)
 check("stuck: the next start asks the terminal and picks light", r.asked and r.header_bg() == T["light"]["bar_bg"])
 r.quit()
 r = Run("stuckfgbg", '[defaults]\ntheme = "auto"\n', answer=None, env_extra={"COLORFGBG": "0;15"}, state_text='theme = "dark"\n')
-r.send(MENU + b"y", 0.8); r.send(MENU + b"y", 0.8)
-check("auto with a silent terminal falls back to COLORFGBG live", r.header_bg() == T["light"]["bar_bg"] and "COLORFGBG" in r.text())
+pick(r, "auto")
+check("auto with a silent terminal falls back to COLORFGBG live", r.header_bg() == T["light"]["bar_bg"])
 r.quit()
 
 # ------------------------------------------------------------ ANSI remap and untouched colours
 PRINT = b"printf '\\033[31mRE''DTXT\\033[0m \\033[38;5;196mIDX''196\\033[0m \\033[38;2;10;20;30mTRU''ECOL\\033[0m plain''TXT\\n'\n"
-for th in ("dark", "light"):
+for th in ("dark", "light", "monokai", "solarized-light", "high-contrast"):
     r = Run("ansi_" + th, f'[defaults]\ntheme = "{th}"\n')
     r.send(PRINT, 1.0)
     red, idx, tru, pl = (r.find(p, last=True) for p in ("REDTXT", "IDX196", "TRUECOL", "plainTXT"))
@@ -210,7 +277,7 @@ def painted(r, th, tag):
     check(f"{th}: {tag}: default text has the theme text colour", p and r.cell(*p).fg == t["fg"])
     check(f"{th}: {tag}: nothing in the shell area is left to the terminal", all(r.cell(x, yy).bg != "default" for yy in (3, 20, 40) for x in (0, 50, 99)))
 
-for th in ("dark", "light"):
+for th in ("dark", "light", "monokai", "solarized-light", "high-contrast"):
     r = Run("paint_" + th, f'[defaults]\ntheme = "{th}"\npreview_side = "tab"\n')
     painted(r, th, "shell")
     r.send(MENU + b"p", 0.5); r.send(b"a.md\r", 1.0)
@@ -275,8 +342,8 @@ def preview_checks(th):
     check(f"{th}: diff added line uses the add colour", add and r.cell(*add).fg == t["diff_add"])
     check(f"{th}: diff removed line uses the remove colour", rem and r.cell(*rem).fg == t["diff_remove"])
     r.quit()
-preview_checks("dark")
-preview_checks("light")
+for th in ("dark", "light", "monokai", "solarized-light", "high-contrast", "quiet-light"):
+    preview_checks(th)
 
 print()
 print("FAILED: " + ", ".join(fails) if fails else "all passed")

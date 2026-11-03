@@ -44,7 +44,7 @@ pub struct Defaults {
     /// What Shift+Enter sends: `auto` (newline in agent tabs, Enter elsewhere), `newline`,
     /// `esc-cr` or `enter`.
     pub shift_enter: String,
-    /// Colour theme: `auto` (ask the terminal, then COLORFGBG, then dark), `dark` or `light`.
+    /// Colour theme: `auto` (ask the terminal, then COLORFGBG, then dark) or a theme name (`dark`, `light`, `monokai`, ...; see README).
     pub theme: String,
     /// Map the terminal's named ANSI colours (0-15) in shell tabs to the theme palette.
     pub ansi_remap: bool,
