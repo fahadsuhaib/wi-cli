@@ -41,7 +41,9 @@ wi supports macOS and Linux.
 - Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
 - File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane; Enter previews a file, O opens it in `$EDITOR` in a new tab
 - Pinned panes: pin any tab beside the active one (menu: search "pin"); ⇄ swaps left/right, ✕ unpins; the layout is remembered per workspace (needs 101+ columns)
-- Search in files, find file, find in output; dark and light themes (Y cycles auto, dark, light; auto follows your terminal)
+- Previews refresh by themselves when the file changes on disk (see Configuration)
+- Search in files, find file, find in output
+- Themes: dark and light; Y cycles auto, dark, light. The chosen theme paints the whole window, shell included, so a light theme looks light on a dark terminal; auto follows your terminal's colours on each start
 - Update wi from the menu (search "update"): asks before contacting github.com, checks the SHA256, replaces the binary, then offers to restart wi with the same tabs ("Restart wi" does the restart alone)
 
 ## Keys
@@ -63,6 +65,33 @@ wi supports macOS and Linux.
 | R | Reconnect (remote) | I / Q | Info / quit |
 
 Inside a preview: arrows and PgUp/PgDn scroll, F find, W wrap, M markdown source, R reload, H recent files, Esc back, Q close.
+
+## Pinned panes (tabs side by side)
+
+Pin any tab beside the one you are working in, for example a Claude tab on the right while you use a shell.
+
+1. Ctrl-Space, then Space, and type `pin`. Choose "Pin tab right" or "Pin tab left" and press Enter.
+2. The tab moves to that side and stays visible and live. You land on your next tab (or a new shell).
+3. Click a pane, or press Ctrl-Space then W, to move the keyboard between them. Wheel, selection and links work in both.
+4. ⇄ in the pinned pane's corner (or "Swap pane sides") switches left and right. ✕, Ctrl-Space then V, or "Unsplit" unpins; the tab stays as a normal tab.
+
+The terminal must be at least 101 columns wide, otherwise wi shows one pane. The layout is remembered per workspace.
+While a tab is pinned, links and previews open as ordinary tabs. The explorer cannot be pinned, and a pinned local shell
+starts fresh after a restart.
+
+## Menu items without a key
+
+A few items have no letter because they are all taken. Press Ctrl-Space, then Space, and type a few letters:
+`pin` (Pin tab right / left, Swap pane sides, Unsplit), `recent` (Recent files), `update` (Update wi),
+`restart` (Restart wi).
+
+## Updating
+
+Ctrl-Space, Space, `update`. wi asks before it contacts github.com, tells you whether a newer release exists, asks again
+before downloading, checks the SHA256, and replaces the binary. If the folder is not writable (for example
+`/usr/local/bin`) it shows the `sudo install` command instead of running it. Afterwards it offers "Restart wi now?":
+your tabs reopen in the same folders; running programs (shells, agents) start fresh, remote tabs reattach.
+"Restart wi" does the same without updating.
 
 Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOARD.md).
 
