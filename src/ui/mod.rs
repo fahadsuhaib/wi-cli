@@ -58,6 +58,8 @@ pub enum Action {
     /// Find text in the active shell tab's scrollback.
     FindOutput,
     Info,
+    /// The files recently shown in a preview, to open one again.
+    RecentFiles,
     Quit,
     EndAndQuit,
 }
@@ -149,6 +151,7 @@ const fn mi(label: &'static str, key: char, action: Action, remote_only: bool, s
 
 pub const MENU: &[MenuItem] = &[
     mi("Preview a file", 'p', Action::Preview, false, "FILES", &["open", "view", "show", "read", "markdown"]),
+    mi("Recent files", NO_KEY, Action::RecentFiles, false, "FILES", &["history", "previous", "open", "again", "last", "path"]),
     mi("Find file", 'k', Action::FindFile, false, "FILES", &["open", "fuzzy", "name", "locate"]),
     mi("Explorer", 'x', Action::Explorer, false, "FILES", &["tree", "browse", "folders", "files"]),
     mi("Git changes", 'g', Action::Git, false, "FILES", &["diff", "status", "commit", "branch", "modified"]),
@@ -761,6 +764,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
             (false, true) => "N/B match · ",
             (false, false) => "",
         };
+        let files = if p.kind == crate::preview::Kind::Diff { files.to_string() } else { format!("{files}H recent · ") };
         let back = if split.is_some() && v.pin.is_none() { "Esc to the shell · Q closes" } else { "Esc back · Q closes" };
         let md = p.md_hint().map(|h| format!("{h} · ")).unwrap_or_default();
         let wrap = if p.md_rendered() { "" } else { "W wrap · " };
@@ -817,14 +821,14 @@ fn draw_frame(f: &mut Frame, v: &View) {
 
 /// A preview (banner on top, then the body) drawn into `area`. Returns the body height.
 fn draw_preview(f: &mut Frame, area: Rect, p: &crate::preview::Preview, selection: Option<crate::select::Sel>) -> usize {
-    let (banner_area, body) = if p.banner.is_some() && area.height > 1 {
+    let (banner_area, body) = if p.has_header() && area.height > 1 {
         let [b, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
         (Some(b), body)
     } else {
         (None, area)
     };
-    if let (Some(b), Some(text)) = (banner_area, p.banner.as_deref()) {
-        f.render_widget(Paragraph::new(format!(" {text}")).style(Style::default().fg(theme().banner).bg(theme().bg).add_modifier(Modifier::BOLD)), b);
+    if let Some(b) = banner_area {
+        f.render_widget(Paragraph::new(preview_header(p, b.width as usize)).style(Style::default().fg(theme().banner).bg(theme().bg)), b);
     }
     let mut vis = p.visible(body.height as usize, body.width as usize);
     if let Some(sel) = selection {
@@ -834,6 +838,37 @@ fn draw_preview(f: &mut Frame, area: Rect, p: &crate::preview::Preview, selectio
     }
     f.render_widget(Paragraph::new(vis).style(Style::default().fg(theme().fg).bg(theme().bg)), body);
     body.height as usize
+}
+
+/// The row above a preview: the full path of the file (cut in the middle when it does not fit,
+/// the file name in bold), then the banner note when there is one.
+fn preview_header(p: &crate::preview::Preview, width: usize) -> Line<'static> {
+    let t = theme();
+    let note_style = Style::default().fg(t.banner).bg(t.bg).add_modifier(Modifier::BOLD);
+    if p.kind == crate::preview::Kind::Diff {
+        return Line::from(Span::styled(format!(" {}", p.banner.as_deref().unwrap_or_default()), note_style));
+    }
+    let note = p.banner.as_deref().map(|n| format!("  ·  {n}")).unwrap_or_default();
+    // Keep clear of the swap and close buttons a side pane draws over its top right corner.
+    let buttons = if width >= 24 { (crate::tab::CLOSE_W + crate::tab::SWAP_W) as usize } else { 0 };
+    let width = width - buttons;
+    let room = width.saturating_sub(1);
+    let note_w = note.chars().count();
+    // The note yields to the path, but never takes more than half the row from it.
+    let path_room = if note_w == 0 { room } else { room.saturating_sub(note_w).max(room / 2) };
+    let shown = crate::history::shorten_middle(&p.path, path_room);
+    let split = shown.rfind('/').map_or(0, |i| i + 1);
+    let (dir, name) = shown.split_at(split);
+    let mut spans = vec![
+        Span::styled(format!(" {dir}"), Style::default().fg(t.dim).bg(t.bg)),
+        Span::styled(name.to_string(), Style::default().fg(t.fg).bg(t.bg).add_modifier(Modifier::BOLD)),
+    ];
+    if !note.is_empty() {
+        let used = 1 + shown.chars().count();
+        let left = width.saturating_sub(used);
+        spans.push(Span::styled(note.chars().take(left).collect::<String>(), note_style));
+    }
+    Line::from(spans)
 }
 
 /// A bordered box in the given theme colours.

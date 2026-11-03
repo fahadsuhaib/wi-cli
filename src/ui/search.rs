@@ -201,7 +201,8 @@ fn draw_results(f: &mut Frame, main: Rect, r: &Results) {
 
 fn draw_finder(f: &mut Frame, main: Rect, fd: &Finder) {
     f.render_widget(Clear, main);
-    let mut title = format!(" find file: {} of {} files", crate::search::thousands(fd.hits.len()), crate::search::thousands(fd.files.len()));
+    let what = if fd.recent.is_some() { "recent files" } else { "find file" };
+    let mut title = format!(" {what}: {} of {} files", crate::search::thousands(fd.hits.len()), crate::search::thousands(fd.files.len()));
     if let Some(n) = &fd.notice {
         title.push_str(&format!("   ({n})"));
     }
@@ -210,20 +211,41 @@ fn draw_finder(f: &mut Frame, main: Rect, fd: &Finder) {
     let lit = canvas().fg(theme().hint_bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     let mut lines: Vec<Line> = Vec::new();
     for i in fd.list.top..(fd.list.top + list.height as usize).min(fd.hits.len()) {
-        let path = &fd.files[fd.hits[i].idx];
+        let idx = fd.hits[i].idx;
+        let path = &fd.files[idx];
         let selected = i == fd.list.sel;
-        let base = if selected { sel_style() } else { canvas() };
+        let mark = fd.recent.as_ref().and_then(|m| m.get(idx));
+        let mut base = if selected { sel_style() } else { canvas() };
+        if mark.is_some_and(|m| m.missing) && !selected {
+            base = base.fg(theme().dim);
+        }
         let pos = fuzzy::score(&fd.input, path).map(|(_, p)| p).unwrap_or_default();
-        let max = (list.width as usize).saturating_sub(2);
+        // What goes at the right end of a recent-files row.
+        let tail = mark.map(|m| {
+            let note = if m.missing { "not found" } else if m.current { "shown now" } else { "" };
+            if note.is_empty() { m.ago.clone() } else { format!("{note} · {}", m.ago) }
+        });
+        let tail_w = tail.as_ref().map_or(0, |t| t.chars().count() + 2);
+        let max = (list.width as usize).saturating_sub(2 + tail_w);
         let chars: Vec<char> = path.chars().collect();
         // Long paths lose their left part so the file name stays visible.
         let skip = chars.len().saturating_sub(max);
+        let name_at = if mark.is_some() { chars.iter().rposition(|&c| c == '/').map_or(0, |p| p + 1) } else { chars.len() };
         let mut spans = vec![Span::styled(" ", base)];
         let mut used = 1;
         for (ci, c) in chars.iter().enumerate().skip(skip) {
-            let st = if pos.contains(&ci) { base.patch(lit) } else { base };
+            let mut st = if pos.contains(&ci) { base.patch(lit) } else { base };
+            if ci >= name_at {
+                st = st.add_modifier(Modifier::BOLD);
+            }
             spans.push(Span::styled(c.to_string(), st));
             used += 1;
+        }
+        if let Some(t) = tail {
+            let gap = (list.width as usize).saturating_sub(used + t.chars().count() + 1);
+            spans.push(Span::styled(" ".repeat(gap), base));
+            spans.push(Span::styled(t.clone(), if selected { base } else { base.fg(theme().dim) }));
+            used += gap + t.chars().count();
         }
         if selected {
             spans.push(Span::styled(" ".repeat((list.width as usize).saturating_sub(used)), base));
@@ -231,7 +253,8 @@ fn draw_finder(f: &mut Frame, main: Rect, fd: &Finder) {
         lines.push(Line::from(spans));
     }
     if fd.hits.is_empty() {
-        lines.push(Line::from(Span::styled(" no file matches", dim())));
+        let msg = if fd.recent.is_some() { " no recent file matches" } else { " no file matches" };
+        lines.push(Line::from(Span::styled(msg, dim())));
     }
     f.render_widget(Paragraph::new(lines).style(canvas()), list);
     let input = Rect::new(main.x, main.y + main.height.saturating_sub(1), main.width, 1.min(main.height));

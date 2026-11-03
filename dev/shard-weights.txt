@@ -6,6 +6,8 @@ dev/pty_fetch.py local 0
 dev/pty_fetch.py remote 6
 dev/pty_git.py local 21
 dev/pty_git.py remote 17
+dev/pty_history.py local 30
+dev/pty_history.py remote 0
 dev/pty_input.py local 20
 dev/pty_keys.py local 63
 dev/pty_keys.py remote 65

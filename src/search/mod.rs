@@ -171,10 +171,26 @@ pub struct FindPrompt {
     pub text: String,
 }
 
+/// What the recent-files list shows beside a path.
+#[derive(Clone, Debug)]
+pub struct RecentMark {
+    /// Absolute path.
+    pub path: String,
+    pub ago: String,
+    /// This is the file the preview shows now.
+    pub current: bool,
+    /// The file is gone.
+    pub missing: bool,
+}
+
 /// The fuzzy file finder: the candidate list and the narrowed, ranked view of it.
 pub struct Finder {
     pub dir: String,
     pub files: Vec<String>,
+    /// Recent-files list instead of a file finder: one entry per `files` item.
+    pub recent: Option<Vec<RecentMark>>,
+    /// Recent files: Enter shows the file in the preview that has the keyboard instead of opening another.
+    pub replace: bool,
     pub notice: Option<String>,
     pub input: String,
     pub hits: Vec<fuzzy::Hit>,
@@ -185,7 +201,20 @@ impl Finder {
     pub fn new(files: Vec<String>, notice: Option<String>, dir: String) -> Finder {
         let hits = fuzzy::rank("", &files);
         let list = list::ListState::plain(hits.len());
-        Finder { dir, files, notice, input: String::new(), hits, list }
+        Finder { dir, files, recent: None, replace: false, notice, input: String::new(), hits, list }
+    }
+
+    /// The "Recent files" list: `files` are the shown paths (newest first), `marks` says how long
+    /// ago, which is on screen now and which no longer exist. `dir` is the folder they are relative to.
+    pub fn recent(files: Vec<String>, marks: Vec<RecentMark>, dir: String) -> Finder {
+        let mut f = Finder::new(files, None, dir);
+        f.recent = Some(marks);
+        f
+    }
+
+    /// Index into `files` of the highlighted entry.
+    pub fn selected_idx(&self) -> Option<usize> {
+        self.hits.get(self.list.sel).map(|h| h.idx)
     }
 
     /// Narrow the list after the input changed. Typing more reuses the previous result.

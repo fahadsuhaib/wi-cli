@@ -20,6 +20,7 @@ mod scroll;
 mod search;
 mod select;
 mod files;
+mod history;
 mod session;
 mod tab;
 mod term;

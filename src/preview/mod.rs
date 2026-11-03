@@ -300,6 +300,11 @@ impl Preview {
         }
     }
 
+    /// Whether a row above the body shows the file's path (and the banner note, if any).
+    pub fn has_header(&self) -> bool {
+        self.banner.is_some() || self.kind != Kind::Diff
+    }
+
     /// Take over the view state of the preview this one replaces (same file, newer content):
     /// scroll position (clamped when drawn), wrap, markdown view, jump target and find.
     pub fn carry_over(&mut self, old: &Preview) {
@@ -446,7 +451,7 @@ impl Preview {
             PrevFile => self.jump_file(false, page),
             MatchNext => self.find_step(true),
             MatchPrev => self.find_step(false),
-            Reload | Back | Find | Close => return false,
+            Reload | Back | Find | Close | History => return false,
         }
         true
     }
