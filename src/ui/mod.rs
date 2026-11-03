@@ -536,6 +536,7 @@ impl Widget for ScreenWidget<'_> {
                 let mut style = Style::default().fg(vt_color(cell.fgcolor())).bg(vt_color(cell.bgcolor()));
                 let mut m = Modifier::empty();
                 if cell.bold() { m |= Modifier::BOLD; }
+                if cell.dim() { m |= Modifier::DIM; }
                 if cell.italic() { m |= Modifier::ITALIC; }
                 if cell.underline() { m |= Modifier::UNDERLINED; }
                 let selected = sel.is_some_and(|s| crate::select::contains(s, row, col));
@@ -1117,5 +1118,54 @@ mod tests {
             }
         }
         assert_eq!(hint_labels(3), vec!["a", "s", "d"]);
+    }
+
+    fn render_screen(p: &vt100::Parser, w: u16, h: u16) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        ScreenWidget(p.screen(), None).render(Rect::new(0, 0, w, h), &mut buf);
+        buf
+    }
+
+    fn parser(rows: u16, cols: u16, sb: usize) -> vt100::Parser {
+        vt100::Parser::new(crate::tab::nz(rows), crate::tab::nz(cols), sb)
+    }
+
+    #[test]
+    fn dim_text_is_drawn_dim() {
+        let mut p = parser(2, 20, 0);
+        p.process(b"\x1b[2;38;2;200;100;50mfaint\x1b[0m plain");
+        let buf = render_screen(&p, 20, 2);
+        assert!(buf[(0, 0)].modifier.contains(Modifier::DIM));
+        assert_eq!(buf[(0, 0)].fg, Color::Rgb(200, 100, 50));
+        assert!(!buf[(8, 0)].modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn scrollback_rows_keep_their_background_to_the_row_end() {
+        let mut p = parser(3, 30, 50);
+        let mut s = String::new();
+        for i in 0..8 { s += &format!("\x1b[48;2;0;40;0m+ {i} line\x1b[K\x1b[0m\r\n"); }
+        p.process(s.as_bytes());
+        p.screen_mut().set_scrollback(4);
+        let buf = render_screen(&p, 30, 3);
+        for y in 0..3 {
+            assert_eq!(buf[(29, y)].bg, Color::Rgb(0, 40, 0), "row {y} fills to the last column (erase keeps the background)");
+        }
+    }
+
+    #[test]
+    fn scrollback_from_before_a_widening_keeps_its_old_width() {
+        // vt100 does not reflow: rows scrolled off while the pane was narrower (a side preview
+        // was open) stay that wide, so a background block ends at the old column. Claude Code
+        // redraws at the new width, which shows the diff twice. This documents the behaviour.
+        let mut p = parser(3, 30, 50);
+        let mut s = String::new();
+        for i in 0..8 { s += &format!("\x1b[48;2;0;40;0m+ {i}\x1b[K\x1b[0m\r\n"); }
+        p.process(s.as_bytes());
+        p.screen_mut().set_size(crate::tab::nz(3), crate::tab::nz(60));
+        p.screen_mut().set_scrollback(4);
+        let buf = render_screen(&p, 60, 3);
+        assert_eq!(buf[(29, 0)].bg, Color::Rgb(0, 40, 0));
+        assert_eq!(buf[(30, 0)].bg, Color::Reset);
     }
 }
