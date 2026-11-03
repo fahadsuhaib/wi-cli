@@ -401,6 +401,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     let mut rjob: Option<RJob<'_>> = None;
     let mut next_poll = Instant::now();
     let mut note: Option<(Instant, String)> = None;
+    // One-time "new line" hint: due a moment after an agent tab is first shown, so the host's
+    // answer to the key-protocol query has arrived. Never once Alt+Enter has been used.
+    let mut hint_at: Option<Instant> = None;
+    let mut hint_done = agent_state.newline_hint_seen || !keys_on;
     let frame = Duration::from_secs_f64(1.0 / fps.clamp(1, 120) as f64);
     let mut last_draw = Instant::now() - frame;
     let mut dirty = true;
@@ -513,7 +517,19 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
             watches.retain(|k, _| app.tabs.iter().any(|t| t.preview.iter().chain(t.side.iter()).any(|p| &p.path == k)));
         }
         if vis.is_empty() { rjob = None; }
-        let note_at = note.as_ref().map(|n| n.0);
+        if decoder.alt_enter_seen && !agent_state.newline_hint_seen {
+            agent_state.newline_hint_seen = true;
+            hint_done = true;
+            let _ = agent_state.save();
+        }
+        if !hint_done && hint_at.is_none() && matches!(mode, Mode::Shell) && app.tabs[app.active].is_agent() {
+            hint_at = Some(Instant::now() + Duration::from_millis(1500));
+        }
+        let hint_wait = if hint_done { None } else { hint_at };
+        let note_at = match (note.as_ref().map(|n| n.0), hint_wait) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         // Earliest moment a still-printing background tab counts as quiet. No tab streaming
         // means no deadline, so an idle wi has no timers running.
         let quiet_at = app.tabs.iter().enumerate()
@@ -585,10 +601,20 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 }
             }
             _ = sleep_until(note_at.unwrap_or(due).into()), if note_at.is_some() => {
-                if let Some((_, text)) = note.take() && message.as_deref() == Some(text.as_str()) {
+                if !hint_done && hint_at.is_some_and(|h| h <= Instant::now()) {
+                    hint_done = true;
+                    if !decoder.enhanced && !decoder.alt_enter_seen && matches!(mode, Mode::Shell) && message.as_deref().is_none_or(|m| m.starts_with("started:")) && app.tabs[app.active].is_agent() {
+                        let m = "New line: Alt+Enter (Shift+Enter isn't available in this terminal)".to_string();
+                        message = Some(m.clone());
+                        note = Some((Instant::now() + Duration::from_secs(6), m));
+                        dirty = true;
+                    }
+                }
+                if let Some((t, text)) = note.as_ref() && *t <= Instant::now() && message.as_deref() == Some(text.as_str()) {
                     message = None;
                     dirty = true;
                 }
+                if note.as_ref().is_some_and(|n| n.0 <= Instant::now()) { note = None; }
             }
             _ = sleep_until(due.into()), if dirty => {
                 if std::mem::take(&mut sel_reset) { sel = None; }
@@ -1636,7 +1662,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         return finish(&app, backend).await;
                                     }
                                     Action::Info => {
-                                        let keys = if decoder.enhanced { "keys: enhanced keyboard active" } else { "keys: standard (Shift+Enter looks like Enter to wi)" };
+                                        let keys = if decoder.enhanced { "keys: enhanced keyboard active · New line: Shift+Enter or Alt+Enter" } else { "keys: standard · New line: Alt+Enter (Shift+Enter looks like Enter in this terminal)" };
                                         message = Some(if remote {
                                             format!("{keys} · {name} · {detail} · connected · {} tab(s)", app.tabs.len())
                                         } else {

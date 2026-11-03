@@ -55,10 +55,12 @@ pub struct KeyDecoder {
     carry: Vec<u8>,
     /// An enhanced report (CSI u or modifyOtherKeys) has been received at least once.
     pub enhanced: bool,
+    /// An Alt+Enter (any encoding) has been received at least once.
+    pub alt_enter_seen: bool,
 }
 
 fn is_param(b: u8) -> bool {
-    b.is_ascii_digit() || b == b';' || b == b':'
+    b.is_ascii_digit() || b == b';' || b == b':' || b == b'?'
 }
 
 fn esc_prefix(alt: bool, mut v: Vec<u8>) -> Vec<u8> {
@@ -161,6 +163,8 @@ fn parse_u32(s: &str) -> Option<u32> {
 fn decode_csi(params: &str, fin: u8) -> Option<Key> {
     let fields: Vec<&str> = params.split(';').collect();
     match fin {
+        // The host's answer to our `CSI ? u` query: it speaks the kitty protocol. Swallowed.
+        b'u' if params.starts_with('?') => Some(Key::Dropped),
         b'u' => {
             let mut code_parts = fields.first()?.split(':');
             let code = parse_u32(code_parts.next()?)?;
@@ -269,8 +273,16 @@ impl KeyDecoder {
         let mut out = Vec::with_capacity(data.len());
         for ev in self.events(data) {
             match ev {
-                Ev::Raw(b) => out.extend(b),
+                Ev::Raw(b) => {
+                    if b.windows(2).any(|w| w == b"\x1b\r" || w == b"\x1b\n") {
+                        self.alt_enter_seen = true;
+                    }
+                    out.extend(b)
+                }
                 Ev::Key { key, raw } => {
+                    if key == Key::AltEnter {
+                        self.alt_enter_seen = true;
+                    }
                     let legacy = match key {
                         Key::Bytes(b) => b,
                         Key::ShiftEnter => map.shift.to_vec(),
@@ -278,6 +290,9 @@ impl KeyDecoder {
                         Key::AltEnter => map.alt.to_vec(),
                         Key::Dropped => Vec::new(),
                     };
+                    if raw.starts_with(b"\x1b[?") {
+                        continue;
+                    }
                     match passthrough {
                         Some(menu) if legacy != [menu] => out.extend(raw),
                         _ => out.extend(legacy),
@@ -314,6 +329,27 @@ mod tests {
     #[test] fn ctrl_enter_mok() { assert_eq!(one(b"\x1b[27;5;13~"), b"C"); }
     #[test] fn alt_enter_kitty() { assert_eq!(one(b"\x1b[13;3u"), b"\x1b\r"); }
     #[test] fn alt_enter_mok() { assert_eq!(one(b"\x1b[27;3;13~"), b"\x1b\r"); }
+    #[test] fn host_query_reply_is_swallowed_and_marks_enhanced() {
+        let mut d = KeyDecoder::default();
+        assert!(d.decode(b"a\x1b[?1ub", &MAP, None) == b"ab" && d.enhanced);
+        let mut d = KeyDecoder::default();
+        assert!(d.decode(b"\x1b[?", &MAP, None).is_empty());
+        assert!(d.decode(b"0u", &MAP, Some(0)).is_empty() && d.enhanced);
+    }
+    #[test] fn alt_enter_every_variant_is_never_a_submit() {
+        for v in [&b"\x1b[13;3u"[..], b"\x1b[27;3;13~", b"\x1b[13;3:1u", b"\x1b[13;67u", b"\x1b[57414;3u"] {
+            assert_eq!(one(v), b"\x1b\r", "{v:?}");
+        }
+        assert_eq!(one(b"\x1b[13;3:3u"), b"");
+        // legacy bytes pass through whole, also next to other input
+        assert_eq!(dec(&[b"a\x1b\rb"]), b"a\x1b\rb");
+        assert_eq!(dec(&[b"\x1b", b"\r"]), b"\x1b\r");
+        assert_eq!(dec(&[b"\x1b\n"]), b"\x1b\n");
+        // agent mapping keeps Alt+Enter as ESC CR whatever shift_enter says
+        for st in ["auto", "newline", "esc-cr", "enter"] {
+            assert_eq!(EnterMap::for_tab(st, true).alt, b"\x1b\r");
+        }
+    }
     #[test] fn plain_enter_kitty() { assert_eq!(one(b"\x1b[13u"), b"\r"); assert_eq!(one(b"\x1b[13;1u"), b"\r"); }
     #[test] fn legacy_cr_untouched() { assert_eq!(one(b"\r"), b"\r"); }
     #[test] fn legacy_alt_enter_untouched() { assert_eq!(one(b"\x1b\r"), b"\x1b\r"); }
@@ -390,7 +426,7 @@ mod tests {
     #[test] fn mouse_report_split_untouched() { assert_eq!(dec(&[b"\x1b[<0;1", b"0;5M"]), b"\x1b[<0;10;5M"); }
     #[test] fn paste_markers_untouched() { assert_eq!(one(b"\x1b[200~x\x1b[201~"), b"\x1b[200~x\x1b[201~"); }
     #[test] fn unknown_csi_untouched() { assert_eq!(one(b"\x1b[?1;2c\x1b[12;5R\x1b[I\x1b[O"), b"\x1b[?1;2c\x1b[12;5R\x1b[I\x1b[O"); }
-    #[test] fn query_reply_u_untouched() { assert_eq!(one(b"\x1b[?0u"), b"\x1b[?0u"); }
+    #[test] fn query_reply_u_swallowed() { assert_eq!(one(b"\x1b[?0u"), b""); }
     #[test] fn malformed_untouched() { assert_eq!(one(b"\x1b[u"), b"\x1b[u"); assert_eq!(one(b"\x1b[;;u"), b"\x1b[;;u"); }
     #[test] fn invalid_code_dropped() { assert_eq!(one(b"\x1b[99999999;5u"), b""); }
     #[test] fn lone_esc_held_until_flush() {

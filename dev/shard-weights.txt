@@ -38,3 +38,4 @@ dev/pty_update.py local 70
 dev/pty_explorer.py local 97
 dev/pty_explorer.py remote 112
 dev/pty_panes.py local 60
+dev/pty_newline.py local 12

@@ -54,7 +54,7 @@ pub fn restore_terminal() {
     let _ = terminal::disable_raw_mode();
 }
 
-const KEYS_ON: &[u8] = b"\x1b[>1u\x1b[>4;2m";
+const KEYS_ON: &[u8] = b"\x1b[>1u\x1b[>4;2m\x1b[?u";
 const KEYS_OFF: &[u8] = b"\x1b[<u\x1b[>4;0m";
 const RESTORE_SEQ: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l";
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn key_protocol_sequences() {
-        assert_eq!(KEYS_ON, b"\x1b[>1u\x1b[>4;2m");
+        assert_eq!(KEYS_ON, b"\x1b[>1u\x1b[>4;2m\x1b[?u");
         assert_eq!(KEYS_OFF, b"\x1b[<u\x1b[>4;0m");
     }
 

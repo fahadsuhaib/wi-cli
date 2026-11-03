@@ -50,6 +50,8 @@ wi supports macOS and Linux.
 
 `Ctrl-Space` opens the menu; press the underlined letter or use the arrows and Enter. Esc closes it.
 
+New line in an agent tab: Alt+Enter works in every terminal (Shift+Enter only where the terminal reports it; see `docs/KEYBOARD.md`).
+
 | Key | Action | Key | Action |
 |---|---|---|---|
 | P | Preview a file | N | New shell tab |
