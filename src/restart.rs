@@ -19,6 +19,9 @@ pub struct SnapTab {
     pub cwd: String,
     #[serde(default)]
     pub title: String,
+    /// Custom tab name set by the user (empty: automatic title).
+    #[serde(default)]
+    pub name: String,
     /// `claude` or `codex` for an agent tab.
     #[serde(default)]
     pub agent: String,
@@ -87,7 +90,7 @@ mod tests {
             side: "right".into(),
             pct: 45,
             tabs: vec![
-                SnapTab { kind: "shell".into(), backend: "local".into(), cwd: "/work/a b".into(), title: "a b".into(), ..Default::default() },
+                SnapTab { kind: "shell".into(), backend: "local".into(), cwd: "/work/a b".into(), title: "a b".into(), name: "my build".into(), ..Default::default() },
                 SnapTab { kind: "agent".into(), backend: "local".into(), cwd: "/work".into(), title: "claude".into(), agent: "claude".into(), ..Default::default() },
                 SnapTab { kind: "preview".into(), backend: "local".into(), title: "x.md".into(), path: "/work/x.md".into(), ..Default::default() },
             ],

@@ -16,6 +16,7 @@ mod mouse;
 mod opener;
 mod preview;
 mod refresh;
+mod rename;
 mod restart;
 mod scroll;
 mod search;

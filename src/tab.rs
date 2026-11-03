@@ -134,6 +134,8 @@ pub struct Tab {
     pub title: String,
     /// Title used when the program has not set one.
     pub fallback: String,
+    /// Name the user gave this tab; wins over the automatic title and never touches agent detection.
+    pub custom: Option<String>,
     pub compat: crate::compat::Compat,
     pub parser: vt100::Parser,
     /// None for preview tabs.
@@ -205,6 +207,7 @@ impl Tab {
             id,
             fallback: title.clone(),
             title,
+            custom: None,
             compat: Default::default(),
             parser: vt100::Parser::new(nz(rows), nz(cols), scrollback),
             handle: Some(handle),
@@ -228,6 +231,32 @@ impl Tab {
         }
         self.fallback = tab_title(self.number, self.agent.as_deref(), &self.dir, self.show_dir, None);
         self.title = tab_title(self.number, self.agent.as_deref(), &self.dir, self.show_dir, self.compat.title.as_deref());
+        self.apply_custom();
+    }
+
+    /// The user's name for the tab replaces whatever title was computed.
+    pub fn apply_custom(&mut self) {
+        if let Some(c) = &self.custom {
+            self.title = c.clone();
+        }
+    }
+
+    /// Set (or with `None` clear) the custom name. The text is cleaned the same way as typed input.
+    pub fn set_custom(&mut self, name: Option<&str>) {
+        self.custom = name.map(crate::rename::clean).filter(|n| !n.is_empty());
+        if self.preview.is_some() {
+            self.title = self.custom.clone().unwrap_or_else(|| self.fallback.clone());
+        } else {
+            self.retitle();
+        }
+    }
+
+    /// Text in the tab strip: a long custom name is cut with an ellipsis (the full name is kept).
+    pub fn strip_title(&self) -> String {
+        match &self.custom {
+            Some(c) => crate::rename::clip(c, crate::rename::STRIP_COLS),
+            None => self.title.clone(),
+        }
     }
 
     /// The program in this tab is an AI agent: started as one, or its title says claude/codex.
@@ -255,6 +284,7 @@ impl Tab {
             id,
             fallback: preview.title.clone(),
             title: preview.title.clone(),
+            custom: None,
             compat: Default::default(),
             parser: vt100::Parser::new(nz(1), nz(1), 0),
             handle,
@@ -473,6 +503,40 @@ mod tests {
         t.compat.title = None;
         t.retitle();
         assert_eq!(t.title, "claude · web-app");
+    }
+
+    #[test]
+    fn custom_name_wins_and_empty_goes_back_to_automatic() {
+        let mut t = Tab::new(0, "shell 1".into(), handle(), 80, 24, 100);
+        t.dir = "/p/web-app".into();
+        t.show_dir = true;
+        t.retitle();
+        assert_eq!(t.title, "web-app");
+        t.set_custom(Some("  my build \x07"));
+        assert_eq!(t.title, "my build");
+        // the program's own title and an agent start do not replace it, and detection is unchanged
+        t.output(b"\x1b]0;other\x07");
+        assert_eq!(t.title, "my build");
+        assert!(!t.is_agent());
+        t.output(b"\x1b]0;claude code\x07");
+        assert_eq!(t.title, "my build");
+        assert!(t.is_agent());
+        t.set_custom(Some("   "));
+        assert_eq!(t.custom, None);
+        assert_eq!(t.title, "web-app · claude code");
+    }
+
+    #[test]
+    fn strip_title_cuts_long_custom_names_only_in_the_strip() {
+        let mut t = Tab::new(0, "shell 1".into(), handle(), 80, 24, 100);
+        let long = "n".repeat(40);
+        t.set_custom(Some(&long));
+        assert_eq!(t.title, long);
+        assert_eq!(t.custom.as_deref(), Some(long.as_str()));
+        assert_eq!(t.strip_title().chars().count(), crate::rename::STRIP_COLS);
+        assert!(t.strip_title().ends_with('…'));
+        t.set_custom(None);
+        assert_eq!(t.strip_title(), t.title);
     }
 
     #[test]

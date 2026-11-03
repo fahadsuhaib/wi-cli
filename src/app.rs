@@ -36,6 +36,8 @@ use tokio::time::sleep_until;
 enum Mode {
     Shell,
     Prompt(Prompt),
+    /// Naming a tab (the inline one-line prompt).
+    Rename(crate::rename::Rename),
     Ask(Ask),
     /// The theme picker (arrows preview, Enter saves, Esc reverts).
     ThemePick(ui::themepick::ThemePick),
@@ -321,7 +323,17 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     }
                 }
             }
+            if let Some(i) = id.and_then(|id| app.tabs.iter().position(|x| x.id == id)) && !t.name.is_empty() {
+                app.tabs[i].set_custom(Some(&t.name));
+            }
             restore_ids.push(id);
+        }
+        // Reattached remote tabs were opened above, before the snapshot was read: names go by order.
+        if !restored.is_empty() {
+            let named = sn.tabs.iter().filter(|t| t.kind != "preview");
+            for (tab, t) in app.tabs.iter_mut().filter(|x| !x.is_preview()).zip(named) {
+                if !t.name.is_empty() { tab.set_custom(Some(&t.name)); }
+            }
         }
         if let Some(Some(id)) = restore_ids.get(sn.active) && let Some(i) = app.tabs.iter().position(|t| t.id == *id) {
             app.active = i;
@@ -704,6 +716,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     focus_side: app.tabs[app.active].side_focused(),
                     prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
                     ask: match &mode { Mode::Ask(x) => Some(x), _ => None },
+                    rename: match &mode { Mode::Rename(x) => Some(x), _ => None },
                     themes: match &mode { Mode::ThemePick(x) => Some(x), _ => None },
                     confirm: confirm_ref,
                     hints: hints_ref,
@@ -832,6 +845,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 Intent::None => {}
                                 Intent::Synth(bytes) => out.extend(bytes),
                                 Intent::SwitchTab(i) => { sel = None; switch_to(&mut app, i); dirty = true; }
+                                Intent::RenameTab(i) => {
+                                    sel = None;
+                                    let t = &app.tabs[i];
+                                    mode = Mode::Rename(crate::rename::Rename::new(t.id, t.custom.as_deref().unwrap_or(&t.title)));
+                                    dirty = true;
+                                }
                                 Intent::ClosePreview => {
                                     unsplit(&mut app);
                                     sel = None;
@@ -999,6 +1018,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             p.error = None;
                             dirty = true;
                         } else if paste_search(&mut mode, &String::from_utf8_lossy(&b).replace(['\r', '\n'], "")) {
+                            dirty = true;
+                        } else if let Mode::Rename(r) = &mut mode {
+                            r.insert(&String::from_utf8_lossy(&b));
                             dirty = true;
                         } else if let Mode::Ask(x) = &mut mode {
                             x.paste(&String::from_utf8_lossy(&b).replace(['\r', '\n'], ""));
@@ -1532,6 +1554,24 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             dirty = true;
                             chunk = &[];
                         }
+                        Mode::Rename(ref mut r) => {
+                            let mut outcome = None;
+                            for k in crate::ask::parse(chunk) {
+                                if let Some(o) = r.key(k) { outcome = Some(o); break; }
+                            }
+                            if let Some(o) = outcome {
+                                if let crate::rename::RenameOutcome::Save(name) = o
+                                    && let Some(i) = app.tabs.iter().position(|t| t.id == r.tab)
+                                {
+                                    app.tabs[i].set_custom(name.as_deref());
+                                    refresh_labels(&mut app);
+                                    message = Some(match name { Some(n) => format!("tab renamed to {n}"), None => "tab name cleared: automatic title".into() });
+                                }
+                                mode = Mode::Shell;
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
                         Mode::Ask(ref mut ask) => {
                             let mut outcome = None;
                             for k in crate::ask::parse(chunk) {
@@ -1721,10 +1761,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     }
                                     Action::Info => {
                                         let keys = if decoder.enhanced { "keys: enhanced keyboard active · New line: Shift+Enter or Alt+Enter" } else { "keys: standard · New line: Alt+Enter (Shift+Enter looks like Enter in this terminal)" };
+                                        let tab = app.tabs[app.active].custom.as_ref().map(|n| format!("tab: {n} · ")).unwrap_or_default();
                                         message = Some(if remote {
-                                            format!("{keys} · {name} · {detail} · connected · {} tab(s)", app.tabs.len())
+                                            format!("{tab}{keys} · {name} · {detail} · connected · {} tab(s)", app.tabs.len())
                                         } else {
-                                            format!("{keys} · local workspace · {detail} · {} tab(s)", app.tabs.len())
+                                            format!("{tab}{keys} · local workspace · {detail} · {} tab(s)", app.tabs.len())
                                         });
                                     }
                                     Action::OpenLink => {
@@ -1761,6 +1802,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         let _ = std::io::Write::write_all(&mut o, if mouse_on { mouse::ENABLE } else { mouse::DISABLE });
                                         let _ = std::io::Write::flush(&mut o);
                                         message = Some(if mouse_on { "mouse on".to_string() } else { "mouse off: select and copy text natively".to_string() });
+                                    }
+                                    Action::RenameTab => {
+                                        let t = &app.tabs[app.active];
+                                        mode = Mode::Rename(crate::rename::Rename::new(t.id, t.custom.as_deref().unwrap_or(&t.title)));
                                     }
                                     Action::Theme => mode = Mode::ThemePick(ui::themepick::ThemePick::new(theme_mode)),
                                     Action::Restart => {
@@ -2293,7 +2338,7 @@ fn displayed(app: &App, main: Rect) -> Vec<(usize, Rect)> {
 fn strip_of(app: &App) -> Vec<(String, bool, crate::tab::TabState)> {
     let shown = pin_split(app, main_area(app)).and_then(|_| partner_idx(app));
     app.tabs.iter().enumerate()
-        .map(|(i, t)| (t.title.clone(), i == app.active, t.state(i == app.active || Some(i) == shown))).collect()
+        .map(|(i, t)| (t.strip_title(), i == app.active, t.state(i == app.active || Some(i) == shown))).collect()
 }
 
 /// `main_rect` without a terminal size: only the proportions that matter for fitting panes.
@@ -2400,6 +2445,7 @@ async fn open_in_place(app: &mut App, backend: &Backend, input: &str, cap: usize
         let t = &mut app.tabs[active];
         t.title = title.clone();
         t.fallback = title;
+        t.apply_custom();
     }
     resize_all(app)
 }
@@ -2650,9 +2696,9 @@ async fn build_snapshot(app: &App, backend: &Backend, ws: &Workspace) -> crate::
     for t in &app.tabs {
         if let Some(p) = &t.preview {
             if p.path.starts_with('/') {
-                tabs.push(SnapTab { kind: "preview".into(), backend: where_.into(), title: t.title.clone(), path: p.path.clone(), ..Default::default() });
+                tabs.push(SnapTab { kind: "preview".into(), backend: where_.into(), title: t.title.clone(), name: t.custom.clone().unwrap_or_default(), path: p.path.clone(), ..Default::default() });
             } else {
-                tabs.push(SnapTab { kind: "preview".into(), backend: where_.into(), title: t.title.clone(), ..Default::default() });
+                tabs.push(SnapTab { kind: "preview".into(), backend: where_.into(), title: t.title.clone(), name: t.custom.clone().unwrap_or_default(), ..Default::default() });
             }
             continue;
         }
@@ -2662,6 +2708,7 @@ async fn build_snapshot(app: &App, backend: &Backend, ws: &Workspace) -> crate::
             backend: where_.into(),
             cwd,
             title: t.title.clone(),
+            name: t.custom.clone().unwrap_or_default(),
             agent: t.agent.clone().unwrap_or_default(),
             path: String::new(),
         });
@@ -2843,6 +2890,8 @@ enum Intent {
     /// Handle as if these bytes had been typed (or, in a shell tab, send them to the app).
     Synth(Vec<u8>),
     SwitchTab(usize),
+    /// A click on the active tab (or the second click of a double-click): name it.
+    RenameTab(usize),
     PreviewScroll(isize, Pane),
     /// Mouse wheel in scrollback: positive looks further back, negative returns toward the live view.
     ScrollWheel(isize),
@@ -2879,7 +2928,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
+        Mode::Rename(_) | Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
         Mode::GrepPrompt(p) => match m.kind {
             Kind::Down(mouse::Button::Left) => ui::search::grep_chip_at(main, p, m.col, m.row).map_or(Intent::None, |k| Intent::Synth(k.to_vec())),
             _ => Intent::None,
@@ -2905,7 +2954,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
             if app.tabs.len() > 1 && m.row == 1 {
                 let strip = strip_of(app);
                 return match m.kind {
-                    Kind::Down(mouse::Button::Left) => ui::tab_at(&strip, m.col).map_or(Intent::None, Intent::SwitchTab),
+                    Kind::Down(mouse::Button::Left) => ui::tab_at(&strip, m.col).map_or(Intent::None, |i| if i == app.active { Intent::RenameTab(i) } else { Intent::SwitchTab(i) }),
                     _ => Intent::None,
                 };
             }

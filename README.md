@@ -40,6 +40,7 @@ wi supports macOS and Linux.
   `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation
 - Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
 - File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane; Enter previews a file, O opens it in `$EDITOR` in a new tab
+- Rename a tab (menu: search "rename", click the active tab, or double-click any tab); the name survives "Restart wi"
 - Pinned panes: pin any tab beside the active one (menu: search "pin"); ⇄ swaps left/right, ✕ unpins; the layout is remembered per workspace (needs 101+ columns)
 - Previews refresh by themselves when the file changes on disk (see Configuration)
 - Search in files, find file, find in output
@@ -95,11 +96,21 @@ Menu, then Y (or search "theme") opens the theme picker: `Auto`, then the dark t
 
 The colours come from VS Code's built-in themes (the shell's 16 ANSI colours from each theme's terminal colours), mapped onto wi's roles. Colours that would be hard to read on a theme's background are nudged toward white or black until text reaches a 4.5:1 contrast ratio (7:1 in the two high-contrast themes). `theme = "monokai"` (any name above, case does not matter) in `[defaults]` of the config sets one for good and wins over the picker's saved choice; an unknown name falls back to `auto` with a note in the status line. `paint_background = false` still leaves the terminal's own colours in the shell area.
 
+## Naming a tab
+
+Give a tab your own name: Ctrl-Space, Space, `rename` (Rename tab), or click the tab that is already active in the tab
+strip, or double-click any tab. A one-line prompt opens with the current name and a real cursor: left/right/Home/End,
+Backspace/Delete and paste work, Enter saves, Esc cancels. An empty name goes back to the automatic title (shell title,
+folder, agent). Names are trimmed, limited to 40 columns, and cut with an ellipsis in the strip (the full name is kept).
+The name wins over the automatic title and stays when the program changes its own terminal title; it does not affect how
+wi treats an agent tab (new-line keys). A single click on a tab that is not active still just switches to it.
+Custom names survive "Restart wi" (and the restart after an update); they are not remembered across a normal quit.
+
 ## Menu items without a key
 
 A few items have no letter because they are all taken. Press Ctrl-Space, then Space, and type a few letters:
 `pin` (Pin tab right / left, Swap pane sides, Unsplit), `recent` (Recent files), `update` (Update wi),
-`restart` (Restart wi).
+`restart` (Restart wi), `rename` (Rename tab; also `title`, `name`, `label`).
 
 ## Updating
 

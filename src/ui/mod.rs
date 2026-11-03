@@ -33,6 +33,8 @@ pub enum Action {
     Theme,
     /// Check for a newer wi release and install it (local binary only, after confirmations).
     Update,
+    /// Name the active tab (an empty name goes back to the automatic title).
+    RenameTab,
     /// Restart wi in place (the same tabs come back).
     Restart,
     Agent,
@@ -163,6 +165,7 @@ pub const MENU: &[MenuItem] = &[
     mi("Next tab", 't', Action::NextTab, false, "TABS", &["switch", "right", "forward"]),
     mi("Previous tab", 'b', Action::PrevTab, false, "TABS", &["switch", "left", "back"]),
     mi("Close tab", 'c', Action::CloseTab, false, "TABS", &["kill", "end", "remove"]),
+    mi("Rename tab", NO_KEY, Action::RenameTab, false, "TABS", &["title", "name", "label", "call"]),
     mi("Switch pane", 'w', Action::SwitchPane, false, "TABS", &["focus", "split", "side"]),
     mi("Close preview", 'v', Action::ClosePreview, false, "TABS", &["side", "pane", "hide"]),
     // No hotkey (NO_KEY): the letters are used up; these are found with Space and a few letters.
@@ -521,6 +524,7 @@ pub struct View<'a> {
     pub split: (crate::tab::Side, u16),
     pub focus_side: bool,
     pub ask: Option<&'a Ask>,
+    pub rename: Option<&'a crate::rename::Rename>,
     /// The theme picker, when open.
     pub themes: Option<&'a themepick::ThemePick>,
     pub preview: Option<&'a crate::preview::Preview>,
@@ -786,6 +790,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
         _ if v.confirm.is_some() => " Y or Enter to continue · N or Esc to cancel".to_string(),
         _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
         _ if v.themes.is_some() => " arrows preview a theme · Enter applies and saves · type to filter · Esc cancels".to_string(),
+        _ if v.rename.is_some() => " Enter saves · Esc cancels · empty name goes back to the automatic title".to_string(),
         _ if v.ask.is_some() => " Enter starts · E edits the command · N not now · X never here".to_string(),
         _ if v.prompt.is_some_and(|p| p.kind.is_folder()) => " Tab completes folders · arrows pick a recent one · Enter confirms · Esc cancels".to_string(),
         _ if v.prompt.is_some() => " Tab completes · Enter opens · Esc cancels".to_string(),
@@ -806,6 +811,10 @@ fn draw_frame(f: &mut Frame, v: &View) {
     }
     if let Some(a) = v.ask {
         draw_ask(f, main, a);
+        return;
+    }
+    if let Some(r) = v.rename {
+        draw_rename(f, main, r);
         return;
     }
     if let Some(tp) = v.themes {
@@ -992,6 +1001,18 @@ fn draw_prompt(f: &mut Frame, main: Rect, p: &Prompt) {
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)), area);
     let x = area.x + (label.chars().count() + unicode_width::UnicodeWidthStr::width(p.input.as_str())) as u16;
     f.set_cursor_position((x.min(area.x + area.width.saturating_sub(1)), area.y + area.height - 1));
+}
+
+/// The one-line "rename tab" prompt at the bottom of the main area, with the real cursor.
+fn draw_rename(f: &mut Frame, main: Rect, r: &crate::rename::Rename) {
+    let t = theme();
+    let area = Rect::new(main.x, main.y + main.height.saturating_sub(1), main.width, 1.min(main.height));
+    let label = " rename tab: ";
+    let line = Line::from(vec![Span::styled(label, Style::default().add_modifier(Modifier::BOLD)), Span::raw(r.buf.clone())]);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(line).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)), area);
+    let x = area.x + (label.chars().count() + r.cursor_col()) as u16;
+    f.set_cursor_position((x.min(area.x + area.width.saturating_sub(1)), area.y));
 }
 
 fn draw_ask(f: &mut Frame, main: Rect, a: &Ask) {
