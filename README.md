@@ -38,6 +38,8 @@ wi supports macOS and Linux.
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
   `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation
 - Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
+- File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane; Enter previews a file, O opens it in `$EDITOR` in a new tab
+- Pinned panes: pin any tab beside the active one (menu: search "pin"); ⇄ swaps left/right, ✕ unpins; the layout is remembered per workspace (needs 101+ columns)
 - Search in files, find file, find in output; dark and light themes (Y cycles auto, dark, light; auto follows your terminal)
 - Update wi from the menu (search "update"): asks before contacting github.com, checks the SHA256, replaces the binary, then offers to restart wi with the same tabs ("Restart wi" does the restart alone)
 
@@ -55,6 +57,7 @@ wi supports macOS and Linux.
 | K | Find file | S | Scroll |
 | U | Find in output | W | Switch pane |
 | A | Start / change agent | V | Close preview |
+| X | Explorer | | |
 | M | Mouse on/off | Y | Theme: cycles auto, dark, light |
 | R | Reconnect (remote) | I / Q | Info / quit |
 

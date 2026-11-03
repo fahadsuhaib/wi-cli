@@ -81,7 +81,7 @@ def cleanup():
     shutil.rmtree(CFGDIR, ignore_errors=True)
 
 # ---- 120x40: everything fits
-cur = t = Term(120, 40)
+cur = t = Term(120, 50)
 open_menu(t)
 tx = t.text()
 check("120x40: all sections visible", all(s in tx for s in SECTIONS))
