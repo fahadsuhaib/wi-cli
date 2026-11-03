@@ -34,6 +34,7 @@ wi supports macOS and Linux.
 
 - Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet)
 - Previews: text, markdown, CSV/TSV, JSON, binary stub; git changes and diffs
+- Recent files: every file you preview is remembered per workspace (also across restarts). Press H in a preview, or menu then Space and type "recent", to pick one again; the full path of the shown file is always on the first row of the preview
 - Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
   `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation
@@ -61,6 +62,8 @@ wi supports macOS and Linux.
 | M | Mouse on/off | Y | Theme: cycles auto, dark, light |
 | R | Reconnect (remote) | I / Q | Info / quit |
 
+Inside a preview: arrows and PgUp/PgDn scroll, F find, W wrap, M markdown source, R reload, H recent files, Esc back, Q close.
+
 Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOARD.md).
 
 ## Configuration
@@ -72,6 +75,8 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
     paint_background = true # wi paints the whole window (shell included) in the theme's
                             # colours; false leaves default colours to your terminal
     preview_side = "right"  # right, left or tab
+    preview_autorefresh = true          # reload a visible file preview when the file changes
+    preview_refresh_debounce_ms = 5000  # wait this long after the last change before reloading
 
     [agents.claude]
     command = "claude --continue"
@@ -81,6 +86,12 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
     host = "dev.example.com"
     user = "me"
     identity = "~/.ssh/id_ed25519"
+
+A file preview that is on screen (side pane, preview tab or pinned pane) refreshes by itself when the file
+changes on disk: wi checks the modification time and size of the visible file once a second (every two on a
+box), waits until it stops changing, then reloads it, keeping your scroll position, markdown view, wrap and
+find. A deleted file keeps its last content and shows "file removed". No file watchers, nothing runs on the box,
+and nothing is checked while no file preview is visible. `preview_autorefresh = false` turns it off.
 
 Every option is documented in `src/config.rs`.
 

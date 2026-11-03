@@ -6,6 +6,8 @@ dev/pty_fetch.py local 0
 dev/pty_fetch.py remote 6
 dev/pty_git.py local 21
 dev/pty_git.py remote 17
+dev/pty_history.py local 30
+dev/pty_history.py remote 0
 dev/pty_input.py local 20
 dev/pty_keys.py local 63
 dev/pty_keys.py remote 65
@@ -23,6 +25,8 @@ dev/pty_robust.py local 10
 dev/pty_search.py local 138
 dev/pty_search.py remote 146
 dev/pty_select.py local 13
+dev/pty_refresh.py local 75
+dev/pty_refresh.py remote 80
 dev/pty_split.py local 80
 dev/pty_split.py remote 86
 dev/pty_tabdir.py local 68

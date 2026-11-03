@@ -81,6 +81,9 @@ pub struct State {
     /// Session layout written by "Restart wi" and consumed (removed) by the restarted wi.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<crate::restart::Snapshot>,
+    /// Files recently shown in a preview, newest first, per workspace (`workspace_key`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, Vec<crate::history::Entry>>,
     /// Pinned-pane layout per workspace (`workspace_key`).
     #[serde(default)]
     pub panes: BTreeMap<String, PaneLayout>,

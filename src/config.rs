@@ -9,6 +9,11 @@ pub struct Defaults {
     pub download_dir: String,
     pub download_confirm_mb: u64,
     pub preview_read_kb: u64,
+    /// Reload a visible file preview by itself when the file changes on disk (a stat of the
+    /// visible file every second, every two on a box; no watchers).
+    pub preview_autorefresh: bool,
+    /// How long a changed file must stay unchanged before the preview reloads (milliseconds).
+    pub preview_refresh_debounce_ms: u64,
     pub csv_rows: usize,
     pub fps_cap: u32,
     /// Lines of scrollback kept per tab. Costs roughly 7 KB per line at 90 columns, per tab.
@@ -55,6 +60,8 @@ impl Default for Defaults {
             download_dir: "~/devbox".into(),
             download_confirm_mb: 100,
             preview_read_kb: 256,
+            preview_autorefresh: true,
+            preview_refresh_debounce_ms: 5000,
             csv_rows: 200,
             fps_cap: 30,
             scrollback_lines: 1000,

@@ -25,6 +25,8 @@ pub enum PvKey {
     /// Step to the next / previous find match.
     MatchNext,
     MatchPrev,
+    /// Recent files list.
+    History,
 }
 
 pub fn parse(buf: &[u8]) -> Vec<PvKey> {
@@ -66,6 +68,7 @@ pub fn parse(buf: &[u8]) -> Vec<PvKey> {
                 b'p' | b'P' => keys.push(PvKey::PrevFile),
                 b'f' | b'F' => keys.push(PvKey::Find),
                 b'q' | b'Q' => keys.push(PvKey::Close),
+                b'h' | b'H' => keys.push(PvKey::History),
                 b'b' | b'B' => keys.push(PvKey::MatchPrev),
                 b'\r' | b'\n' => keys.push(PvKey::MatchNext),
                 _ => {}
@@ -88,6 +91,13 @@ mod tests {
         assert_eq!(parse(b"wR"), vec![PvKey::Wrap, PvKey::Reload]);
         assert_eq!(parse(b"nP"), vec![PvKey::NextFile, PvKey::PrevFile]);
         assert_eq!(parse(b"fB\r"), vec![PvKey::Find, PvKey::MatchPrev, PvKey::MatchNext]);
+    }
+
+    #[test]
+    fn h_opens_recent_files() {
+        assert_eq!(parse(b"hH"), vec![PvKey::History, PvKey::History]);
+        // Left and Right keep their meaning.
+        assert_eq!(parse(b"\x1b[D\x1b[C"), vec![PvKey::Left, PvKey::Right]);
     }
 
     #[test]
