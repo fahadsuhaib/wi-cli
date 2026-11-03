@@ -559,9 +559,11 @@ pub struct View<'a> {
     pub explorer: Option<&'a crate::explorer::ExplorerState>,
 }
 
-fn vt_color(c: vt100::Color) -> Color {
+/// A vt100 colour as a wi colour. `default` is what the terminal's default colour becomes: the
+/// canvas colour when wi paints the window, else `Reset` (the terminal's own).
+fn vt_color(c: vt100::Color, default: Color) -> Color {
     match c {
-        vt100::Color::Default => Color::Reset,
+        vt100::Color::Default => default,
         vt100::Color::Idx(i) => theme::remap_ansi(i).unwrap_or(Color::Indexed(i)),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
@@ -571,28 +573,41 @@ struct ScreenWidget<'a>(&'a vt100::Screen, Option<crate::select::Sel>);
 
 impl Widget for ScreenWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let screen = self.0;
-        let sel = self.1;
-        for row in 0..area.height {
-            for col in 0..area.width {
-                let Some(cell) = screen.cell(row, col) else { continue };
-                if cell.is_wide_continuation() {
-                    continue;
-                }
-                let mut style = Style::default().fg(vt_color(cell.fgcolor())).bg(vt_color(cell.bgcolor()));
-                let mut m = Modifier::empty();
-                if cell.bold() { m |= Modifier::BOLD; }
-                if cell.dim() { m |= Modifier::DIM; }
-                if cell.italic() { m |= Modifier::ITALIC; }
-                if cell.underline() { m |= Modifier::UNDERLINED; }
-                let selected = sel.is_some_and(|s| crate::select::contains(s, row, col));
-                if cell.inverse() != selected { m |= Modifier::REVERSED; }
-                style = style.add_modifier(m);
-                let out = &mut buf[(area.x + col, area.y + row)];
-                let text = cell.contents();
-                out.set_symbol(if text.is_empty() { " " } else { text });
-                out.set_style(style);
+        render_screen_cells(self.0, self.1, area, buf, theme::canvas());
+    }
+}
+
+/// Draw a terminal screen. With a canvas `(background, text)`, default-coloured cells (empty
+/// ones to the end of each row included) get those colours.
+fn render_screen_cells(screen: &vt100::Screen, sel: Option<crate::select::Sel>, area: Rect, buf: &mut Buffer, canvas: Option<(Color, Color)>) {
+    let (def_bg, def_fg) = canvas.unwrap_or((Color::Reset, Color::Reset));
+    for row in 0..area.height {
+        for col in 0..area.width {
+            let Some(cell) = screen.cell(row, col) else { continue };
+            if cell.is_wide_continuation() {
+                continue;
             }
+            let mut fg = vt_color(cell.fgcolor(), def_fg);
+            let bg = vt_color(cell.bgcolor(), def_bg);
+            let mut m = Modifier::empty();
+            if cell.bold() { m |= Modifier::BOLD; }
+            if cell.dim() {
+                // Faint text is blended toward the cell background when painting: the terminal's
+                // own dimming works against its background, which may be the opposite theme.
+                if canvas.is_some() && !cell.inverse() && matches!(fg, Color::Rgb(..)) {
+                    fg = theme::blend(fg, if matches!(bg, Color::Rgb(..)) { bg } else { def_bg });
+                } else {
+                    m |= Modifier::DIM;
+                }
+            }
+            if cell.italic() { m |= Modifier::ITALIC; }
+            if cell.underline() { m |= Modifier::UNDERLINED; }
+            let selected = sel.is_some_and(|s| crate::select::contains(s, row, col));
+            if cell.inverse() != selected { m |= Modifier::REVERSED; }
+            let out = &mut buf[(area.x + col, area.y + row)];
+            let text = cell.contents();
+            out.set_symbol(if text.is_empty() { " " } else { text });
+            out.set_style(Style::default().fg(fg).bg(bg).add_modifier(m));
         }
     }
 }
@@ -601,6 +616,14 @@ impl Widget for ScreenWidget<'_> {
 /// nearest 256-colour index in one pass over the buffer.
 pub fn draw(f: &mut Frame, v: &View) {
     draw_frame(f, v);
+    if let Some((bg, fg)) = theme::canvas() {
+        // Whatever is still the terminal's default (gaps, cleared areas, widgets that set no
+        // background) becomes the theme's canvas, so the whole window is one theme.
+        for cell in f.buffer_mut().content.iter_mut() {
+            if cell.bg == Color::Reset { cell.bg = bg; }
+            if cell.fg == Color::Reset { cell.fg = fg; }
+        }
+    }
     if !theme::truecolor() {
         for cell in f.buffer_mut().content.iter_mut() {
             cell.fg = theme::to_256(cell.fg);
@@ -1185,9 +1208,47 @@ mod tests {
     }
 
     fn render_screen(p: &vt100::Parser, w: u16, h: u16) -> Buffer {
+        render_with(p, w, h, None)
+    }
+
+    fn render_with(p: &vt100::Parser, w: u16, h: u16, canvas: Option<(Color, Color)>) -> Buffer {
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
-        ScreenWidget(p.screen(), None).render(Rect::new(0, 0, w, h), &mut buf);
+        render_screen_cells(p.screen(), None, Rect::new(0, 0, w, h), &mut buf, canvas);
         buf
+    }
+
+    #[test]
+    fn shell_area_is_painted_with_the_theme_canvas() {
+        for t in [theme::DARK, theme::LIGHT] {
+            let mut p = parser(3, 20, 0);
+            p.process(b"hi \x1b[31mred\x1b[0m \x1b[48;2;1;2;3mbg\x1b[0m");
+            let buf = render_with(&p, 20, 3, Some((t.bg, t.fg)));
+            for (x, y) in [(0, 0), (1, 0), (19, 0), (10, 2), (19, 2)] {
+                assert_eq!((buf[(x, y)].bg, buf[(x, y)].fg), (t.bg, t.fg), "{} cell {x},{y}", t.kind.name());
+            }
+            assert_eq!(buf[(3, 0)].bg, t.bg);
+            assert_eq!(buf[(3, 0)].fg, theme::remap_ansi(1).unwrap_or(Color::Indexed(1)));
+            assert_eq!(buf[(7, 0)].bg, Color::Rgb(1, 2, 3), "explicit backgrounds are untouched");
+        }
+    }
+
+    #[test]
+    fn no_paint_leaves_default_colours_to_the_terminal() {
+        let mut p = parser(2, 10, 0);
+        p.process(b"hi");
+        let buf = render_with(&p, 10, 2, None);
+        assert_eq!((buf[(0, 0)].bg, buf[(0, 0)].fg, buf[(9, 1)].bg), (Color::Reset, Color::Reset, Color::Reset));
+    }
+
+    #[test]
+    fn painted_faint_text_is_blended_and_stays_legible() {
+        let t = theme::LIGHT;
+        let mut p = parser(1, 10, 0);
+        p.process(b"\x1b[2;38;2;0;0;0mf\x1b[0m");
+        let buf = render_with(&p, 10, 1, Some((t.bg, t.fg)));
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::DIM));
+        assert!(theme::contrast(buf[(0, 0)].fg, t.bg) >= 3.0);
+        assert_ne!(buf[(0, 0)].fg, Color::Rgb(0, 0, 0));
     }
 
     fn parser(rows: u16, cols: u16, sb: usize) -> vt100::Parser {

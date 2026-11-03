@@ -43,6 +43,9 @@ pub struct Defaults {
     pub theme: String,
     /// Map the terminal's named ANSI colours (0-15) in shell tabs to the theme palette.
     pub ansi_remap: bool,
+    /// Paint the whole window (shell area included) with the theme's background and text
+    /// colours. `false` leaves default colours to the terminal.
+    pub paint_background: bool,
 }
 
 impl Default for Defaults {
@@ -67,6 +70,7 @@ impl Default for Defaults {
             shift_enter: "auto".into(),
             theme: "auto".into(),
             ansi_remap: true,
+            paint_background: true,
         }
     }
 }

@@ -69,6 +69,8 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
 
     [defaults]
     theme = "auto"          # auto, dark or light
+    paint_background = true # wi paints the whole window (shell included) in the theme's
+                            # colours; false leaves default colours to your terminal
     preview_side = "right"  # right, left or tab
 
     [agents.claude]

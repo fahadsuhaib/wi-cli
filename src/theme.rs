@@ -304,14 +304,17 @@ pub const LIGHT: Theme = Theme {
     warn: c(0x7a4e00),
     hot: c(0xcf222e),
     ansi: [
-        c(0x24292f), c(0xcf222e), c(0x1a7f37), c(0x7a4e00), c(0x0b57d0), c(0x7a3fd0), c(0x0a7087), c(0x8c959f),
-        c(0x6e7781), c(0xe5534b), c(0x2da44e), c(0x9a6700), c(0x218bff), c(0xa475f9), c(0x3192aa), c(0xffffff),
+        // Every entry reads on the off-white canvas (contrast >= 4.5): "white" and "bright white"
+        // are the dark greys programs use for emphasis, not paper colours.
+        c(0x24292f), c(0xb31d28), c(0x166b2e), c(0x6a4400), c(0x0b57d0), c(0x6a32c4), c(0x0a7087), c(0x4d5560),
+        c(0x68717b), c(0xd1242f), c(0x1d8139), c(0xa35f00), c(0x0969da), c(0x8250df), c(0x0c7d94), c(0x0d1117),
     ],
 };
 
 static CURRENT: RwLock<Theme> = RwLock::new(DARK);
 static TRUECOLOR: AtomicBool = AtomicBool::new(true);
 static ANSI_REMAP: AtomicBool = AtomicBool::new(true);
+static PAINT: AtomicBool = AtomicBool::new(false);
 
 /// The active theme (a small `Copy` value).
 pub fn theme() -> Theme {
@@ -327,14 +330,42 @@ pub fn kind() -> Kind {
 }
 
 /// Startup configuration: theme, whether the terminal does true colour, and the ANSI remap switch.
-pub fn init(k: Kind, truecolor: bool, ansi_remap: bool) {
+pub fn init(k: Kind, truecolor: bool, ansi_remap: bool, paint: bool) {
     set_kind(k);
+    PAINT.store(paint, Ordering::Relaxed);
     TRUECOLOR.store(truecolor, Ordering::Relaxed);
     ANSI_REMAP.store(ansi_remap, Ordering::Relaxed);
 }
 
 pub fn truecolor() -> bool {
     TRUECOLOR.load(Ordering::Relaxed)
+}
+
+/// The canvas colours (background, default text) wi paints under everything, or `None` when
+/// `paint_background = false` leaves default colours to the terminal.
+pub fn canvas() -> Option<(Color, Color)> {
+    PAINT.load(Ordering::Relaxed).then(|| {
+        let t = theme();
+        (t.bg, t.fg)
+    })
+}
+
+/// Reply to an OSC 10 / 11 query (`code` 10 text, 11 background) with the canvas colour.
+pub fn osc_color_reply(code: u8, canvas: Option<(Color, Color)>) -> Option<Vec<u8>> {
+    let (bg, fg) = canvas?;
+    let Color::Rgb(r, g, b) = (if code == 10 { fg } else { bg }) else { return None };
+    Some(format!("\x1b]{code};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07").into_bytes())
+}
+
+/// Blend `fg` toward `bg` (faint text without relying on the terminal's own dimming).
+pub fn blend(fg: Color, bg: Color) -> Color {
+    match (fg, bg) {
+        (Color::Rgb(a, b, c), Color::Rgb(x, y, z)) => {
+            let m = |f: u8, g: u8| ((f as u32 * 6 + g as u32 * 4) / 10) as u8;
+            Color::Rgb(m(a, x), m(b, y), m(c, z))
+        }
+        _ => fg,
+    }
 }
 
 pub fn ansi_remap() -> bool {
@@ -630,6 +661,29 @@ mod tests {
                 assert!(r >= 3.0, "{} ansi {i}: contrast {r:.2} < 3", k.name());
             }
         }
+    }
+
+    #[test]
+    fn all_16_ansi_colours_are_readable_on_the_canvas() {
+        for k in ALL {
+            let t = k.theme();
+            for (i, col) in t.ansi.iter().enumerate() {
+                let r = contrast(*col, t.bg);
+                // The dark palette is tuned for the shared 3.0 check above; light must hit 4.5.
+                let need = if k == Kind::Light { 4.5 } else { 3.0 };
+                assert!(r >= need || (k == Kind::Dark && matches!(i, 0)), "{} ansi {i}: contrast {r:.2} < {need}", k.name());
+            }
+            // A faint (blended) default text must stay legible too.
+            assert!(contrast(blend(t.fg, t.bg), t.bg) >= 3.0, "{} faint text", k.name());
+        }
+    }
+
+    #[test]
+    fn osc_replies_carry_the_canvas_colours() {
+        let cv = Some((LIGHT.bg, LIGHT.fg));
+        assert_eq!(osc_color_reply(11, cv).unwrap(), b"\x1b]11;rgb:fafa/fafa/fafa\x07".to_vec());
+        assert_eq!(osc_color_reply(10, cv).unwrap(), b"\x1b]10;rgb:2424/2929/2f2f\x07".to_vec());
+        assert_eq!(osc_color_reply(11, None), None);
     }
 
     #[test]

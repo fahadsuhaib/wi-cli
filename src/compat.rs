@@ -51,6 +51,7 @@ impl Compat {
                     None => break,
                     Some((len, body)) => {
                         self.set_title(&body);
+                        osc_color_query(&body, &mut reply);
                         i += 2 + len;
                     }
                 },
@@ -120,6 +121,18 @@ impl Compat {
             let t: String = text.chars().filter(|c| !c.is_control()).take(20).collect();
             self.title = if t.trim().is_empty() { None } else { Some(t) };
         }
+    }
+}
+
+/// `OSC 10 ; ?` / `OSC 11 ; ?`: tell the program the colours wi paints, so tools pick a matching palette.
+fn osc_color_query(body: &[u8], reply: &mut Vec<u8>) {
+    let code = match body {
+        b"10;?" => 10,
+        b"11;?" => 11,
+        _ => return,
+    };
+    if let Some(r) = crate::theme::osc_color_reply(code, crate::theme::canvas()) {
+        reply.extend_from_slice(&r);
     }
 }
 

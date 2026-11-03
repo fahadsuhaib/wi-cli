@@ -109,7 +109,7 @@ pub fn setup_theme(cfg: &config::Config) {
     theme::set_detected(asked);
     let kind = theme::resolve(&cfg.defaults.theme, saved.as_deref(), || asked, fgbg.as_deref());
     let truecolor = theme::colorterm_is_truecolor(std::env::var("COLORTERM").ok().as_deref());
-    theme::init(kind, truecolor, cfg.defaults.ansi_remap);
+    theme::init(kind, truecolor, cfg.defaults.ansi_remap, cfg.defaults.paint_background);
 }
 
 /// Dev command: `wi fetch <box> <remote-path> [--yes]` downloads through the opener cache.

@@ -189,7 +189,7 @@ for th in ("dark", "light"):
     check(f"{th}: ANSI red in the shell becomes the theme red", red and r.cell(*red).fg == T[th]["ansi"][1])
     check(f"{th}: 256-colour text is untouched", idx and r.cell(*idx).fg == FG_BG_256[196])
     check(f"{th}: truecolor text is untouched", tru and r.cell(*tru).fg == "0a141e")
-    check(f"{th}: default colours stay the terminal's (not painted)", pl and r.cell(*pl).fg == "default" and r.cell(*pl).bg == "default")
+    check(f"{th}: default-coloured shell text is painted with the theme text and background", pl and r.cell(*pl).fg == T[th]["fg"] and r.cell(*pl).bg == T[th]["bg"])
     r.quit()
 r = Run("noremap", '[defaults]\ntheme = "dark"\nansi_remap = false\n')
 r.send(PRINT, 1.0)
@@ -197,6 +197,48 @@ red, idx = r.find("REDTXT", last=True), r.find("IDX196", last=True)
 ref = pyte.Screen(10, 2); pyte.ByteStream(ref).feed(b"\x1b[38;5;1mX")
 check("ansi_remap = false keeps the terminal's own red (index 1)", red and r.cell(*red).fg == ref.buffer[0][0].fg and r.cell(*red).fg != T["dark"]["ansi"][1])
 check("ansi_remap = false: 256-colour text still untouched", idx and r.cell(*idx).fg == FG_BG_256[196])
+r.quit()
+
+# ------------------------------------------------------------ the whole canvas is painted
+def painted(r, th, tag):
+    t = T[th]
+    r.send(b"clear; echo short\n", 0.8)
+    p = r.find("short", last=True)
+    y = p[1] if p else 10
+    check(f"{th}: {tag}: shell area (empty cell) has the theme background", r.cell(60, 25).bg == t["bg"] and r.cell(2, 30).bg == t["bg"])
+    check(f"{th}: {tag}: end of a short row has the theme background", r.cell(99, y).bg == t["bg"] and r.cell(60, y).bg == t["bg"])
+    check(f"{th}: {tag}: default text has the theme text colour", p and r.cell(*p).fg == t["fg"])
+    check(f"{th}: {tag}: nothing in the shell area is left to the terminal", all(r.cell(x, yy).bg != "default" for yy in (3, 20, 40) for x in (0, 50, 99)))
+
+for th in ("dark", "light"):
+    r = Run("paint_" + th, f'[defaults]\ntheme = "{th}"\npreview_side = "tab"\n')
+    painted(r, th, "shell")
+    r.send(MENU + b"p", 0.5); r.send(b"a.md\r", 1.0)
+    check(f"{th}: preview pane is painted (body and row end)", r.cell(60, 30).bg == T[th]["bg"] and r.cell(99, 40).bg == T[th]["bg"])
+    r.send(b"\x1b", 0.5)
+    r.send(MENU, 0.5)
+    r.send(b"\x1b", 0.4)
+    r.quit()
+    r = Run("paintex_" + th, f'[defaults]\ntheme = "{th}"\n')
+    r.send(MENU + b"x", 2.0)
+    check(f"{th}: explorer is painted (empty area, row end)", "explorer ·" in r.text() and r.cell(99, 40).bg == T[th]["bg"] and r.cell(60, 45).bg == T[th]["bg"] and r.cell(99, 5).bg == T[th]["bg"])
+    r.send(b"q", 0.8)
+    r.quit()
+# Auto paints the resolved theme as well.
+r = Run("paint_auto", '[defaults]\ntheme = "auto"\n', answer=LIGHT_REPLY)
+painted(r, "light", "auto")
+r.quit()
+# paint_background = false keeps the terminal's own colours.
+r = Run("nopaint", '[defaults]\ntheme = "light"\npaint_background = false\n')
+r.send(b"clear; echo short\n", 0.8)
+p = r.find("short", last=True)
+check("paint_background = false: shell cells stay terminal default", p and r.cell(*p).bg == "default" and r.cell(*p).fg == "default" and r.cell(99, p[1]).bg == "default")
+check("paint_background = false: bars still themed", r.header_bg() == T["light"]["bar_bg"])
+r.quit()
+# A program asking for the terminal colours (OSC 11 / OSC 10) hears the theme's.
+r = Run("osc", '[defaults]\ntheme = "light"\n')
+r.send(b"stty raw -echo; printf '\\033]11;?\\007'; dd bs=1 count=24 2>/dev/null | od -c | head -3; stty sane\n", 1.5)
+check("light: OSC 11 query is answered with the theme background", re.search(r"f\s+a\s+f\s+a\s+/", r.text()) is not None)
 r.quit()
 
 # ------------------------------------------------------------ 256-colour fallback
