@@ -2,6 +2,7 @@
 
 pub mod explorer;
 pub mod search;
+pub mod themepick;
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -28,7 +29,7 @@ pub enum Action {
     NextTab,
     PrevTab,
     Mouse,
-    /// Cycle the theme: auto, dark, light.
+    /// Open the theme picker (auto or a named theme, previewed live).
     Theme,
     /// Check for a newer wi release and install it (local binary only, after confirmations).
     Update,
@@ -85,23 +86,20 @@ pub fn menu_items(remote: bool) -> Vec<&'static MenuItem> {
 pub const DETACH_ITEM: MenuItem = MenuItem { label: "Detach (keep sessions)", key: 'q', action: Action::Quit, remote_only: true, section: "SESSION", keywords: &["quit", "exit", "disconnect", "leave"] };
 pub const END_ITEM: MenuItem = MenuItem { label: "End sessions and quit", key: 'e', action: Action::EndAndQuit, remote_only: true, section: "SESSION", keywords: &["quit", "exit", "kill", "close"] };
 
-const fn theme_entry(label: &'static str) -> MenuItem {
-    MenuItem { label, key: 'y', action: Action::Theme, remote_only: false, section: "VIEW", keywords: &["dark", "light", "auto", "colour", "color"] }
-}
-static THEME_ITEMS: [MenuItem; 4] = [
-    theme_entry("Theme: auto (dark)"),
-    theme_entry("Theme: auto (light)"),
-    theme_entry("Theme: dark"),
-    theme_entry("Theme: light"),
-];
+/// Menu entries for the theme item: `auto (dark)`, `auto (light)`, then one per named theme. The
+/// label shows what is set; the item opens the picker.
+static THEME_ITEMS: std::sync::LazyLock<Vec<MenuItem>> = std::sync::LazyLock::new(|| {
+    let mk = |label: String| MenuItem { label: Box::leak(label.into_boxed_str()), key: 'y', action: Action::Theme, remote_only: false, section: "VIEW", keywords: &["dark", "light", "auto", "colour", "color", "monokai", "solarized", "picker"] };
+    let mut v = vec![mk("Theme… auto (dark)".into()), mk("Theme… auto (light)".into())];
+    v.extend(theme::ALL.iter().map(|t| mk(format!("Theme… {}", t.label))));
+    v
+});
 
 /// The theme entry showing the current mode (and, for auto, what it picked).
 pub fn theme_item(mode: theme::Mode, kind: theme::Kind) -> &'static MenuItem {
-    &THEME_ITEMS[match (mode, kind) {
-        (theme::Mode::Auto, theme::Kind::Dark) => 0,
-        (theme::Mode::Auto, theme::Kind::Light) => 1,
-        (theme::Mode::Dark, _) => 2,
-        (theme::Mode::Light, _) => 3,
+    &THEME_ITEMS[match mode {
+        theme::Mode::Auto => usize::from(kind == theme::Kind::Light),
+        theme::Mode::Named(i) => 2 + i,
     }]
 }
 
@@ -119,16 +117,17 @@ pub fn set_tmux_menu(on: bool) {
     TMUX_MENU.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-static THEME_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// The theme setting the menu shows (0 auto, else 1 + index into `theme::ALL`).
+static THEME_MODE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Tell the menu which theme mode is set (its entry shows it).
 pub fn set_theme_mode(m: theme::Mode) {
-    let v = match m { theme::Mode::Auto => 0, theme::Mode::Dark => 1, theme::Mode::Light => 2 };
+    let v = match m { theme::Mode::Auto => 0, theme::Mode::Named(i) => 1 + i };
     THEME_MODE.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn theme_mode() -> theme::Mode {
-    match THEME_MODE.load(std::sync::atomic::Ordering::Relaxed) { 1 => theme::Mode::Dark, 2 => theme::Mode::Light, _ => theme::Mode::Auto }
+    match THEME_MODE.load(std::sync::atomic::Ordering::Relaxed) { 0 => theme::Mode::Auto, v => theme::Mode::Named((v - 1).min(theme::ALL.len() - 1)) }
 }
 
 /// Menu entries for a workspace, with the Quit entry replaced by Detach / End for tmux boxes.
@@ -172,7 +171,7 @@ pub const MENU: &[MenuItem] = &[
     mi("Swap pane sides", NO_KEY, Action::SwapSides, false, "TABS", &["pane", "split", "flip", "left", "right", "move"]),
     mi("Unsplit (unpin)", NO_KEY, Action::Unsplit, false, "TABS", &["pane", "split", "single", "pin", "close"]),
     mi("Scroll", 's', Action::Scroll, false, "VIEW", &["history", "back", "up", "scrollback"]),
-    mi("Theme: auto", 'y', Action::Theme, false, "VIEW", &["dark", "light", "auto", "colour", "color"]),
+    mi("Theme…", 'y', Action::Theme, false, "VIEW", &["dark", "light", "auto", "colour", "color", "monokai", "solarized", "picker"]),
     mi("Mouse on/off", 'm', Action::Mouse, false, "VIEW", &["select", "copy", "click"]),
     mi("Start / change agent", 'a', Action::Agent, false, "AGENT", &["claude", "codex", "ai", "assistant"]),
     mi("Info", 'i', Action::Info, false, "SESSION", &["status", "folder", "box", "about"]),
@@ -522,6 +521,8 @@ pub struct View<'a> {
     pub split: (crate::tab::Side, u16),
     pub focus_side: bool,
     pub ask: Option<&'a Ask>,
+    /// The theme picker, when open.
+    pub themes: Option<&'a themepick::ThemePick>,
     pub preview: Option<&'a crate::preview::Preview>,
     pub prompt: Option<&'a Prompt>,
     pub screen: &'a vt100::Screen,
@@ -784,6 +785,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
         _ if v.confirm.is_some_and(|c| c.yes.is_empty()) => " Esc cancels the download".to_string(),
         _ if v.confirm.is_some() => " Y or Enter to continue · N or Esc to cancel".to_string(),
         _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
+        _ if v.themes.is_some() => " arrows preview a theme · Enter applies and saves · type to filter · Esc cancels".to_string(),
         _ if v.ask.is_some() => " Enter starts · E edits the command · N not now · X never here".to_string(),
         _ if v.prompt.is_some_and(|p| p.kind.is_folder()) => " Tab completes folders · arrows pick a recent one · Enter confirms · Esc cancels".to_string(),
         _ if v.prompt.is_some() => " Tab completes · Enter opens · Esc cancels".to_string(),
@@ -804,6 +806,10 @@ fn draw_frame(f: &mut Frame, v: &View) {
     }
     if let Some(a) = v.ask {
         draw_ask(f, main, a);
+        return;
+    }
+    if let Some(tp) = v.themes {
+        themepick::draw(f, main, tp);
         return;
     }
     if let Some(sv) = &v.search {
@@ -1160,8 +1166,9 @@ mod tests {
         assert_eq!(first_label(&items, "grep"), Some("Search in files"));
         assert_eq!(first_label(&items, "srch"), Some("Search in files"));
         assert_eq!(first_label(&items, "sf"), Some("Search in files"));
-        assert!(first_label(&items, "theme").is_some_and(|l| l.starts_with("Theme: ")));
-        assert!(first_label(&items, "dark").is_some_and(|l| l.starts_with("Theme: ")));
+        assert!(first_label(&items, "theme").is_some_and(|l| l.starts_with("Theme")));
+        assert!(first_label(&items, "dark").is_some_and(|l| l.starts_with("Theme")));
+        assert!(first_label(&items, "solarized").is_some_and(|l| l.starts_with("Theme")));
         assert_eq!(first_label(&items, "claude"), Some("Start / change agent"));
         assert!(menu_rows(&items, "zzzq").is_empty());
         // No headers while filtering.
@@ -1174,15 +1181,17 @@ mod tests {
         assert_eq!(first_label(&items, "update"), Some("Update wi"));
         assert_eq!(first_label(&items, "upgrade"), Some("Update wi"));
         let mut items = items;
-        let (a, d, l) = (theme::Kind::Dark, theme::Kind::Dark, theme::Kind::Light);
-        set_theme_item(&mut items, theme::Mode::Auto, l);
-        assert_eq!(first_label(&items, "theme"), Some("Theme: auto (light)"));
-        set_theme_item(&mut items, theme::Mode::Auto, a);
-        assert_eq!(first_label(&items, "theme"), Some("Theme: auto (dark)"));
-        set_theme_item(&mut items, theme::Mode::Dark, d);
-        assert_eq!(first_label(&items, "theme"), Some("Theme: dark"));
-        set_theme_item(&mut items, theme::Mode::Light, l);
-        assert_eq!(first_label(&items, "theme"), Some("Theme: light"));
+        let named = |n: &str| theme::Mode::Named(theme::index_of(n).unwrap());
+        set_theme_item(&mut items, theme::Mode::Auto, theme::Kind::Light);
+        assert_eq!(first_label(&items, "theme"), Some("Theme… auto (light)"));
+        set_theme_item(&mut items, theme::Mode::Auto, theme::Kind::Dark);
+        assert_eq!(first_label(&items, "theme"), Some("Theme… auto (dark)"));
+        set_theme_item(&mut items, named("dark"), theme::Kind::Dark);
+        assert_eq!(first_label(&items, "theme"), Some("Theme… Dark"));
+        set_theme_item(&mut items, named("light"), theme::Kind::Light);
+        assert_eq!(first_label(&items, "theme"), Some("Theme… Light"));
+        set_theme_item(&mut items, named("tomorrow-night-blue"), theme::Kind::Dark);
+        assert_eq!(first_label(&items, "theme"), Some("Theme… Tomorrow Night Blue"));
         assert_eq!(items.iter().filter(|m| m.key == 'y').count(), 1);
     }
 
@@ -1303,12 +1312,12 @@ mod tests {
 
     #[test]
     fn shell_area_is_painted_with_the_theme_canvas() {
-        for t in [theme::DARK, theme::LIGHT] {
+        for t in theme::ALL {
             let mut p = parser(3, 20, 0);
             p.process(b"hi \x1b[31mred\x1b[0m \x1b[48;2;1;2;3mbg\x1b[0m");
             let buf = render_with(&p, 20, 3, Some((t.bg, t.fg)));
             for (x, y) in [(0, 0), (1, 0), (19, 0), (10, 2), (19, 2)] {
-                assert_eq!((buf[(x, y)].bg, buf[(x, y)].fg), (t.bg, t.fg), "{} cell {x},{y}", t.kind.name());
+                assert_eq!((buf[(x, y)].bg, buf[(x, y)].fg), (t.bg, t.fg), "{} cell {x},{y}", t.name);
             }
             assert_eq!(buf[(3, 0)].bg, t.bg);
             assert_eq!(buf[(3, 0)].fg, theme::remap_ansi(1).unwrap_or(Color::Indexed(1)));
@@ -1326,13 +1335,16 @@ mod tests {
 
     #[test]
     fn painted_faint_text_is_blended_and_stays_legible() {
-        let t = theme::LIGHT;
-        let mut p = parser(1, 10, 0);
-        p.process(b"\x1b[2;38;2;0;0;0mf\x1b[0m");
-        let buf = render_with(&p, 10, 1, Some((t.bg, t.fg)));
-        assert!(!buf[(0, 0)].modifier.contains(Modifier::DIM));
-        assert!(theme::contrast(buf[(0, 0)].fg, t.bg) >= 3.0);
-        assert_ne!(buf[(0, 0)].fg, Color::Rgb(0, 0, 0));
+        for t in theme::ALL {
+            let mut p = parser(1, 10, 0);
+            p.process(b"\x1b[2;38;2;0;0;0mf\x1b[0m");
+            let buf = render_with(&p, 10, 1, Some((t.bg, t.fg)));
+            assert!(!buf[(0, 0)].modifier.contains(Modifier::DIM));
+            if t.kind == theme::Kind::Light {
+                assert!(theme::contrast(buf[(0, 0)].fg, t.bg) >= 3.0, "{}", t.name);
+                assert_ne!(buf[(0, 0)].fg, Color::Rgb(0, 0, 0));
+            }
+        }
     }
 
     fn parser(rows: u16, cols: u16, sb: usize) -> vt100::Parser {

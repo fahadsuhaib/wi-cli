@@ -37,6 +37,8 @@ enum Mode {
     Shell,
     Prompt(Prompt),
     Ask(Ask),
+    /// The theme picker (arrows preview, Enter saves, Esc reverts).
+    ThemePick(ui::themepick::ThemePick),
     /// A yes/no question before anything is opened or downloaded.
     Confirm(Confirm),
     /// A download is running; Esc cancels it.
@@ -383,6 +385,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     } else if !restored.is_empty() {
         message = Some(format!("reattached {} running session(s)", restored.len()));
     }
+    if let Some(note) = crate::theme::unknown_theme_note(&cfg.defaults.theme, agent_state.theme.as_deref()) {
+        message = Some(note);
+    }
     let (name, base_detail) = ws.title();
     // Header detail: the active tab's folder and its git branch. The branch of a folder is asked
     // once (and again when the Git view opens or reloads); no timers.
@@ -673,6 +678,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     focus_side: app.tabs[app.active].side_focused(),
                     prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
                     ask: match &mode { Mode::Ask(x) => Some(x), _ => None },
+                    themes: match &mode { Mode::ThemePick(x) => Some(x), _ => None },
                     confirm: confirm_ref,
                     hints: hints_ref,
                     screen: app.tabs[app.active].parser.screen(),
@@ -1348,6 +1354,58 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             dirty = true;
                             chunk = &[];
                         }
+                        Mode::ThemePick(ref mut tp) => {
+                            use crate::theme::Mode as TM;
+                            let (mut commit, mut cancel) = (false, false);
+                            for k in parse_keys(chunk, menu_key) {
+                                match k {
+                                    Key::Up => tp.step(-1),
+                                    Key::Down => tp.step(1),
+                                    Key::PageUp => tp.step(-5),
+                                    Key::PageDown => tp.step(5),
+                                    Key::Home => tp.sel = 0,
+                                    Key::End => tp.sel = tp.entries().len().saturating_sub(1),
+                                    Key::Enter => commit = true,
+                                    Key::Esc if !tp.filter.is_empty() => { tp.filter.clear(); tp.sel = 0; }
+                                    Key::Esc | Key::MenuPressed => cancel = true,
+                                    Key::Backspace => { tp.filter.pop(); tp.sel = 0; }
+                                    Key::Char(c) => tp.type_char(c),
+                                    _ => {}
+                                }
+                                if commit || cancel { break; }
+                            }
+                            let picked = tp.current();
+                            let orig = tp.orig;
+                            if cancel {
+                                crate::theme::set_theme(orig.theme());
+                                mode = Mode::Shell;
+                            } else if commit && let Some(m) = picked {
+                                theme_mode = m;
+                                crate::theme::set_theme(m.theme());
+                                ui::set_theme_mode(m);
+                                items = menu_items_for(remote, backend.has_tmux());
+                                mode = Mode::Shell;
+                                if m != orig {
+                                    agent_state.theme = m.saved();
+                                    let cfg_note = match crate::theme::index_of(&cfg.defaults.theme) {
+                                        Some(_) => format!(" (config theme = \"{}\" wins on restart)", cfg.defaults.theme.trim()),
+                                        None => String::new(),
+                                    };
+                                    let shows = if m == TM::Auto { format!(" -> {}", m.theme().label) } else { String::new() };
+                                    message = Some(match agent_state.save() {
+                                        Ok(()) => format!("theme: {}{shows}{cfg_note}", m.name()),
+                                        Err(e) => format!("theme: {} (could not save: {e})", m.name()),
+                                    });
+                                }
+                            } else if commit {
+                                // Nothing matched the filter: keep the picker open.
+                            } else if let Some(m) = picked {
+                                // Live preview of the highlighted row.
+                                crate::theme::set_theme(m.theme());
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
                         Mode::Confirm(_) => {
                             let (mut yes, mut no) = (false, false);
                             for (i, &b) in chunk.iter().enumerate() {
@@ -1678,33 +1736,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         let _ = std::io::Write::flush(&mut o);
                                         message = Some(if mouse_on { "mouse on".to_string() } else { "mouse off: select and copy text natively".to_string() });
                                     }
-                                    Action::Theme => {
-                                        use crate::theme::{Mode as TM, auto_kind, kind_from_colorfgbg};
-                                        theme_mode = theme_mode.next();
-                                        let fgbg = std::env::var("COLORFGBG").ok();
-                                        let (k, how) = match theme_mode {
-                                            TM::Dark => (crate::theme::Kind::Dark, String::new()),
-                                            TM::Light => (crate::theme::Kind::Light, String::new()),
-                                            // Not asked again live (the reply would arrive on the stdin wi reads):
-                                            // the answer from start-up, else COLORFGBG, else dark.
-                                            TM::Auto => {
-                                                let det = crate::theme::detected();
-                                                let how = if det.is_some() { "terminal background seen at start" }
-                                                    else if fgbg.as_deref().and_then(kind_from_colorfgbg).is_some() { "COLORFGBG" }
-                                                    else { "terminal did not say, so dark" };
-                                                (auto_kind(det, fgbg.as_deref()), format!(" ({how}; re-detected on every start)"))
-                                            }
-                                        };
-                                        crate::theme::set_kind(k);
-                                        ui::set_theme_mode(theme_mode);
-                                        items = menu_items_for(remote, backend.has_tmux());
-                                        agent_state.theme = theme_mode.saved();
-                                        let cfg_note = if crate::theme::Kind::parse(&cfg.defaults.theme).is_some() { format!(" (config theme = \"{}\" wins on restart)", cfg.defaults.theme) } else { String::new() };
-                                        message = Some(match agent_state.save() {
-                                            Ok(()) => format!("theme: {}{}{how}{cfg_note}", theme_mode.name(), if theme_mode == TM::Auto { format!(" -> {}", k.name()) } else { String::new() }),
-                                            Err(e) => format!("theme: {} (could not save: {e})", theme_mode.name()),
-                                        });
-                                    }
+                                    Action::Theme => mode = Mode::ThemePick(ui::themepick::ThemePick::new(theme_mode)),
                                     Action::Restart => {
                                         mode = restart_dialog(&app, remote, backend.has_tmux(), None);
                                         pending = Some(Pending::Restart { updated: None });
@@ -2821,7 +2853,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Ask(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
+        Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
         Mode::GrepPrompt(p) => match m.kind {
             Kind::Down(mouse::Button::Left) => ui::search::grep_chip_at(main, p, m.col, m.row).map_or(Intent::None, |k| Intent::Synth(k.to_vec())),
             _ => Intent::None,

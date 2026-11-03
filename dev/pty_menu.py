@@ -20,7 +20,7 @@ env.pop("COLORFGBG", None)
 SECTIONS = ["FILES", "SEARCH", "TABS", "VIEW", "AGENT", "SESSION"]
 LOCAL = ["Preview a file", "Find file", "Git changes", "Open path on screen", "Search in files", "Find in output",
          "New shell tab", "New tab in folder", "Change folder of this tab", "Next tab", "Previous tab", "Close tab",
-         "Switch pane", "Close preview", "Scroll", "Theme: auto (dark)", "Mouse on/off", "Start / change agent",
+         "Switch pane", "Close preview", "Scroll", "Theme… auto (dark)", "Mouse on/off", "Start / change agent",
          "Info", "Update wi", "Restart wi", "Quit"]
 REMOTE = [l for l in LOCAL if l != "Quit"] + ["Reconnect", "Download", "Detach (keep sessions)", "End sessions and quit"]
 LABELS = REMOTE if remote else LOCAL
@@ -100,8 +100,9 @@ check("Esc closes the menu", not menu_open(t))
 open_menu(t); t.send(b"i", 0.8)
 check("hotkey i: Info", ("connected" if remote else "local workspace") in t.text() and not menu_open(t))
 open_menu(t); t.send(b"y", 0.8)
-check("hotkey y: theme toggles", "theme:" in t.text())
-open_menu(t); t.send(b"y", 0.8)
+check("hotkey y: opens the theme picker", "type to filter" in t.text() and "Monokai" in t.text())
+t.send(b"\x1b", 0.6)
+check("Esc closes the theme picker", "type to filter" not in t.text())
 open_menu(t); t.send(b"s", 0.8)
 check("hotkey s: scroll mode", "scroll:" in t.text())
 t.send(b"\x1b", 0.6)
@@ -147,7 +148,7 @@ check("Esc 2: leaves filter mode (hint back)", "Space: search" in t.text() and m
 t.send(b"\x1b", 0.5)
 check("Esc 3: closes the menu", not menu_open(t))
 open_menu(t); t.send(b" theme", 0.5)
-check("filter 'theme' finds Theme", "Theme: " in t.text())
+check("filter 'theme' finds Theme", "Theme… " in t.text())
 t.send(b"\x1b\x1b", 0.8); t.send(b"\x1b", 0.5)
 check("menu closed again", not menu_open(t))
 

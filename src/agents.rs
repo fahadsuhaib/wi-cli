@@ -75,7 +75,7 @@ pub struct Remembered {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct State {
-    /// Theme chosen from the menu (`dark` or `light`); an explicit config theme overrides it.
+    /// Theme chosen from the menu (a theme name); an explicit config theme overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     #[serde(default)]
