@@ -14,6 +14,7 @@ mod link;
 mod mouse;
 mod opener;
 mod preview;
+mod refresh;
 mod restart;
 mod scroll;
 mod search;

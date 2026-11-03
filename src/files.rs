@@ -98,6 +98,31 @@ impl Backend {
         }
     }
 
+    /// Modification time and size of a file, for the preview auto-refresh: one bounded stat,
+    /// `Gone` when it does not exist, `Failed` for any other trouble.
+    pub async fn stamp(&self, path: &str) -> crate::refresh::Obs {
+        use crate::refresh::{Obs, Stamp};
+        let p = self.absolutize(path);
+        match self {
+            Backend::Local(_) => match tokio::fs::metadata(&p).await {
+                Ok(m) => {
+                    let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as i128);
+                    Obs::Seen(Stamp { mtime, size: m.len() })
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Obs::Gone,
+                Err(_) => Obs::Failed,
+            },
+            Backend::Remote(s) => match s.sftp().await {
+                Ok(sftp) => match sftp.metadata(p).await {
+                    Ok(m) => Obs::Seen(Stamp { mtime: i128::from(m.mtime.unwrap_or(0)) * 1_000_000_000, size: m.size.unwrap_or(0) }),
+                    Err(russh_sftp::client::error::Error::Status(st)) if st.status_code == russh_sftp::protocol::StatusCode::NoSuchFile => Obs::Gone,
+                    Err(_) => Obs::Failed,
+                },
+                Err(_) => Obs::Failed,
+            },
+        }
+    }
+
     /// Read at most `max` bytes from the start of a file. Returns the bytes and the file's full size.
     pub async fn read_prefix(&self, path: &str, max: usize) -> Result<(Vec<u8>, u64)> {
         let p = self.absolutize(path);

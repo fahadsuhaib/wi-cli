@@ -70,6 +70,8 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
     [defaults]
     theme = "auto"          # auto, dark or light
     preview_side = "right"  # right, left or tab
+    preview_autorefresh = true          # reload a visible file preview when the file changes
+    preview_refresh_debounce_ms = 5000  # wait this long after the last change before reloading
 
     [agents.claude]
     command = "claude --continue"
@@ -79,6 +81,12 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
     host = "dev.example.com"
     user = "me"
     identity = "~/.ssh/id_ed25519"
+
+A file preview that is on screen (side pane, preview tab or pinned pane) refreshes by itself when the file
+changes on disk: wi checks the modification time and size of the visible file once a second (every two on a
+box), waits until it stops changing, then reloads it, keeping your scroll position, markdown view, wrap and
+find. A deleted file keeps its last content and shows "file removed". No file watchers, nothing runs on the box,
+and nothing is checked while no file preview is visible. `preview_autorefresh = false` turns it off.
 
 Every option is documented in `src/config.rs`.
 

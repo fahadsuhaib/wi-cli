@@ -300,6 +300,23 @@ impl Preview {
         }
     }
 
+    /// Take over the view state of the preview this one replaces (same file, newer content):
+    /// scroll position (clamped when drawn), wrap, markdown view, jump target and find.
+    pub fn carry_over(&mut self, old: &Preview) {
+        self.restore_md_view(old.md_view());
+        self.top = old.top;
+        self.left = old.left;
+        if self.wrap != old.wrap {
+            self.toggle_wrap();
+            self.left = old.left;
+        }
+        self.from_tab = old.from_tab;
+        self.target_line = old.target_line;
+        if let Some(n) = old.find_needle.clone() {
+            self.set_find(&n);
+        }
+    }
+
     /// Light up every match of `needle` (smart case) and make the first one at or below the top of
     /// the view current. Returns the number of matches.
     pub fn set_find(&mut self, needle: &str) -> usize {

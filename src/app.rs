@@ -65,6 +65,72 @@ enum Mode {
 /// A search or file listing in flight (dropped = cancelled; the process is killed with it).
 type Job<'a> = Pin<Box<dyn Future<Output = JobDone> + 'a>>;
 
+/// Preview auto-refresh work: first a stat of the visible files, then (for those that settled
+/// after a change) a bounded read. One at a time, each with a timeout, never on the UI loop.
+type RJob<'a> = Pin<Box<dyn Future<Output = RDone> + 'a>>;
+
+type ReadOut = Result<(Vec<u8>, u64), String>;
+
+enum RDone {
+    Stats(Vec<(String, crate::refresh::Obs)>),
+    Read(Vec<(String, ReadOut)>),
+}
+
+fn start_stats(backend: &Backend, paths: Vec<String>) -> RJob<'_> {
+    Box::pin(async move {
+        let mut out = Vec::new();
+        for p in paths {
+            let o = tokio::time::timeout(Duration::from_secs(3), backend.stamp(&p)).await.unwrap_or(crate::refresh::Obs::Failed);
+            out.push((p, o));
+        }
+        RDone::Stats(out)
+    })
+}
+
+fn start_reads(backend: &Backend, paths: Vec<String>, cap: usize) -> RJob<'_> {
+    Box::pin(async move {
+        let mut out = Vec::new();
+        for p in paths {
+            let r = match tokio::time::timeout(Duration::from_secs(10), backend.read_prefix(&p, cap)).await {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(_) => Err("timed out".to_string()),
+            };
+            out.push((p, r));
+        }
+        RDone::Read(out)
+    })
+}
+
+/// File previews on screen that the auto-refresh watches: the active tab's own and side preview
+/// and the pinned partner's. Git views and stubs are left alone.
+fn visible_files(app: &App) -> Vec<String> {
+    let t = &app.tabs[app.active];
+    let mut v: Vec<String> = Vec::new();
+    let partner = pin_partner(app).and_then(|pi| app.tabs[pi].preview.as_ref());
+    for p in [t.preview.as_ref(), t.side.as_ref(), partner].into_iter().flatten() {
+        if !matches!(p.kind, crate::preview::Kind::Diff | crate::preview::Kind::Stub) && !v.contains(&p.path) {
+            v.push(p.path.clone());
+        }
+    }
+    v
+}
+
+/// Swap freshly read content into every preview of `path`, keeping scroll, wrap, markdown view and find.
+fn apply_refresh(app: &mut App, path: &str, bytes: &[u8], total: u64, opts: &Opts) -> bool {
+    let mut changed = false;
+    for t in app.tabs.iter_mut() {
+        for slot in [&mut t.preview, &mut t.side] {
+            if let Some(old) = slot.as_ref().filter(|p| p.path == path && p.kind != crate::preview::Kind::Diff) {
+                let mut p = Preview::build(path, bytes, total, opts);
+                p.carry_over(old);
+                *slot = Some(p);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 enum JobDone {
     Grep(Results),
     Files(Result<grep::FileList, String>, String),
@@ -323,6 +389,14 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     ui::set_tmux_menu(backend.has_tmux());
     let opts = Opts { csv_rows: cfg.defaults.csv_rows };
     let read_cap = cfg.defaults.preview_read_kb as usize * 1024;
+    // Auto-refresh of visible file previews: poll state (see refresh.rs).
+    let refresh_on = cfg.defaults.preview_autorefresh;
+    let refresh_debounce = Duration::from_millis(cfg.defaults.preview_refresh_debounce_ms);
+    let refresh_poll = crate::refresh::poll_interval(remote);
+    let mut watches: std::collections::HashMap<String, crate::refresh::Watch> = Default::default();
+    let mut rjob: Option<RJob<'_>> = None;
+    let mut next_poll = Instant::now();
+    let mut note: Option<(Instant, String)> = None;
     let frame = Duration::from_secs_f64(1.0 / fps.clamp(1, 120) as f64);
     let mut last_draw = Instant::now() - frame;
     let mut dirty = true;
@@ -425,6 +499,13 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
             ex_job = Some(explorer::start(backend, ex.root.clone(), epoch, req, ex.read_cap));
         }
         let due = last_draw + frame;
+        // Polling runs only while a file preview is on screen; an idle wi with none has no timer.
+        let vis = if refresh_on { visible_files(&app) } else { Vec::new() };
+        if refresh_on && !watches.is_empty() {
+            watches.retain(|k, _| app.tabs.iter().any(|t| t.preview.iter().chain(t.side.iter()).any(|p| &p.path == k)));
+        }
+        if vis.is_empty() { rjob = None; }
+        let note_at = note.as_ref().map(|n| n.0);
         // Earliest moment a still-printing background tab counts as quiet. No tab streaming
         // means no deadline, so an idle wi has no timers running.
         let quiet_at = app.tabs.iter().enumerate()
@@ -447,6 +528,57 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         let _ = stdout().write_all(b"\x07");
                         let _ = stdout().flush();
                     }
+                    dirty = true;
+                }
+            }
+            _ = sleep_until(next_poll.into()), if !vis.is_empty() && rjob.is_none() => {
+                next_poll = Instant::now() + refresh_poll;
+                rjob = Some(start_stats(backend, vis.clone()));
+            }
+            done = async {
+                match rjob.as_mut() {
+                    Some(f) => f.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            }, if rjob.is_some() => {
+                rjob = None;
+                match done {
+                    RDone::Stats(v) => {
+                        let now = Instant::now();
+                        let mut to_read = Vec::new();
+                        for (path, obs) in v {
+                            let w = watches.entry(path.clone()).or_insert_with(|| crate::refresh::Watch::new(refresh_debounce));
+                            match w.observe(now, obs) {
+                                crate::refresh::Step::Reload => to_read.push(path),
+                                crate::refresh::Step::Removed => {
+                                    message = Some("file removed".into());
+                                    note = Some((now + Duration::from_secs(4), "file removed".into()));
+                                    dirty = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !to_read.is_empty() { rjob = Some(start_reads(backend, to_read, read_cap)); }
+                    }
+                    RDone::Read(v) => {
+                        for (path, res) in v {
+                            let m = match res {
+                                Ok((bytes, total)) => {
+                                    if apply_refresh(&mut app, &path, &bytes, total, &opts) { sel = None; }
+                                    "refreshed".to_string()
+                                }
+                                Err(e) => format!("refresh failed: {e}"),
+                            };
+                            message = Some(m.clone());
+                            note = Some((Instant::now() + Duration::from_secs(4), m));
+                            dirty = true;
+                        }
+                    }
+                }
+            }
+            _ = sleep_until(note_at.unwrap_or(due).into()), if note_at.is_some() => {
+                if let Some((_, text)) = note.take() && message.as_deref() == Some(text.as_str()) {
+                    message = None;
                     dirty = true;
                 }
             }
@@ -905,6 +1037,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     } else {
                                         reload_preview(&mut app, backend, read_cap, &opts).await
                                     };
+                                    if res.is_ok() && let Some(p) = focused_slot(&mut app).as_ref() { watches.remove(&p.path); }
                                     message = match res {
                                         Ok(()) => Some("reloaded".to_string()),
                                         Err(e) => Some(format!("reload failed: {e}")),

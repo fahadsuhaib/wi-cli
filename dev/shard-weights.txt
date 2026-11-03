@@ -23,6 +23,8 @@ dev/pty_robust.py local 10
 dev/pty_search.py local 138
 dev/pty_search.py remote 146
 dev/pty_select.py local 13
+dev/pty_refresh.py local 75
+dev/pty_refresh.py remote 80
 dev/pty_split.py local 80
 dev/pty_split.py remote 86
 dev/pty_tabdir.py local 68
