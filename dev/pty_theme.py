@@ -65,8 +65,8 @@ class Run:
         if self.pid == 0:
             os.chdir(W)
             os.execve(WI, ["wi"], env)
-        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
-        self.scr = pyte.Screen(100, 30); self.st = pyte.ByteStream(self.scr)
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 100, 0, 0))
+        self.scr = pyte.Screen(100, 50); self.st = pyte.ByteStream(self.scr)
         self.pump(2.0)
     def pump(self, t, until=None):
         end = time.time() + t
@@ -91,7 +91,7 @@ class Run:
         hits = [(m.start(), y) for y, l in enumerate(self.rows()) for m in [re.search(pat, l)] if m]
         return (hits[-1] if last else hits[0]) if hits else None
     def header_bg(self): return self.cell(50, 0).bg
-    def status_bg(self): return self.cell(50, 29).bg
+    def status_bg(self): return self.cell(50, 49).bg
     def quit(self):
         self.send(MENU + b"q", 0.8)
         try: os.kill(self.pid, 9)
