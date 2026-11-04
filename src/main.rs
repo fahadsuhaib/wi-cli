@@ -10,6 +10,7 @@ mod explorer;
 mod explorer_data;
 mod input;
 mod keys;
+mod lineedit;
 mod links;
 mod link;
 mod mouse;

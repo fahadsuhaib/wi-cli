@@ -95,19 +95,12 @@ impl Rename {
                 let n = clean(&self.buf);
                 return Some(RenameOutcome::Save(if n.is_empty() { None } else { Some(n) }));
             }
-            AskKey::Left => self.cur = self.cur.saturating_sub(1),
-            AskKey::Right => self.cur = (self.cur + 1).min(len),
+            AskKey::Left => crate::lineedit::left(&mut self.cur),
+            AskKey::Right => crate::lineedit::right(&self.buf, &mut self.cur),
             AskKey::Home | AskKey::Up => self.cur = 0,
             AskKey::End | AskKey::Down => self.cur = len,
-            AskKey::Backspace if self.cur > 0 => {
-                let (a, b) = (self.byte(self.cur - 1), self.byte(self.cur));
-                self.buf.replace_range(a..b, "");
-                self.cur -= 1;
-            }
-            AskKey::Delete if self.cur < len => {
-                let (a, b) = (self.byte(self.cur), self.byte(self.cur + 1));
-                self.buf.replace_range(a..b, "");
-            }
+            AskKey::Backspace => crate::lineedit::backspace(&mut self.buf, &mut self.cur),
+            AskKey::Delete => crate::lineedit::delete(&mut self.buf, self.cur),
             AskKey::Char(c) => self.insert(c.encode_utf8(&mut [0; 4])),
             _ => {}
         }

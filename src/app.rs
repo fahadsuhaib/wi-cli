@@ -970,12 +970,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         pr.error = None;
                                         if pr.kind.is_folder() && pr.recent {
                                             // A recent folder: take it as typed and confirm.
-                                            pr.input = c;
+                                            pr.set_input(c);
                                             pr.sel = None;
                                             out.extend(b"\r");
                                         } else {
                                             let dir = crate::files::split_input(&pr.input).0.to_string();
-                                            pr.input = format!("{dir}{c}");
+                                            pr.set_input(format!("{dir}{c}"));
                                             out.extend(if c.ends_with('/') { b"\t".to_vec() } else { b"\r".to_vec() });
                                         }
                                     }
@@ -1031,7 +1031,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     }
                     InEv::PasteData(b) => {
                         if let Mode::Prompt(p) = &mut mode {
-                            p.input.push_str(&String::from_utf8_lossy(&b).replace(['\r', '\n'], ""));
+                            p.insert(&String::from_utf8_lossy(&b));
+                            if p.recent { p.recent = false; p.sel = None; p.shown.clear(); p.total = 0; }
                             p.error = None;
                             dirty = true;
                         } else if paste_search(&mut mode, &String::from_utf8_lossy(&b).replace(['\r', '\n'], "")) {
@@ -1689,15 +1690,26 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     i += 1;
                                     continue;
                                 }
-                                pr.input.push_str(&String::from_utf8_lossy(&std::mem::take(&mut run)));
+                                pr.insert(&String::from_utf8_lossy(&std::mem::take(&mut run)));
                                 match b {
                                     0x1b => {
                                         if matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) {
+                                            let first = chunk.get(i + 2).copied();
                                             i += 2;
                                             while i < chunk.len() && !(0x40..=0x7e).contains(&chunk[i]) { i += 1; }
                                             match chunk.get(i) {
                                                 Some(b'A') => arrows.push(false),
                                                 Some(b'B') => arrows.push(true),
+                                                Some(b'C') => crate::lineedit::right(&pr.input, &mut pr.cur),
+                                                Some(b'D') => crate::lineedit::left(&mut pr.cur),
+                                                Some(b'H') => pr.cur = 0,
+                                                Some(b'F') => pr.cur = pr.input.chars().count(),
+                                                Some(b'~') => match first {
+                                                    Some(b'1' | b'7') => pr.cur = 0,
+                                                    Some(b'4' | b'8') => pr.cur = pr.input.chars().count(),
+                                                    Some(b'3') => crate::lineedit::delete(&mut pr.input, pr.cur),
+                                                    _ => {}
+                                                },
                                                 _ => {}
                                             }
                                         } else {
@@ -1706,15 +1718,17 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     }
                                     b'\r' | b'\n' => { open_now = true; break; }
                                     b'\t' => { complete_now = true; break; }
-                                    0x7f | 0x08 => { pr.input.pop(); }
-                                    0x15 => pr.input.clear(),
+                                    0x7f | 0x08 => crate::lineedit::backspace(&mut pr.input, &mut pr.cur),
+                                    0x15 => pr.set_input(String::new()),
+                                    0x01 => pr.cur = 0,
+                                    0x05 => pr.cur = pr.input.chars().count(),
                                     x if x == menu_key => cancel = true,
                                     _ => {}
                                 }
                                 pr.error = None;
                                 i += 1;
                             }
-                            pr.input.push_str(&String::from_utf8_lossy(&run));
+                            pr.insert(&String::from_utf8_lossy(&run));
                             if !run.is_empty() || i > 0 { pr.error = None; }
                             // Editing the folder hides the recent list; arrows move through it while it shows.
                             if pr.recent && pr.input != before { pr.recent = false; pr.sel = None; pr.shown.clear(); pr.total = 0; }
@@ -1732,7 +1746,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             let base = active_dir(&app);
                             if complete_now {
                                 if pr.recent && let Some(c) = pr.sel.and_then(|s| pr.shown.get(s)) {
-                                    pr.input = format!("{}/", c.trim_end_matches('/'));
+                                    pr.set_input(format!("{}/", c.trim_end_matches('/')));
                                 }
                                 pr.recent = false;
                                 pr.sel = None;
@@ -1740,7 +1754,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 match backend.list_dir(&dir).await {
                                     Ok(l) => {
                                         let c = if pr.kind.is_folder() { complete_dirs(&pr.input, &l.entries) } else { complete(&pr.input, &l.entries) };
-                                        pr.input = c.input;
+                                        pr.set_input(c.input);
                                         pr.shown = c.shown;
                                         pr.total = c.total;
                                         if l.truncated {

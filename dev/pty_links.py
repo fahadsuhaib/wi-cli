@@ -137,6 +137,27 @@ if not remote:
     r.send(b"\x1b", 0.5)
     r.send(b"cd ..\n", 0.4)
 
+    # ---- the "Preview a file" prompt is a real line editor: paste, move, edit mid-text
+    PS, PE = b"\x1b[200~", b"\x1b[201~"
+    r.send(MENU + b"p", 0.6)
+    r.send(PS + b"sub/inne.rs" + b"\n" + PE, 0.6)
+    check("pasted text shows in the prompt (newline stripped)", "inne.rs" in r.text() and "open file:" in r.text())
+    x_end = r.scr.cursor.x
+    r.send(b"\x1b[D\x1b[D\x1b[D", 0.5)
+    check("Left moves the real cursor", r.scr.cursor.x == x_end - 3)
+    r.send(b"r", 0.4)
+    check("typing inserts at the cursor", "sub/inner.rs" in r.text() and r.scr.cursor.x == x_end - 2)
+    r.send(b"\x1b[3~", 0.4)
+    check("Delete removes the character under the cursor", "sub/innerrs" in r.text())
+    r.send(b".", 0.3)
+    r.send(b"\x1b[F", 0.3)
+    check("End goes to the end", r.scr.cursor.x == x_end + 1)
+    r.send(b"\x1b[H", 0.3)
+    check("Home goes to the start of the text", r.scr.cursor.x == x_end + 1 - len("sub/inner.rs"))
+    r.send(b"\r", 1.0)
+    check("Enter opens the edited path", "three_inner" in r.text())
+    r.send(b"\x1b", 0.5)
+
     # ---- relative paths resolve against the shell's own directory
     r.send(b"cd sub; echo rel inner.rs:2\n", 0.9)
     x, y = r.last("inner.rs:2")

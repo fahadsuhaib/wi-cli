@@ -35,7 +35,7 @@ wi supports macOS and Linux.
 - Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet)
 - Previews: text, markdown, CSV/TSV, JSON, binary stub; git changes and diffs
 - Recent files: every file you preview is remembered per workspace (also across restarts). Press H in a preview, or menu then Space and type "recent", to pick one again; the full path of the shown file is always on the first row of the preview
-- Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste
+- Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste; the "Preview a file" and folder prompts are real line editors (a visible cursor, Left/Right/Home/End, Backspace/Delete, Ctrl-U, paste inserts at the cursor, Tab completes)
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
   `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation;
   relative paths resolve against the shell's real folder (OSC 7 if it sends it, else asked from the OS when you click), then the workspace root and the tab's start folder; if none has it, one bounded search (depth 6, 5,000 entries, 4 s) finds a unique match by trailing path, and several matches raise a small picker (Enter chooses, Esc cancels), never a silent guess;
