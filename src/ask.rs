@@ -43,15 +43,8 @@ impl Edit {
         Edit { buf: text.to_string(), cur: text.chars().count(), agent }
     }
 
-    fn byte(&self, chars: usize) -> usize {
-        self.buf.char_indices().nth(chars).map_or(self.buf.len(), |(i, _)| i)
-    }
-
     pub fn insert(&mut self, s: &str) {
-        let s: String = s.chars().filter(|c| !c.is_control()).collect();
-        let at = self.byte(self.cur);
-        self.buf.insert_str(at, &s);
-        self.cur += s.chars().count();
+        crate::lineedit::insert(&mut self.buf, &mut self.cur, s);
     }
 }
 
@@ -157,25 +150,17 @@ impl Ask {
                 }
                 return Some(AskOutcome::Start(e.agent, cmd));
             }
-            AskKey::Left => e.cur = e.cur.saturating_sub(1),
-            AskKey::Right => e.cur = (e.cur + 1).min(len),
+            AskKey::Left => crate::lineedit::left(&mut e.cur),
+            AskKey::Right => crate::lineedit::right(&e.buf, &mut e.cur),
             AskKey::Home | AskKey::Up => e.cur = 0,
             AskKey::End | AskKey::Down => e.cur = len,
-            AskKey::Backspace if e.cur > 0 => {
-                let (a, b) = (e.byte(e.cur - 1), e.byte(e.cur));
-                e.buf.replace_range(a..b, "");
-                e.cur -= 1;
-            }
-            AskKey::Delete if e.cur < len => {
-                let (a, b) = (e.byte(e.cur), e.byte(e.cur + 1));
-                e.buf.replace_range(a..b, "");
-            }
+            AskKey::Backspace => crate::lineedit::backspace(&mut e.buf, &mut e.cur),
+            AskKey::Delete => crate::lineedit::delete(&mut e.buf, e.cur),
             AskKey::Tab => {
                 let i = agents::ALL.iter().position(|a| *a == e.agent).unwrap_or(0);
                 e.agent = agents::ALL[(i + 1) % agents::ALL.len()];
             }
             AskKey::Char(c) => e.insert(c.encode_utf8(&mut [0; 4])),
-            _ => {}
         }
         self.error = None;
         None

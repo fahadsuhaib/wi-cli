@@ -35,11 +35,13 @@ wi supports macOS and Linux.
 - Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet)
 - Previews: text, markdown, CSV/TSV, JSON, binary stub; git changes and diffs
 - Recent files: every file you preview is remembered per workspace (also across restarts). Press H in a preview, or menu then Space and type "recent", to pick one again; the full path of the shown file is always on the first row of the preview
-- Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste
+- Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste; the "Preview a file" and folder prompts are real line editors (a visible cursor, Left/Right/Home/End, Backspace/Delete, Ctrl-U, paste inserts at the cursor, Tab completes)
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
-  `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation
+  `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation;
+  relative paths resolve against the shell's real folder (OSC 7 if it sends it, else asked from the OS when you click), then the workspace root and the tab's start folder; if none has it, one bounded search (depth 6, 5,000 entries, 4 s) finds a unique match by trailing path, and several matches raise a small picker (Enter chooses, Esc cancels), never a silent guess;
+  a folder path (`src/`, `./out`, `~/work/app`, `/srv/app/`, local or on the box) opens the file explorer rooted there, and leaving returns to your tab
 - Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
-- File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane; Enter previews a file, O opens it in `$EDITOR` in a new tab
+- File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane. Enter shows a file in the detail pane and stays (Enter again, or O, opens it in the preview pane); E opens it in `$EDITOR` in a new tab. Just type to find: any letter that is not a command (and digits) starts the filter, Esc clears it. Space marks files (kept across folds and when you leave), M types the marks, or the selected path, as `@path ` mentions into your agent tab without pressing Enter. S cycles the sort (name, size, modified, newest first); files that changed or appeared since you opened it or last pressed R get a dot. The explorer keeps its folds, selection, sort and marks while wi runs.
 - Rename a tab (menu: search "rename", click the active tab, or double-click any tab); the name survives "Restart wi"
 - Pinned panes: pin any tab beside the active one (menu: search "pin"); ⇄ swaps left/right, ✕ unpins; the layout is remembered per workspace (needs 101+ columns)
 - Previews refresh by themselves when the file changes on disk (see Configuration)

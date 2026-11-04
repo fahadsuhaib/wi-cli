@@ -9,7 +9,11 @@ pub async fn tab_cwd(backend: &Backend, osc7: Option<&str>, pid: Option<u32>, tm
         return Some(p.to_string());
     }
     match backend {
-        Backend::Local(_) => pid.and_then(local_cwd),
+        Backend::Local(_) => {
+            let pid = pid?;
+            // lsof (macOS) is a subprocess: keep it off the UI loop.
+            tokio::task::spawn_blocking(move || local_cwd(pid)).await.ok().flatten()
+        }
         Backend::Remote(s) => s.tmux_pane_path(tmux_session?).await,
     }
 }

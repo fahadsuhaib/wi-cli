@@ -68,7 +68,14 @@ fn ui_rows(ex: &ExplorerState, t: &Theme) -> Vec<Row> {
                     (None, true) => Cell::styled("•", dim),
                     _ => Cell::new(""),
                 };
-                Row::new(vec![Cell::styled(r.label.clone(), name_style), size, date, mark]).with_prefix(r.prefix.clone(), Some(Style::default().fg(t.tree_guide)))
+                let flag = if r.picked {
+                    Cell::styled("✓", Style::default().fg(t.good).add_modifier(Modifier::BOLD))
+                } else if r.new {
+                    Cell::styled("●", Style::default().fg(t.badge_bg))
+                } else {
+                    Cell::new("")
+                };
+                Row::new(vec![Cell::styled(r.label.clone(), name_style), size, date, flag, mark]).with_prefix(r.prefix.clone(), Some(Style::default().fg(t.tree_guide)))
             }
             RowKind::Error(_) => Row::new(vec![Cell::styled(r.label.clone(), Style::default().fg(t.hot))]).with_prefix(r.prefix.clone(), Some(dim)),
             _ => Row::new(vec![Cell::styled(r.label.clone(), dim.add_modifier(Modifier::ITALIC))]).with_prefix(r.prefix.clone(), Some(dim)),
@@ -117,13 +124,16 @@ pub fn draw(f: &mut Frame, ex: &ExplorerState) {
         None => HintBar::new(&[
             ("Up/Dn", "move"),
             ("L/R", "fold"),
-            ("Enter", "open"),
+            ("Enter", "view"),
+            ("O", "open"),
+            ("Space", "mark"),
+            ("M", "send"),
+            ("type", "find"),
+            ("S", "sort"),
+            ("E", "edit"),
             ("Q", "back"),
-            ("O", "edit"),
-            ("F", "find"),
             ("H", "hidden"),
             ("G", "changed"),
-            ("S", "sort"),
             ("T", "tab"),
             ("A", "agent"),
             ("C/P", "path"),
@@ -138,6 +148,9 @@ pub fn draw(f: &mut Frame, ex: &ExplorerState) {
     let mut st = StatusLine::new(ex.badge.clone()).dim(format!("{items} items")).seg(format!("{changed} changed"), if changed > 0 { Tone::Warn } else { Tone::Dim }).dim(format!("{hidden} hidden"));
     if ex.sort != SortKey::Name || ex.desc {
         st = st.dim(format!("by {}{}", sort_name(ex.sort), if ex.desc { " desc" } else { "" }));
+    }
+    if !ex.picked.is_empty() {
+        st = st.seg(format!("{} marked", ex.picked.len()), Tone::Good);
     }
     if ex.changed_only {
         st = st.seg("changed only", Tone::Warn);

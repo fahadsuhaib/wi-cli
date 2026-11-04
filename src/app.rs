@@ -4,6 +4,7 @@ use crate::input::{InEv, PasteFilter};
 use crate::keys::{EnterMap, KeyDecoder};
 use crate::scroll::{self, ScrollKey};
 use crate::config::{Config, parse_prefix_key, prefix_label};
+use std::collections::HashMap;
 use crate::explorer::{self, Act as ExAct, ExJob, ExMouse, ExplorerState};
 use crate::tab::{Btn, Pane, Side, Split, Tab, button_at, pct_for_col, split_main, split_pinned};
 use crate::files::complete;
@@ -64,6 +65,8 @@ enum Mode {
     Working(&'static str),
     /// The full-screen file explorer.
     Explorer(Box<ExplorerState>),
+    /// Several places a clicked relative path could mean.
+    Pick(crate::pick::Pick),
 }
 
 /// A search or file listing in flight (dropped = cancelled; the process is killed with it).
@@ -383,6 +386,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     // The explorer's reads, one at a time, and its pane split kept for the session.
     let mut ex_job: Option<ExJob<'_>> = None;
     let mut ex_pct: u16 = 40;
+    // Explorers left with Esc/Q, by folder, so folds, selection, sort and marks survive.
+    let mut saved_ex: HashMap<String, Box<ExplorerState>> = HashMap::new();
     let mut last_results: Option<Box<Results>> = None;
     let mut filter = PasteFilter::default();
     let mut flush_at: Option<Instant> = None;
@@ -717,6 +722,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
                     ask: match &mode { Mode::Ask(x) => Some(x), _ => None },
                     rename: match &mode { Mode::Rename(x) => Some(x), _ => None },
+                    pick: match &mode { Mode::Pick(x) => Some(x), _ => None },
                     themes: match &mode { Mode::ThemePick(x) => Some(x), _ => None },
                     confirm: confirm_ref,
                     hints: hints_ref,
@@ -883,7 +889,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     sel = None;
                                     if matches!(mode, Mode::Scroll) { mode = Mode::Shell; }
                                     let o = resolve_link(&app, backend, ws, &l, pane, &open_cfg, confirm_needed).await;
-                                    apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                    if let LinkOutcome::Explorer(dir) = o {
+                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                    } else {
+                                        apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                    }
                                     dirty = true;
                                 }
                                 Intent::Select(phase, pos, pane) => {
@@ -960,12 +970,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         pr.error = None;
                                         if pr.kind.is_folder() && pr.recent {
                                             // A recent folder: take it as typed and confirm.
-                                            pr.input = c;
+                                            pr.set_input(c);
                                             pr.sel = None;
                                             out.extend(b"\r");
                                         } else {
                                             let dir = crate::files::split_input(&pr.input).0.to_string();
-                                            pr.input = format!("{dir}{c}");
+                                            pr.set_input(format!("{dir}{c}"));
                                             out.extend(if c.ends_with('/') { b"\t".to_vec() } else { b"\r".to_vec() });
                                         }
                                     }
@@ -1021,7 +1031,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     }
                     InEv::PasteData(b) => {
                         if let Mode::Prompt(p) = &mut mode {
-                            p.input.push_str(&String::from_utf8_lossy(&b).replace(['\r', '\n'], ""));
+                            p.insert(&String::from_utf8_lossy(&b));
+                            if p.recent { p.recent = false; p.sel = None; p.shown.clear(); p.total = 0; }
                             p.error = None;
                             dirty = true;
                         } else if paste_search(&mut mode, &String::from_utf8_lossy(&b).replace(['\r', '\n'], "")) {
@@ -1361,7 +1372,33 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             ex_pct = ex.pct();
                             match act {
                                 None => {}
-                                Some(ExAct::Leave) => mode = Mode::Shell,
+                                Some(ExAct::Leave) => {
+                                    stash_explorer(&mut saved_ex, &mut mode);
+                                }
+                                Some(ExAct::Send { rels, root }) => {
+                                    let target = if app.tabs[app.active].is_agent() && !app.tabs[app.active].is_preview() {
+                                        Some(app.active)
+                                    } else {
+                                        app.tabs.iter().position(|t| t.is_agent() && !t.is_preview())
+                                    };
+                                    match target {
+                                        None => ex.message = Some(("no agent tab to send to: start one with A (or the menu)".into(), true)),
+                                        Some(i) => {
+                                            let base = app.tabs[i].dir.trim_end_matches('/').to_string();
+                                            let same = base == root.trim_end_matches('/');
+                                            let mut text = String::new();
+                                            for r in &rels {
+                                                text.push('@');
+                                                text.push_str(&if same { r.clone() } else { format!("{}/{r}", root.trim_end_matches('/')) });
+                                                text.push(' ');
+                                            }
+                                            app.tabs[i].write(text.into_bytes());
+                                            ex.sent();
+                                            stash_explorer(&mut saved_ex, &mut mode);
+                                            switch_to(&mut app, i);
+                                        }
+                                    }
+                                }
                                 Some(ExAct::Copy { text, what }) => {
                                     ex.message = Some(match crate::clip::copy(&text) {
                                         Ok(how) => (format!("copied {what} ({how})"), false),
@@ -1375,7 +1412,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     if let LinkOutcome::Message(m) = &o {
                                         ex.message = Some((sanitize(m), true));
                                     } else {
-                                        mode = Mode::Shell;
+                                        stash_explorer(&mut saved_ex, &mut mode);
                                         apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
                                     }
                                 }
@@ -1394,7 +1431,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                                 app.tabs[app.active].write(explorer::editor_command(&f).into_bytes());
                                             }
                                             if !had_strip { resize_all(&mut app)?; }
-                                            mode = Mode::Shell;
+                                            stash_explorer(&mut saved_ex, &mut mode);
                                         }
                                         Err(e) => ex.message = Some((format!("could not open shell: {e}"), true)),
                                     }
@@ -1403,6 +1440,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     let mut list = agents::detect(backend, &dir).await;
                                     if list.is_empty() { list = agents::ALL.to_vec(); }
                                     ask_ctx = AskCtx { key: agents::workspace_key(ws, &dir), dir, tab: None };
+                                    stash_explorer(&mut saved_ex, &mut mode);
                                     mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key, &ask_ctx.dir));
                                 }
                             }
@@ -1556,7 +1594,33 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             } else if let Some((l, pane)) = chosen {
                                 mode = Mode::Shell;
                                 let o = resolve_link(&app, backend, ws, &l, pane, &open_cfg, confirm_needed).await;
-                                apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                if let LinkOutcome::Explorer(dir) = o {
+                                    mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                } else {
+                                    apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                }
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
+                        Mode::Pick(ref mut pk) => {
+                            let mut outcome = None;
+                            for k in crate::ask::parse(chunk) {
+                                if let Some(o) = pk.key(k) { outcome = Some(o); break; }
+                            }
+                            if let Some(o) = outcome {
+                                let line = pk.line;
+                                mode = Mode::Shell;
+                                if let crate::pick::PickOutcome::Choose(abs) = o {
+                                    let mut l = explorer::path_link(&abs);
+                                    if let links::LinkKind::Path { line: ln, .. } = &mut l.kind { *ln = line; }
+                                    let o = resolve_link(&app, backend, ws, &l, Pane::Shell, &open_cfg, confirm_needed).await;
+                                    if let LinkOutcome::Explorer(dir) = o {
+                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                    } else {
+                                        apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                    }
+                                }
                             }
                             dirty = true;
                             chunk = &[];
@@ -1626,15 +1690,26 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     i += 1;
                                     continue;
                                 }
-                                pr.input.push_str(&String::from_utf8_lossy(&std::mem::take(&mut run)));
+                                pr.insert(&String::from_utf8_lossy(&std::mem::take(&mut run)));
                                 match b {
                                     0x1b => {
                                         if matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) {
+                                            let first = chunk.get(i + 2).copied();
                                             i += 2;
                                             while i < chunk.len() && !(0x40..=0x7e).contains(&chunk[i]) { i += 1; }
                                             match chunk.get(i) {
                                                 Some(b'A') => arrows.push(false),
                                                 Some(b'B') => arrows.push(true),
+                                                Some(b'C') => crate::lineedit::right(&pr.input, &mut pr.cur),
+                                                Some(b'D') => crate::lineedit::left(&mut pr.cur),
+                                                Some(b'H') => pr.cur = 0,
+                                                Some(b'F') => pr.cur = pr.input.chars().count(),
+                                                Some(b'~') => match first {
+                                                    Some(b'1' | b'7') => pr.cur = 0,
+                                                    Some(b'4' | b'8') => pr.cur = pr.input.chars().count(),
+                                                    Some(b'3') => crate::lineedit::delete(&mut pr.input, pr.cur),
+                                                    _ => {}
+                                                },
                                                 _ => {}
                                             }
                                         } else {
@@ -1643,15 +1718,17 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     }
                                     b'\r' | b'\n' => { open_now = true; break; }
                                     b'\t' => { complete_now = true; break; }
-                                    0x7f | 0x08 => { pr.input.pop(); }
-                                    0x15 => pr.input.clear(),
+                                    0x7f | 0x08 => crate::lineedit::backspace(&mut pr.input, &mut pr.cur),
+                                    0x15 => pr.set_input(String::new()),
+                                    0x01 => pr.cur = 0,
+                                    0x05 => pr.cur = pr.input.chars().count(),
                                     x if x == menu_key => cancel = true,
                                     _ => {}
                                 }
                                 pr.error = None;
                                 i += 1;
                             }
-                            pr.input.push_str(&String::from_utf8_lossy(&run));
+                            pr.insert(&String::from_utf8_lossy(&run));
                             if !run.is_empty() || i > 0 { pr.error = None; }
                             // Editing the folder hides the recent list; arrows move through it while it shows.
                             if pr.recent && pr.input != before { pr.recent = false; pr.sel = None; pr.shown.clear(); pr.total = 0; }
@@ -1669,7 +1746,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             let base = active_dir(&app);
                             if complete_now {
                                 if pr.recent && let Some(c) = pr.sel.and_then(|s| pr.shown.get(s)) {
-                                    pr.input = format!("{}/", c.trim_end_matches('/'));
+                                    pr.set_input(format!("{}/", c.trim_end_matches('/')));
                                 }
                                 pr.recent = false;
                                 pr.sel = None;
@@ -1677,7 +1754,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 match backend.list_dir(&dir).await {
                                     Ok(l) => {
                                         let c = if pr.kind.is_folder() { complete_dirs(&pr.input, &l.entries) } else { complete(&pr.input, &l.entries) };
-                                        pr.input = c.input;
+                                        pr.set_input(c.input);
                                         pr.shown = c.shown;
                                         pr.total = c.total;
                                         if l.truncated {
@@ -1898,10 +1975,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         Err(m) => message = Some(m),
                                     },
                                     Action::Explorer => {
-                                        let (ec, er) = crossterm::terminal::size()?;
-                                        let mut ex = ExplorerState::new(active_dir(&app), remote.then(|| name.clone()), explorer::Settings { csv_rows: opts.csv_rows, read_cap, open_cfg: open_cfg.clone(), pct: ex_pct });
-                                        ex.prepare(ec, er);
-                                        mode = Mode::Explorer(Box::new(ex));
+                                        let dir = active_dir(&app);
+                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
                                     }
                                     Action::FindOutput if app.tabs[app.active].is_preview() => message = Some("find in output works on a shell tab; press F inside a preview to find in it".into()),
                                     Action::FindOutput => mode = Mode::FindPrompt(FindPrompt { target: FindTarget::Output, text: String::new() }),
@@ -2204,6 +2279,27 @@ async fn commit_folder(
         *message = Some(format!("could not save recent folders: {e}"));
     }
     Ok(ask)
+}
+
+/// The explorer for `dir`: the kept one from an earlier visit (refreshed), or a new one.
+fn explorer_for(dir: String, saved: &mut HashMap<String, Box<ExplorerState>>, remote: Option<String>, opts: &Opts, read_cap: usize, open_cfg: &OpenCfg, pct: u16) -> Result<Box<ExplorerState>> {
+    let (ec, er) = crossterm::terminal::size()?;
+    let mut ex = match saved.remove(&dir) {
+        Some(mut e) => {
+            e.refresh();
+            e
+        }
+        None => Box::new(ExplorerState::new(dir, remote, explorer::Settings { csv_rows: opts.csv_rows, read_cap, open_cfg: open_cfg.clone(), pct })),
+    };
+    ex.prepare(ec, er);
+    Ok(ex)
+}
+
+/// Leave the explorer for the shell, keeping its state for the next visit to the same folder.
+fn stash_explorer(saved: &mut HashMap<String, Box<ExplorerState>>, mode: &mut Mode) {
+    if let Mode::Explorer(e) = std::mem::replace(mode, Mode::Shell) {
+        saved.insert(e.root.clone(), e);
+    }
 }
 
 fn switch_to(app: &mut App, i: usize) {
@@ -2846,6 +2942,10 @@ enum LinkOutcome {
     Message(String),
     /// Show this file in a preview tab, at this line.
     Preview(String, Option<u32>),
+    /// The link is a folder: open the file explorer rooted there.
+    Explorer(String),
+    /// Several matches: ask which (path as clicked, candidates, line).
+    Pick(String, Vec<String>, Option<u32>),
     /// Ask first.
     Confirm(Confirm, Pending),
     /// Confirmation is switched off in the config: do it now.
@@ -2935,7 +3035,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Rename(_) | Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
+        Mode::Rename(_) | Mode::Pick(_) | Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
         Mode::GrepPrompt(p) => match m.kind {
             Kind::Down(mouse::Button::Left) => ui::search::grep_chip_at(main, p, m.col, m.row).map_or(Intent::None, |k| Intent::Synth(k.to_vec())),
             _ => Intent::None,
@@ -3139,7 +3239,29 @@ async fn link_cwd(app: &App, backend: &Backend, pane: Pane) -> Option<String> {
     if let Some(p) = pane_preview(app, pane) {
         return std::path::Path::new(&p.path).parent().filter(|_| p.path.starts_with('/')).map(|d| d.to_string_lossy().into_owned());
     }
-    crate::cwd::tab_cwd(backend, tab.compat.cwd.as_deref(), tab.handle.as_ref().and_then(|h| h.pid()), app.sessions.get(&tab.id).map(String::as_str)).await
+    // The pty's foreground process (what is printing) when known, else the shell itself.
+    let fg = match tab.handle.as_ref() {
+        Some(h) if matches!(backend, Backend::Local(_)) => h.foreground().await.and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 1),
+        _ => None,
+    };
+    let pid = fg.or_else(|| tab.handle.as_ref().and_then(|h| h.pid()));
+    crate::cwd::tab_cwd(backend, tab.compat.cwd.as_deref(), pid, app.sessions.get(&tab.id).map(String::as_str)).await
+}
+
+/// The first candidate that reads as a file (with its head and size), and the first that is a folder.
+async fn probe_candidates(backend: &Backend, cands: &[String]) -> (Option<(String, Vec<u8>, u64)>, Option<String>) {
+    let mut dir = None;
+    for cand in cands {
+        match backend.read_prefix(cand, 4096).await {
+            Ok((head, size)) => return (Some((cand.clone(), head, size)), dir),
+            Err(e) => {
+                if dir.is_none() && e.to_string().contains("is a directory") {
+                    dir = Some(cand.clone());
+                }
+            }
+        }
+    }
+    (None, dir)
 }
 
 /// Work out what a link means and what to ask the user, without doing anything yet.
@@ -3168,19 +3290,36 @@ async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link,
             let cwd = link_cwd(app, backend, pane).await;
             let root = backend.resolve("").await.unwrap_or_default();
             let home = if remote { root.clone() } else { dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default() };
-            let mut found = None;
-            let mut is_dir = false;
-            for cand in links::resolve_candidates(path, cwd.as_deref(), &root, Some(&home)) {
-                match backend.read_prefix(&cand, 4096).await {
-                    Ok((head, size)) => {
-                        found = Some((cand, head, size));
-                        break;
+            let tab_dir = pane_tab(app, pane).dir.clone();
+            // Bases, in order: the shell's own folder (OSC 7 or the OS), the workspace root, the
+            // folder the tab was started in.
+            let mut cands = links::resolve_candidates(path, cwd.as_deref(), &root, Some(&home));
+            for c in links::resolve_candidates(path, Some(&tab_dir), &root, Some(&home)) {
+                if !cands.contains(&c) {
+                    cands.push(c);
+                }
+            }
+            let (mut found, mut dir) = probe_candidates(backend, &cands).await;
+            if found.is_none() && dir.is_none() && !path.starts_with('/') && !path.starts_with('~') {
+                // Not where any base says: one bounded search for the same trailing path.
+                let mut bases: Vec<String> = Vec::new();
+                for b in [root.clone(), tab_dir.clone()] {
+                    if !b.is_empty() && !bases.iter().any(|x| b == *x || b.starts_with(&format!("{}/", x.trim_end_matches('/')))) {
+                        bases.push(b);
                     }
-                    Err(e) => is_dir |= e.to_string().contains("is a directory"),
+                }
+                let hits = crate::pick::search(backend, &bases, path).await;
+                match hits.len() {
+                    0 => {}
+                    1 => (found, dir) = probe_candidates(backend, &hits).await,
+                    _ => return LinkOutcome::Pick(path.clone(), hits, *line),
                 }
             }
             let Some((abs, head, size)) = found else {
-                return LinkOutcome::Message(if is_dir { format!("{}: is a folder", sanitize(path)) } else { format!("no such file: {}", sanitize(path)) });
+                if let Some(d) = dir {
+                    return LinkOutcome::Explorer(d);
+                }
+                return LinkOutcome::Message(format!("no such file: {}", sanitize(path)));
             };
             match opener::classify(&abs, &head, size, open_cfg) {
                 Handling::Preview => LinkOutcome::Preview(abs, *line),
@@ -3245,6 +3384,8 @@ async fn apply_outcome<'a>(
 ) {
     match o {
         LinkOutcome::Message(m) => *message = Some(m),
+        LinkOutcome::Explorer(_) => {} // opened by the caller, which owns the explorer state
+        LinkOutcome::Pick(path, items, line) => *mode = Mode::Pick(crate::pick::Pick::new(path, items, line)),
         LinkOutcome::Preview(abs, line) => {
             match open_preview(app, backend, &abs, read_cap, opts, line).await {
                 Ok(Placement::TabNarrow) => *message = Some("narrow: opened in a tab".into()),

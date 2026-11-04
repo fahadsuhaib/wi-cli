@@ -17,7 +17,10 @@ env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", COLORTERM="truecolor", WICLI
 def build_fixtures():
     script = r'''
 set -e
-mkdir -p src sub pv
+mkdir -p src sub pv deep/er/nest x/dup y/dup
+printf 'LEAF_BODY\n' > deep/er/nest/leaf_unique.md
+printf 'X_BODY\n' > x/dup/m_dup.txt
+printf 'Y_BODY\n' > y/dup/m_dup.txt
 for i in $(seq 1 20); do echo "fn line_$i() {}"; done > src/main.rs
 printf 'one\ntwo\nthree_inner\nfour\n' > sub/inner.rs
 printf '\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01' > pic.png
@@ -109,6 +112,50 @@ if not remote:
     r.send(b"\x1b", 0.5)
     r.click(x + 2, y, code=2)
     check("right-click opens too", "three_inner" in r.text())
+    r.send(b"\x1b", 0.5)
+
+    # ---- relative paths without OSC 7: the OS cwd, then one bounded search, then a picker
+    r.send(b"clear; cd sub; echo go inner.rs:3\n", 0.8)
+    x, y = r.last("inner.rs:3")
+    r.click(x + 2, y, code=2)
+    check("after cd (no OSC 7) a relative path resolves against the shell's real folder", "three_inner" in r.text())
+    r.send(b"\x1b", 0.5)
+    r.send(b"clear; echo see nest/leaf_unique.md\n", 0.8)
+    x, y = r.last("nest/leaf_unique.md")
+    r.click(x + 2, y, code=2)
+    check("a path found nowhere near the shell is searched for: a unique match opens", "LEAF_BODY" in r.text())
+    r.send(b"\x1b", 0.5)
+    r.send(b"clear; echo see dup/m_dup.txt\n", 0.8)
+    x, y = r.last("dup/m_dup.txt")
+    r.click(x + 2, y, code=2)
+    check("several matches raise a picker and open nothing", "Several places match" in r.text() and "x/dup/m_dup.txt" in r.text() and "y/dup/m_dup.txt" in r.text() and "X_BODY" not in r.text())
+    r.send(b"\x1b", 0.5)
+    check("Esc cancels the picker", "Several places match" not in r.text() and "X_BODY" not in r.text())
+    r.click(x + 2, y, code=2)
+    r.send(b"\x1b[B", 0.3); r.send(b"\r", 0.9)
+    check("arrows and Enter choose the second match", "Y_BODY" in r.text() and "X_BODY" not in r.text())
+    r.send(b"\x1b", 0.5)
+    r.send(b"cd ..\n", 0.4)
+
+    # ---- the "Preview a file" prompt is a real line editor: paste, move, edit mid-text
+    PS, PE = b"\x1b[200~", b"\x1b[201~"
+    r.send(MENU + b"p", 0.6)
+    r.send(PS + b"sub/inne.rs" + b"\n" + PE, 0.6)
+    check("pasted text shows in the prompt (newline stripped)", "inne.rs" in r.text() and "open file:" in r.text())
+    x_end = r.scr.cursor.x
+    r.send(b"\x1b[D\x1b[D\x1b[D", 0.5)
+    check("Left moves the real cursor", r.scr.cursor.x == x_end - 3)
+    r.send(b"r", 0.4)
+    check("typing inserts at the cursor", "sub/inner.rs" in r.text() and r.scr.cursor.x == x_end - 2)
+    r.send(b"\x1b[3~", 0.4)
+    check("Delete removes the character under the cursor", "sub/innerrs" in r.text())
+    r.send(b".", 0.3)
+    r.send(b"\x1b[F", 0.3)
+    check("End goes to the end", r.scr.cursor.x == x_end + 1)
+    r.send(b"\x1b[H", 0.3)
+    check("Home goes to the start of the text", r.scr.cursor.x == x_end + 1 - len("sub/inner.rs"))
+    r.send(b"\r", 1.0)
+    check("Enter opens the edited path", "three_inner" in r.text())
     r.send(b"\x1b", 0.5)
 
     # ---- relative paths resolve against the shell's own directory
