@@ -708,8 +708,12 @@ fn valid_path(p: &str) -> bool {
     let prefixed =
         p.starts_with('/') || p.starts_with("~/") || p.starts_with("./") || p.starts_with("../");
     let last = p.rsplit('/').next().unwrap_or("");
-    if last.is_empty() || prefixed {
-        return prefixed;
+    if last.is_empty() {
+        // A folder written with a trailing slash: `src/`, `docs/guides/`, `./out/`.
+        return prefixed || p.trim_end_matches('/').contains(|c: char| c.is_alphanumeric());
+    }
+    if prefixed {
+        return true;
     }
     if EXTLESS.contains(&last) {
         return true;
@@ -830,6 +834,24 @@ mod tests {
         let l = links1(text);
         assert_eq!(l.len(), 1, "{text:?} -> {l:?}");
         l[0].kind.clone()
+    }
+
+    #[test]
+    fn folder_paths_are_links() {
+        assert_eq!(kind("created src/ done"), pk("src/", None, None));
+        assert_eq!(kind("see docs/guides/ now"), pk("docs/guides/", None, None));
+        assert_eq!(kind("cd /home/dev/proj/ ok"), pk("/home/dev/proj/", None, None));
+        assert_eq!(kind("in ~/work/app and"), pk("~/work/app", None, None));
+        assert_eq!(kind("out: ./build/"), pk("./build/", None, None));
+        assert!(links1("a lone / slash").is_empty());
+        assert!(links1("and // or").is_empty());
+    }
+
+    #[test]
+    fn folder_candidates_resolve_like_files() {
+        assert_eq!(resolve_candidates("src/", Some("/w/app"), "/root", None)[0], "/w/app/src");
+        assert_eq!(resolve_candidates("~/work/", None, "/root", Some("/home/me"))[0], "/home/me/work");
+        assert_eq!(resolve_candidates("../x/", Some("/w/app"), "/root", None)[0], "/w/x");
     }
 
     fn pk(path: &str, line: Option<u32>, col: Option<u32>) -> LinkKind {

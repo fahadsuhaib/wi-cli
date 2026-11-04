@@ -37,7 +37,8 @@ wi supports macOS and Linux.
 - Recent files: every file you preview is remembered per workspace (also across restarts). Press H in a preview, or menu then Space and type "recent", to pick one again; the full path of the shown file is always on the first row of the preview
 - Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
-  `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation
+  `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation;
+  a folder path (`src/`, `./out`, `~/work/app`, `/srv/app/`, local or on the box) opens the file explorer rooted there, and leaving returns to your tab
 - Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
 - File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane. Enter shows a file in the detail pane and stays (Enter again, or O, opens it in the preview pane); E opens it in `$EDITOR` in a new tab. Just type to find: any letter that is not a command (and digits) starts the filter, Esc clears it. Space marks files (kept across folds and when you leave), M types the marks, or the selected path, as `@path ` mentions into your agent tab without pressing Enter. S cycles the sort (name, size, modified, newest first); files that changed or appeared since you opened it or last pressed R get a dot. The explorer keeps its folds, selection, sort and marks while wi runs.
 - Rename a tab (menu: search "rename", click the active tab, or double-click any tab); the name survives "Restart wi"

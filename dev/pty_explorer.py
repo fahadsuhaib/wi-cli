@@ -441,6 +441,29 @@ def main():
     r.send(MENU, 0.5)
     check("the menu key leaves it too", "explorer ·" not in r.text())
 
+    # ---- a folder path in the output opens the explorer rooted there (right-click)
+    r.send(b"clear; echo see docs/ now\n", 0.8)
+    pos = r.find(r"docs/")
+    pos = None if pos is None or "echo" in r.rows()[pos[1]] else pos
+    if pos is None:
+        ys = [y for y, l in enumerate(r.rows()) if l.startswith("see docs/")]
+        pos = (r.rows()[ys[0]].index("docs/"), ys[0]) if ys else None
+    check("the folder path is on screen", pos is not None)
+    if pos:
+        r.mouse(2, pos[0] + 2, pos[1]); r.mouse(2, pos[0] + 2, pos[1], up=True); r.pump(2.0)
+        check("right-click on a relative folder path opens the explorer rooted there", "explorer ·" in r.rows()[0] and re.search(r"exptest/proj/docs", r.rows()[0]) is not None and "guide.md" in r.left())
+        r.send(b"q", 0.8)
+        check("leaving returns to the tab", "explorer ·" not in r.text() and "see docs/ now" in r.text())
+    r.send(b"clear; echo abs $PWD/src/\n", 0.8)
+    ys = [y for y, l in enumerate(r.rows()) if l.startswith("abs ")]
+    if ys:
+        x = r.rows()[ys[0]].index("/")
+        r.mouse(2, x + 3, ys[0]); r.mouse(2, x + 3, ys[0], up=True); r.pump(2.0)
+        check("right-click on an absolute folder path opens the explorer", "explorer ·" in r.rows()[0] and re.search(r"exptest/proj/src", r.rows()[0]) is not None and "util.rs" in r.left())
+        r.send(b"q", 0.8)
+    else:
+        check("the absolute folder path is on screen", False)
+
     # ---- O opens the file in the preview pane (and leaves)
     r.open_explorer()
     r.goto("table.csv", b"\x1b[B", 40) or r.goto("table.csv", b"\x1b[A", 40)

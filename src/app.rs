@@ -886,7 +886,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     sel = None;
                                     if matches!(mode, Mode::Scroll) { mode = Mode::Shell; }
                                     let o = resolve_link(&app, backend, ws, &l, pane, &open_cfg, confirm_needed).await;
-                                    apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                    if let LinkOutcome::Explorer(dir) = o {
+                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                    } else {
+                                        apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                    }
                                     dirty = true;
                                 }
                                 Intent::Select(phase, pos, pane) => {
@@ -1586,7 +1590,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             } else if let Some((l, pane)) = chosen {
                                 mode = Mode::Shell;
                                 let o = resolve_link(&app, backend, ws, &l, pane, &open_cfg, confirm_needed).await;
-                                apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                if let LinkOutcome::Explorer(dir) = o {
+                                    mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                } else {
+                                    apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                }
                             }
                             dirty = true;
                             chunk = &[];
@@ -1928,17 +1936,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         Err(m) => message = Some(m),
                                     },
                                     Action::Explorer => {
-                                        let (ec, er) = crossterm::terminal::size()?;
                                         let dir = active_dir(&app);
-                                        let mut ex = match saved_ex.remove(&dir) {
-                                            Some(mut e) => {
-                                                e.refresh();
-                                                e
-                                            }
-                                            None => Box::new(ExplorerState::new(dir, remote.then(|| name.clone()), explorer::Settings { csv_rows: opts.csv_rows, read_cap, open_cfg: open_cfg.clone(), pct: ex_pct })),
-                                        };
-                                        ex.prepare(ec, er);
-                                        mode = Mode::Explorer(ex);
+                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
                                     }
                                     Action::FindOutput if app.tabs[app.active].is_preview() => message = Some("find in output works on a shell tab; press F inside a preview to find in it".into()),
                                     Action::FindOutput => mode = Mode::FindPrompt(FindPrompt { target: FindTarget::Output, text: String::new() }),
@@ -2241,6 +2240,20 @@ async fn commit_folder(
         *message = Some(format!("could not save recent folders: {e}"));
     }
     Ok(ask)
+}
+
+/// The explorer for `dir`: the kept one from an earlier visit (refreshed), or a new one.
+fn explorer_for(dir: String, saved: &mut HashMap<String, Box<ExplorerState>>, remote: Option<String>, opts: &Opts, read_cap: usize, open_cfg: &OpenCfg, pct: u16) -> Result<Box<ExplorerState>> {
+    let (ec, er) = crossterm::terminal::size()?;
+    let mut ex = match saved.remove(&dir) {
+        Some(mut e) => {
+            e.refresh();
+            e
+        }
+        None => Box::new(ExplorerState::new(dir, remote, explorer::Settings { csv_rows: opts.csv_rows, read_cap, open_cfg: open_cfg.clone(), pct })),
+    };
+    ex.prepare(ec, er);
+    Ok(ex)
 }
 
 /// Leave the explorer for the shell, keeping its state for the next visit to the same folder.
@@ -2890,6 +2903,8 @@ enum LinkOutcome {
     Message(String),
     /// Show this file in a preview tab, at this line.
     Preview(String, Option<u32>),
+    /// The link is a folder: open the file explorer rooted there.
+    Explorer(String),
     /// Ask first.
     Confirm(Confirm, Pending),
     /// Confirmation is switched off in the config: do it now.
@@ -3213,18 +3228,25 @@ async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link,
             let root = backend.resolve("").await.unwrap_or_default();
             let home = if remote { root.clone() } else { dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default() };
             let mut found = None;
-            let mut is_dir = false;
+            let mut dir = None;
             for cand in links::resolve_candidates(path, cwd.as_deref(), &root, Some(&home)) {
                 match backend.read_prefix(&cand, 4096).await {
                     Ok((head, size)) => {
                         found = Some((cand, head, size));
                         break;
                     }
-                    Err(e) => is_dir |= e.to_string().contains("is a directory"),
+                    Err(e) => {
+                        if dir.is_none() && e.to_string().contains("is a directory") {
+                            dir = Some(cand);
+                        }
+                    }
                 }
             }
             let Some((abs, head, size)) = found else {
-                return LinkOutcome::Message(if is_dir { format!("{}: is a folder", sanitize(path)) } else { format!("no such file: {}", sanitize(path)) });
+                if let Some(d) = dir {
+                    return LinkOutcome::Explorer(d);
+                }
+                return LinkOutcome::Message(format!("no such file: {}", sanitize(path)));
             };
             match opener::classify(&abs, &head, size, open_cfg) {
                 Handling::Preview => LinkOutcome::Preview(abs, *line),
@@ -3289,6 +3311,7 @@ async fn apply_outcome<'a>(
 ) {
     match o {
         LinkOutcome::Message(m) => *message = Some(m),
+        LinkOutcome::Explorer(_) => {} // opened by the caller, which owns the explorer state
         LinkOutcome::Preview(abs, line) => {
             match open_preview(app, backend, &abs, read_cap, opts, line).await {
                 Ok(Placement::TabNarrow) => *message = Some("narrow: opened in a tab".into()),
