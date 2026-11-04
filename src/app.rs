@@ -734,14 +734,21 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     status: status_s.as_deref(),
                     explorer: match &mode { Mode::Explorer(e) => Some(&**e), _ => None },
                 };
-                if std::mem::take(&mut repaint) {
+                let full = std::mem::take(&mut repaint);
+                if full {
                     // Not Terminal::clear(): it asks the terminal for the cursor position and wants
                     // the reply on stdin, which wi itself is reading. Clear the screen directly and
                     // start from an empty drawing surface so the next frame paints everything.
-                    crossterm::execute!(stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
+                    // The clear is only queued and sits inside a synchronized update, so it goes out
+                    // together with the frame and the terminal never shows a blank screen in between.
+                    crossterm::queue!(stdout(), crossterm::terminal::BeginSynchronizedUpdate, crossterm::terminal::Clear(crossterm::terminal::ClearType::All))?;
                     term = Terminal::new(CrosstermBackend::new(stdout()))?;
                 }
-                term.draw(|f| ui::draw(f, &view))?;
+                let drawn = term.draw(|f| ui::draw(f, &view));
+                if full {
+                    crossterm::execute!(stdout(), crossterm::terminal::EndSynchronizedUpdate)?;
+                }
+                drawn?;
                 last_draw = Instant::now();
                 dirty = false;
             }

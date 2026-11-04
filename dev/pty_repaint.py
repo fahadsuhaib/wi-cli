@@ -42,6 +42,9 @@ pump(2.0)
 after = b""
 os.write(fd, b"x"); after += pump(0.6)
 check("the first key after a pause repaints the whole screen", CLEAR in after)
+BEGIN, END = b"\x1b[?2026h", b"\x1b[?2026l"
+i = after.find(BEGIN); c = after.find(CLEAR); e = after.find(END)
+check("the clear is sent inside one synchronized update together with the frame", 0 <= i < c < e and e - c > 200)
 check("and the content is all there afterwards", any("REPAINT_MARK" in r for r in rows()))
 # the next keys are fast again
 more = b""
