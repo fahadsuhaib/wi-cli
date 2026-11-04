@@ -524,6 +524,7 @@ pub struct View<'a> {
     pub split: (crate::tab::Side, u16),
     pub focus_side: bool,
     pub ask: Option<&'a Ask>,
+    pub pick: Option<&'a crate::pick::Pick>,
     pub rename: Option<&'a crate::rename::Rename>,
     /// The theme picker, when open.
     pub themes: Option<&'a themepick::ThemePick>,
@@ -791,6 +792,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
         _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
         _ if v.themes.is_some() => " arrows preview a theme · Enter applies and saves · type to filter · Esc cancels".to_string(),
         _ if v.rename.is_some() => " Enter saves · Esc cancels · empty name goes back to the automatic title".to_string(),
+        _ if v.pick.is_some() => " arrows choose · Enter opens it · Esc cancels".to_string(),
         _ if v.ask.is_some() => " Enter starts · E edits the command · N not now · X never here".to_string(),
         _ if v.prompt.is_some_and(|p| p.kind.is_folder()) => " Tab completes folders · arrows pick a recent one · Enter confirms · Esc cancels".to_string(),
         _ if v.prompt.is_some() => " Tab completes · Enter opens · Esc cancels".to_string(),
@@ -811,6 +813,10 @@ fn draw_frame(f: &mut Frame, v: &View) {
     }
     if let Some(a) = v.ask {
         draw_ask(f, main, a);
+        return;
+    }
+    if let Some(p) = v.pick {
+        draw_pick(f, main, p);
         return;
     }
     if let Some(r) = v.rename {
@@ -1104,6 +1110,36 @@ fn draw_ask(f: &mut Frame, main: Rect, a: &Ask) {
     if let Some(c) = cursor {
         f.set_cursor_position(c);
     }
+}
+
+fn draw_pick(f: &mut Frame, main: Rect, p: &crate::pick::Pick) {
+    let t = theme();
+    let dim = Style::default().fg(t.dialog_dim);
+    let w = 90.min(main.width);
+    let inner_w = w.saturating_sub(2) as usize;
+    let list_h = (p.items.len() as u16).min(main.height.saturating_sub(5).max(1)).min(12) as usize;
+    let h = (list_h as u16 + 4).min(main.height);
+    let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
+    let mut top = p.scroll.get().min(p.items.len().saturating_sub(list_h));
+    if p.sel < top { top = p.sel; }
+    if p.sel >= top + list_h { top = p.sel + 1 - list_h; }
+    p.scroll.set(top);
+    let mut lines = vec![Line::from(Span::styled(" Several places match. Nothing is opened until you choose.", dim))];
+    for i in top..(top + list_h).min(p.items.len()) {
+        let text = sanitize(&p.items[i]);
+        let room = inner_w.saturating_sub(4);
+        let n = text.chars().count();
+        let shown = if n > room { format!("…{}", text.chars().skip(n - room.saturating_sub(1)).collect::<String>()) } else { text };
+        let row = format!(" {} {}", if i == p.sel { "›" } else { " " }, shown);
+        let pad = inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(row.as_str()));
+        let st = if i == p.sel { Style::default().bg(t.menu_sel_bg).fg(t.menu_sel_fg) } else { Style::default() };
+        lines.push(Line::from(Span::styled(format!("{row}{}", " ".repeat(pad)), st)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" ↑↓ choose · Enter open · Esc cancel", dim)));
+    let title = format!(" Which {}? ", sanitize(&p.path.chars().take(40).collect::<String>()));
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(&title, t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
 }
 
 fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {

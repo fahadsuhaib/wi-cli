@@ -14,6 +14,7 @@ mod links;
 mod link;
 mod mouse;
 mod opener;
+mod pick;
 mod preview;
 mod refresh;
 mod rename;

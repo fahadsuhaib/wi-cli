@@ -65,6 +65,8 @@ enum Mode {
     Working(&'static str),
     /// The full-screen file explorer.
     Explorer(Box<ExplorerState>),
+    /// Several places a clicked relative path could mean.
+    Pick(crate::pick::Pick),
 }
 
 /// A search or file listing in flight (dropped = cancelled; the process is killed with it).
@@ -720,6 +722,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     prompt: match &mode { Mode::Prompt(p) => Some(p), _ => None },
                     ask: match &mode { Mode::Ask(x) => Some(x), _ => None },
                     rename: match &mode { Mode::Rename(x) => Some(x), _ => None },
+                    pick: match &mode { Mode::Pick(x) => Some(x), _ => None },
                     themes: match &mode { Mode::ThemePick(x) => Some(x), _ => None },
                     confirm: confirm_ref,
                     hints: hints_ref,
@@ -1594,6 +1597,28 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
                                 } else {
                                     apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                }
+                            }
+                            dirty = true;
+                            chunk = &[];
+                        }
+                        Mode::Pick(ref mut pk) => {
+                            let mut outcome = None;
+                            for k in crate::ask::parse(chunk) {
+                                if let Some(o) = pk.key(k) { outcome = Some(o); break; }
+                            }
+                            if let Some(o) = outcome {
+                                let line = pk.line;
+                                mode = Mode::Shell;
+                                if let crate::pick::PickOutcome::Choose(abs) = o {
+                                    let mut l = explorer::path_link(&abs);
+                                    if let links::LinkKind::Path { line: ln, .. } = &mut l.kind { *ln = line; }
+                                    let o = resolve_link(&app, backend, ws, &l, Pane::Shell, &open_cfg, confirm_needed).await;
+                                    if let LinkOutcome::Explorer(dir) = o {
+                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                    } else {
+                                        apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                    }
                                 }
                             }
                             dirty = true;
@@ -2905,6 +2930,8 @@ enum LinkOutcome {
     Preview(String, Option<u32>),
     /// The link is a folder: open the file explorer rooted there.
     Explorer(String),
+    /// Several matches: ask which (path as clicked, candidates, line).
+    Pick(String, Vec<String>, Option<u32>),
     /// Ask first.
     Confirm(Confirm, Pending),
     /// Confirmation is switched off in the config: do it now.
@@ -2994,7 +3021,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Rename(_) | Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
+        Mode::Rename(_) | Mode::Pick(_) | Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
         Mode::GrepPrompt(p) => match m.kind {
             Kind::Down(mouse::Button::Left) => ui::search::grep_chip_at(main, p, m.col, m.row).map_or(Intent::None, |k| Intent::Synth(k.to_vec())),
             _ => Intent::None,
@@ -3198,7 +3225,29 @@ async fn link_cwd(app: &App, backend: &Backend, pane: Pane) -> Option<String> {
     if let Some(p) = pane_preview(app, pane) {
         return std::path::Path::new(&p.path).parent().filter(|_| p.path.starts_with('/')).map(|d| d.to_string_lossy().into_owned());
     }
-    crate::cwd::tab_cwd(backend, tab.compat.cwd.as_deref(), tab.handle.as_ref().and_then(|h| h.pid()), app.sessions.get(&tab.id).map(String::as_str)).await
+    // The pty's foreground process (what is printing) when known, else the shell itself.
+    let fg = match tab.handle.as_ref() {
+        Some(h) if matches!(backend, Backend::Local(_)) => h.foreground().await.and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 1),
+        _ => None,
+    };
+    let pid = fg.or_else(|| tab.handle.as_ref().and_then(|h| h.pid()));
+    crate::cwd::tab_cwd(backend, tab.compat.cwd.as_deref(), pid, app.sessions.get(&tab.id).map(String::as_str)).await
+}
+
+/// The first candidate that reads as a file (with its head and size), and the first that is a folder.
+async fn probe_candidates(backend: &Backend, cands: &[String]) -> (Option<(String, Vec<u8>, u64)>, Option<String>) {
+    let mut dir = None;
+    for cand in cands {
+        match backend.read_prefix(cand, 4096).await {
+            Ok((head, size)) => return (Some((cand.clone(), head, size)), dir),
+            Err(e) => {
+                if dir.is_none() && e.to_string().contains("is a directory") {
+                    dir = Some(cand.clone());
+                }
+            }
+        }
+    }
+    (None, dir)
 }
 
 /// Work out what a link means and what to ask the user, without doing anything yet.
@@ -3227,19 +3276,29 @@ async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link,
             let cwd = link_cwd(app, backend, pane).await;
             let root = backend.resolve("").await.unwrap_or_default();
             let home = if remote { root.clone() } else { dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default() };
-            let mut found = None;
-            let mut dir = None;
-            for cand in links::resolve_candidates(path, cwd.as_deref(), &root, Some(&home)) {
-                match backend.read_prefix(&cand, 4096).await {
-                    Ok((head, size)) => {
-                        found = Some((cand, head, size));
-                        break;
+            let tab_dir = pane_tab(app, pane).dir.clone();
+            // Bases, in order: the shell's own folder (OSC 7 or the OS), the workspace root, the
+            // folder the tab was started in.
+            let mut cands = links::resolve_candidates(path, cwd.as_deref(), &root, Some(&home));
+            for c in links::resolve_candidates(path, Some(&tab_dir), &root, Some(&home)) {
+                if !cands.contains(&c) {
+                    cands.push(c);
+                }
+            }
+            let (mut found, mut dir) = probe_candidates(backend, &cands).await;
+            if found.is_none() && dir.is_none() && !path.starts_with('/') && !path.starts_with('~') {
+                // Not where any base says: one bounded search for the same trailing path.
+                let mut bases: Vec<String> = Vec::new();
+                for b in [root.clone(), tab_dir.clone()] {
+                    if !b.is_empty() && !bases.iter().any(|x| b == *x || b.starts_with(&format!("{}/", x.trim_end_matches('/')))) {
+                        bases.push(b);
                     }
-                    Err(e) => {
-                        if dir.is_none() && e.to_string().contains("is a directory") {
-                            dir = Some(cand);
-                        }
-                    }
+                }
+                let hits = crate::pick::search(backend, &bases, path).await;
+                match hits.len() {
+                    0 => {}
+                    1 => (found, dir) = probe_candidates(backend, &hits).await,
+                    _ => return LinkOutcome::Pick(path.clone(), hits, *line),
                 }
             }
             let Some((abs, head, size)) = found else {
@@ -3312,6 +3371,7 @@ async fn apply_outcome<'a>(
     match o {
         LinkOutcome::Message(m) => *message = Some(m),
         LinkOutcome::Explorer(_) => {} // opened by the caller, which owns the explorer state
+        LinkOutcome::Pick(path, items, line) => *mode = Mode::Pick(crate::pick::Pick::new(path, items, line)),
         LinkOutcome::Preview(abs, line) => {
             match open_preview(app, backend, &abs, read_cap, opts, line).await {
                 Ok(Placement::TabNarrow) => *message = Some("narrow: opened in a tab".into()),
