@@ -55,14 +55,27 @@ preview pane; the tree uses the full width.
   binaries, an info card that says Enter asks before opening natively (the existing confirmation
   and safety rules apply unchanged).
 - **Keys (plain letters only):**
-  - `Enter` on a file: open it in the preview pane (or tab) next to the shell and leave the
-    explorer; on a folder: fold/unfold. Complex files go to the confirmation dialog.
+  - `Enter` on a file: first press shows it in the detail pane and stays (the pane takes the
+    arrows for scrolling, Esc goes back to the tree); a second `Enter`, or `O`, opens it in the
+    preview pane (or tab) next to the shell and leaves the explorer (always at once on narrow
+    terminals). On a folder: fold/unfold. Complex files go to the confirmation dialog.
+  - `E` opens the file in `$EDITOR` in a new tab.
+  - **Type to find:** the command letters are `Q J K F H G S R C P T A O E M`; any other letter,
+    digit, `.`, `_` or `-` starts the find filter with that character typed (as does `F`). Esc clears.
+    While the prompt is open every letter is text.
+  - `Space` marks or unmarks the row and moves down (marks survive folds, refreshes and leaving).
+    `M` types `@relative/path ` for each mark (or the selected row when nothing is marked) into the
+    active agent tab's input without Enter, clears the marks and switches to that tab; with no
+    agent tab it says so on the status line.
+  - Files that changed or appeared since the explorer was opened (or since the last `R`) get a
+    dot in the theme's badge colour.
+  - State (folds, selection, sort, marks, filters) is kept per folder for the wi session.
   - `J` / `K` scroll the detail pane, `PgUp`/`PgDn` page the tree.
   - `F` find in tree: type to narrow the visible rows with the fuzzy scorer from Find file.
   - `H` show or hide hidden files, `G` show only changed files, `R` refresh.
   - `T` open a new shell tab in the selected folder, `A` start an agent there (same confirmation
     flow), `C` copy the path (relative; `Shift` is not needed: pressing `C` twice copies absolute).
-  - `S` cycles the sort (name, size, modified).
+  - `S` cycles the sort (name, size, modified, newest first).
 - **Mouse:** click selects, double-click opens, click the arrow to fold, wheel scrolls whichever
   pane is under the pointer, drag the divider to resize, Cmd/Ctrl+click a path in the detail pane
   works like everywhere else.
@@ -99,10 +112,9 @@ integrates E3 to E5. About 1 to 1.5 days of agent work end to end.
 
 ## 6. Open questions (my defaults in brackets)
 
-1. **Enter on a file**: open it in the preview pane and leave the explorer [yes], or keep the
-   explorer open with the preview on the right only [no, the right pane already shows it].
-2. **Edit**: add a key to open the file in `$EDITOR` in a new tab [yes, `E`... but `E` is "end
-   sessions" in the menu; inside the explorer a plain `O` is free and I'd use it].
+1. **Enter on a file**: decided: the first Enter stays and focuses the detail pane, the second
+   (or `O`) opens it in the preview pane and leaves.
+2. **Edit**: decided: `E` opens `$EDITOR` in a new tab (`O` now opens the preview pane).
 3. **Pinned sidebar** version (a narrow tree always visible beside the shell) [later, wide
    terminals only; the full-screen view first].
 4. **Move the existing search results and finder onto the kit** [after E5, one at a time].

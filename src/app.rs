@@ -4,6 +4,7 @@ use crate::input::{InEv, PasteFilter};
 use crate::keys::{EnterMap, KeyDecoder};
 use crate::scroll::{self, ScrollKey};
 use crate::config::{Config, parse_prefix_key, prefix_label};
+use std::collections::HashMap;
 use crate::explorer::{self, Act as ExAct, ExJob, ExMouse, ExplorerState};
 use crate::tab::{Btn, Pane, Side, Split, Tab, button_at, pct_for_col, split_main, split_pinned};
 use crate::files::complete;
@@ -383,6 +384,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     // The explorer's reads, one at a time, and its pane split kept for the session.
     let mut ex_job: Option<ExJob<'_>> = None;
     let mut ex_pct: u16 = 40;
+    // Explorers left with Esc/Q, by folder, so folds, selection, sort and marks survive.
+    let mut saved_ex: HashMap<String, Box<ExplorerState>> = HashMap::new();
     let mut last_results: Option<Box<Results>> = None;
     let mut filter = PasteFilter::default();
     let mut flush_at: Option<Instant> = None;
@@ -1361,7 +1364,33 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             ex_pct = ex.pct();
                             match act {
                                 None => {}
-                                Some(ExAct::Leave) => mode = Mode::Shell,
+                                Some(ExAct::Leave) => {
+                                    stash_explorer(&mut saved_ex, &mut mode);
+                                }
+                                Some(ExAct::Send { rels, root }) => {
+                                    let target = if app.tabs[app.active].is_agent() && !app.tabs[app.active].is_preview() {
+                                        Some(app.active)
+                                    } else {
+                                        app.tabs.iter().position(|t| t.is_agent() && !t.is_preview())
+                                    };
+                                    match target {
+                                        None => ex.message = Some(("no agent tab to send to: start one with A (or the menu)".into(), true)),
+                                        Some(i) => {
+                                            let base = app.tabs[i].dir.trim_end_matches('/').to_string();
+                                            let same = base == root.trim_end_matches('/');
+                                            let mut text = String::new();
+                                            for r in &rels {
+                                                text.push('@');
+                                                text.push_str(&if same { r.clone() } else { format!("{}/{r}", root.trim_end_matches('/')) });
+                                                text.push(' ');
+                                            }
+                                            app.tabs[i].write(text.into_bytes());
+                                            ex.sent();
+                                            stash_explorer(&mut saved_ex, &mut mode);
+                                            switch_to(&mut app, i);
+                                        }
+                                    }
+                                }
                                 Some(ExAct::Copy { text, what }) => {
                                     ex.message = Some(match crate::clip::copy(&text) {
                                         Ok(how) => (format!("copied {what} ({how})"), false),
@@ -1375,7 +1404,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     if let LinkOutcome::Message(m) = &o {
                                         ex.message = Some((sanitize(m), true));
                                     } else {
-                                        mode = Mode::Shell;
+                                        stash_explorer(&mut saved_ex, &mut mode);
                                         apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
                                     }
                                 }
@@ -1394,7 +1423,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                                 app.tabs[app.active].write(explorer::editor_command(&f).into_bytes());
                                             }
                                             if !had_strip { resize_all(&mut app)?; }
-                                            mode = Mode::Shell;
+                                            stash_explorer(&mut saved_ex, &mut mode);
                                         }
                                         Err(e) => ex.message = Some((format!("could not open shell: {e}"), true)),
                                     }
@@ -1403,6 +1432,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     let mut list = agents::detect(backend, &dir).await;
                                     if list.is_empty() { list = agents::ALL.to_vec(); }
                                     ask_ctx = AskCtx { key: agents::workspace_key(ws, &dir), dir, tab: None };
+                                    stash_explorer(&mut saved_ex, &mut mode);
                                     mode = Mode::Ask(Ask::new(list, cfg, &agent_state, &ask_ctx.key, &ask_ctx.dir));
                                 }
                             }
@@ -1899,9 +1929,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     },
                                     Action::Explorer => {
                                         let (ec, er) = crossterm::terminal::size()?;
-                                        let mut ex = ExplorerState::new(active_dir(&app), remote.then(|| name.clone()), explorer::Settings { csv_rows: opts.csv_rows, read_cap, open_cfg: open_cfg.clone(), pct: ex_pct });
+                                        let dir = active_dir(&app);
+                                        let mut ex = match saved_ex.remove(&dir) {
+                                            Some(mut e) => {
+                                                e.refresh();
+                                                e
+                                            }
+                                            None => Box::new(ExplorerState::new(dir, remote.then(|| name.clone()), explorer::Settings { csv_rows: opts.csv_rows, read_cap, open_cfg: open_cfg.clone(), pct: ex_pct })),
+                                        };
                                         ex.prepare(ec, er);
-                                        mode = Mode::Explorer(Box::new(ex));
+                                        mode = Mode::Explorer(ex);
                                     }
                                     Action::FindOutput if app.tabs[app.active].is_preview() => message = Some("find in output works on a shell tab; press F inside a preview to find in it".into()),
                                     Action::FindOutput => mode = Mode::FindPrompt(FindPrompt { target: FindTarget::Output, text: String::new() }),
@@ -2204,6 +2241,13 @@ async fn commit_folder(
         *message = Some(format!("could not save recent folders: {e}"));
     }
     Ok(ask)
+}
+
+/// Leave the explorer for the shell, keeping its state for the next visit to the same folder.
+fn stash_explorer(saved: &mut HashMap<String, Box<ExplorerState>>, mode: &mut Mode) {
+    if let Mode::Explorer(e) = std::mem::replace(mode, Mode::Shell) {
+        saved.insert(e.root.clone(), e);
+    }
 }
 
 fn switch_to(app: &mut App, i: usize) {

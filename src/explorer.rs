@@ -15,7 +15,7 @@ use crate::workspace::Backend;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -179,6 +179,8 @@ pub enum Act {
     Agent(String),
     /// Copy this text to the clipboard (`what` names it in the status message).
     Copy { text: String, what: &'static str },
+    /// Type these root-relative paths as `@path ` mentions into an agent tab's input.
+    Send { rels: Vec<String>, root: String },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -223,6 +225,10 @@ pub struct VRow {
     pub dirty: bool,
     /// Folder the notice belongs to (empty for the root).
     pub parent: String,
+    /// A file whose modified time changed (or that appeared) since the explorer was opened.
+    pub new: bool,
+    /// Marked with Space for sending to an agent.
+    pub picked: bool,
 }
 
 pub enum DState {
@@ -282,6 +288,15 @@ pub struct ExplorerState {
     open_cfg: OpenCfg,
     last_click: Option<(Instant, usize)>,
     dragging: bool,
+    /// The file whose first Enter showed it in the detail pane; the next Enter opens it.
+    entered: Option<String>,
+    /// Files and folders marked with Space (kept across folds and refreshes).
+    pub picked: BTreeSet<String>,
+    /// First modified time seen for every file, and the folders already listed once.
+    baseline: HashMap<String, Option<i64>>,
+    listed: HashSet<String>,
+    /// Files that changed or appeared after their folder was first listed.
+    changed_ids: HashSet<String>,
 }
 
 fn keep_order<T>(_: &Node<T>, _: &Node<T>) -> std::cmp::Ordering {
@@ -294,11 +309,14 @@ fn hidden_path(id: &str) -> bool {
 
 fn columns(sort: SortKey, desc: bool) -> Vec<Column> {
     let arrow = if desc { " ▼" } else { " ▲" };
+    // Newest first is the modified column, descending.
+    let (sort, arrow) = if sort == SortKey::Newest { (SortKey::Modified, " ▼") } else { (sort, arrow) };
     let title = |name: &str, k: SortKey| if sort == k { format!("{name}{arrow}") } else { name.to_string() };
     vec![
         Column::new(title("FILES", SortKey::Name), Width::Fill),
         Column::new(title("SIZE", SortKey::Size), Width::Min(7)).right(),
         Column::new(title("MODIFIED", SortKey::Modified), Width::Min(10)).right(),
+        Column::new(" ", Width::Fixed(1)),
         Column::new(" ", Width::Fixed(1)),
     ]
 }
@@ -366,6 +384,11 @@ impl ExplorerState {
             open_cfg: st.open_cfg,
             last_click: None,
             dragging: false,
+            entered: None,
+            picked: BTreeSet::new(),
+            baseline: HashMap::new(),
+            listed: HashSet::new(),
+            changed_ids: HashSet::new(),
         };
         s.rebuild();
         s
@@ -458,6 +481,23 @@ impl ExplorerState {
     fn set_listing(&mut self, id: &str, l: DetailedListing) {
         let mut entries = l.entries;
         sort_entries(&mut entries, self.sort, self.desc);
+        let was_listed = !self.listed.insert(id.to_string());
+        for e in entries.iter().filter(|e| !e.is_dir) {
+            let nid = if id.is_empty() { e.name.clone() } else { format!("{id}/{}", e.name) };
+            match self.baseline.get(&nid) {
+                Some(m) if *m == e.mtime => {}
+                Some(_) => {
+                    self.changed_ids.insert(nid.clone());
+                    self.baseline.insert(nid, e.mtime);
+                }
+                None => {
+                    if was_listed {
+                        self.changed_ids.insert(nid.clone());
+                    }
+                    self.baseline.insert(nid, e.mtime);
+                }
+            }
+        }
         let mut old: Vec<Node<DirEntry>> = if id.is_empty() {
             std::mem::take(&mut self.tree.roots)
         } else {
@@ -569,6 +609,8 @@ impl ExplorerState {
                     mark: self.mark_of(&n.id),
                     dirty: n.is_dir && self.dirty_dir(&n.id),
                     parent: parent_of(&n.id).to_string(),
+                    new: !n.is_dir && self.changed_ids.contains(&n.id),
+                    picked: self.picked.contains(&n.id),
                 });
                 if n.is_dir && n.expanded && notices {
                     let kind = if let Some(e) = self.errors.get(&n.id) {
@@ -626,6 +668,8 @@ impl ExplorerState {
             mark: None,
             dirty: false,
             parent,
+            new: false,
+            picked: false,
         }
     }
 
@@ -667,7 +711,11 @@ impl ExplorerState {
 
     fn sync_sel(&mut self) {
         self.list.select(self.list.selected, self.rows.len());
-        self.sel_id = self.rows.get(self.list.selected).map(|r| r.id.clone()).unwrap_or_default();
+        let id = self.rows.get(self.list.selected).map(|r| r.id.clone()).unwrap_or_default();
+        if id != self.sel_id {
+            self.entered = None;
+        }
+        self.sel_id = id;
         self.update_detail();
     }
 
@@ -949,12 +997,16 @@ impl ExplorerState {
                     self.rebuild();
                 } else if self.focus_detail {
                     self.focus_detail = false;
+                    self.entered = None;
                 } else {
                     return Some(Act::Leave);
                 }
             }
             Ek::Up | Ek::Down | Ek::PgUp | Ek::PgDn | Ek::Home | Ek::End => return self.nav(k),
-            Ek::Tab => self.focus_detail = !self.focus_detail && self.lay.single.is_none(),
+            Ek::Tab => {
+                self.focus_detail = !self.focus_detail && self.lay.single.is_none();
+                self.entered = None;
+            }
             Ek::Left => {
                 if let Some(id) = self.cur_id().filter(|_| self.selected().is_some_and(|r| r.kind == RowKind::Node)) {
                     if self.entry(&id).is_some_and(|n| n.is_dir && n.expanded) {
@@ -982,11 +1034,30 @@ impl ExplorerState {
                 }
                 if r.is_dir {
                     self.toggle_dir(&r.id, None);
-                } else {
+                } else if self.lay.single.is_some() || self.entered.as_deref() == Some(r.id.as_str()) {
+                    // No detail pane (narrow), or the second Enter: open it next to the shell.
+                    self.entered = None;
+                    self.focus_detail = false;
                     return Some(Act::OpenFile(self.abs(&r.id)));
+                } else {
+                    // The first Enter stays here: the detail pane takes the keys (scroll with the arrows).
+                    self.entered = Some(r.id.clone());
+                    self.focus_detail = true;
+                    self.message = Some(("Enter again or O opens it in the preview pane · Esc back to the tree".into(), false));
                 }
             }
-            Ek::Char(c) => return self.letter(c.to_ascii_lowercase()),
+            Ek::Char(' ') => {
+                if let Some(r) = self.selected().filter(|r| r.kind == RowKind::Node).cloned() {
+                    if !self.picked.remove(&r.id) {
+                        self.picked.insert(r.id.clone());
+                    }
+                    self.focus_detail = false;
+                    self.rebuild();
+                    self.list.down(len);
+                    self.sync_sel();
+                }
+            }
+            Ek::Char(c) => return self.letter(c),
             Ek::Backspace | Ek::Clear => {}
         }
         None
@@ -1017,7 +1088,10 @@ impl ExplorerState {
         None
     }
 
-    fn letter(&mut self, c: char) -> Option<Act> {
+    /// Plain-letter commands. The command letters are `Q J K F H G S R C P T A O E M`; any other
+    /// letter, digit, `.`, `_` or `-` starts the find filter with that character already typed.
+    fn letter(&mut self, typed: char) -> Option<Act> {
+        let c = typed.to_ascii_lowercase();
         match c {
             'q' => return Some(Act::Leave),
             'j' => self.scroll_detail(1),
@@ -1042,7 +1116,8 @@ impl ExplorerState {
             's' => self.set_sort(match self.sort {
                 SortKey::Name => SortKey::Size,
                 SortKey::Size => SortKey::Modified,
-                SortKey::Modified => SortKey::Name,
+                SortKey::Modified => SortKey::Newest,
+                SortKey::Newest => SortKey::Name,
             }, false),
             'r' => self.refresh(),
             'c' | 'p' => {
@@ -1054,14 +1129,47 @@ impl ExplorerState {
             'o' => {
                 let id = self.cur_id()?;
                 if self.entry(&id).is_some_and(|n| n.is_dir) {
-                    self.message = Some(("O opens a file in your editor; T opens a shell in this folder".into(), true));
+                    self.message = Some(("O opens a file in the preview pane; T opens a shell in this folder".into(), true));
+                } else {
+                    self.entered = None;
+                    self.focus_detail = false;
+                    return Some(Act::OpenFile(self.abs(&id)));
+                }
+            }
+            'e' => {
+                let id = self.cur_id()?;
+                if self.entry(&id).is_some_and(|n| n.is_dir) {
+                    self.message = Some(("E opens a file in your editor; T opens a shell in this folder".into(), true));
                 } else {
                     return Some(Act::Editor { file: self.abs(&id), dir: self.abs(parent_of(&id)) });
                 }
             }
+            'm' => {
+                let rels: Vec<String> = if self.picked.is_empty() {
+                    self.cur_id().filter(|_| self.selected().is_some_and(|r| r.kind == RowKind::Node)).into_iter().collect()
+                } else {
+                    self.picked.iter().cloned().collect()
+                };
+                if rels.is_empty() {
+                    self.message = Some(("nothing selected to send".into(), true));
+                } else {
+                    return Some(Act::Send { rels, root: self.root.clone() });
+                }
+            }
+            _ if typed.is_alphanumeric() || matches!(typed, '.' | '_' | '-') => {
+                // Not a command: start the find filter with this character.
+                self.filter = Some(Filter { text: String::new(), editing: true });
+                return self.key(Ek::Char(typed));
+            }
             _ => {}
         }
         None
+    }
+
+    /// The marks were sent: forget them.
+    pub fn sent(&mut self) {
+        self.picked.clear();
+        self.rebuild();
     }
 
     /// Sort by `key`; `toggle` flips the direction when it is already the sort key.
@@ -1145,6 +1253,9 @@ impl ExplorerState {
                     let double = self.last_click.is_some_and(|(t, j)| j == i && now.duration_since(t) < DOUBLE_CLICK);
                     self.last_click = if double { None } else { Some((now, i)) };
                     if double {
+                        if !r.is_dir {
+                            self.entered = Some(r.id.clone());
+                        }
                         return ExMouse::Enter;
                     }
                 } else if self.lay.pane_at(m.col, m.row) == Some(Pane::Right) {
@@ -1178,6 +1289,7 @@ pub fn sort_name(k: SortKey) -> &'static str {
         SortKey::Name => "name",
         SortKey::Size => "size",
         SortKey::Modified => "modified",
+        SortKey::Newest => "newest first",
     }
 }
 
@@ -1356,6 +1468,9 @@ mod tests {
         assert_eq!(s.sort, SortKey::Modified);
         assert_eq!(ids(&s), ["src", "Docs", "zeta.txt", "alpha.md"]);
         s.key(Ek::Char('s'));
+        assert_eq!(s.sort, SortKey::Newest);
+        assert_eq!(ids(&s), ["Docs", "src", "alpha.md", "zeta.txt"]);
+        s.key(Ek::Char('s'));
         assert_eq!(s.sort, SortKey::Name);
         assert_eq!(ids(&s), ["Docs", "src", "alpha.md", "zeta.txt"]);
         // header click on the same column flips the direction
@@ -1455,12 +1570,133 @@ mod tests {
         assert_eq!(s.key(Ek::Char('o')), None);
         assert!(s.message.is_some());
         s.key(Ek::End);
-        assert_eq!(s.key(Ek::Char('O')), Some(Act::Editor { file: "/p/zeta.txt".into(), dir: "/p".into() }));
+        assert_eq!(s.key(Ek::Char('E')), Some(Act::Editor { file: "/p/zeta.txt".into(), dir: "/p".into() }));
+        assert_eq!(s.key(Ek::Char('O')), Some(Act::OpenFile("/p/zeta.txt".into())));
+        // the first Enter stays in the explorer, the second opens
+        assert_eq!(s.key(Ek::Enter), None);
+        assert!(s.focus_detail);
         assert_eq!(s.key(Ek::Enter), Some(Act::OpenFile("/p/zeta.txt".into())));
         assert_eq!(s.key(Ek::Char('t')), Some(Act::NewTab("/p".into())));
         assert_eq!(s.key(Ek::Char('q')), Some(Act::Leave));
         assert_eq!(s.key(Ek::Menu), Some(Act::Leave));
         assert_eq!(s.key(Ek::Esc), Some(Act::Leave));
+    }
+
+    #[test]
+    fn enter_previews_first_and_moving_forgets_it() {
+        let mut s = loaded();
+        s.key(Ek::End);
+        assert_eq!(s.key(Ek::Enter), None);
+        assert_eq!(s.key(Ek::Esc), None, "Esc returns to the tree, not out of the explorer");
+        assert!(!s.focus_detail);
+        assert_eq!(s.key(Ek::Enter), None, "a fresh first Enter after Esc");
+        s.key(Ek::Esc);
+        s.key(Ek::Up);
+        s.key(Ek::Down);
+        assert_eq!(s.key(Ek::Enter), None, "moving away and back starts over");
+        assert_eq!(s.key(Ek::Enter), Some(Act::OpenFile("/p/zeta.txt".into())));
+        // narrow terminal: no detail pane, so Enter opens at once
+        s.prepare(90, 36);
+        assert_eq!(s.key(Ek::Enter), Some(Act::OpenFile("/p/zeta.txt".into())));
+    }
+
+    #[test]
+    fn plain_letters_start_the_filter_but_commands_stay_commands() {
+        let mut s = loaded();
+        assert!(s.filter.is_none());
+        s.key(Ek::Char('z'));
+        let f = s.filter.as_ref().unwrap();
+        assert!(f.editing);
+        assert_eq!(f.text, "z");
+        assert_eq!(s.cur_id().as_deref(), Some("zeta.txt"));
+        s.key(Ek::Char('e'));
+        assert_eq!(s.filter.as_ref().unwrap().text, "ze", "while typing, command letters are text");
+        s.key(Ek::Esc);
+        assert!(s.filter.is_none());
+        // a command letter does not filter
+        s.key(Ek::Char('h'));
+        assert!(s.filter.is_none() && s.show_hidden);
+        // digits and uppercase start it too, keeping their case
+        s.key(Ek::Char('A'));
+        assert!(s.filter.is_none(), "A is the agent command");
+        s.key(Ek::Char('1'));
+        assert_eq!(s.filter.as_ref().unwrap().text, "1");
+        s.key(Ek::Esc);
+        s.key(Ek::Char('D'));
+        assert_eq!(s.filter.as_ref().unwrap().text, "D");
+        // F still opens an empty prompt
+        s.key(Ek::Esc);
+        s.key(Ek::Char('f'));
+        assert_eq!(s.filter.as_ref().unwrap().text, "");
+    }
+
+    #[test]
+    fn newest_first_sort_and_cycle() {
+        let mut s = loaded();
+        assert_eq!(ids(&s), ["Docs", "src", "alpha.md", "zeta.txt"]);
+        s.key(Ek::Char('s'));
+        s.key(Ek::Char('s'));
+        assert_eq!(s.sort, SortKey::Modified);
+        s.key(Ek::Char('s'));
+        assert_eq!(s.sort, SortKey::Newest);
+        // folders first, then the newest file first
+        assert_eq!(ids(&s), ["Docs", "src", "alpha.md", "zeta.txt"]);
+        assert_eq!(s.list.columns[2].title, "MODIFIED ▼");
+        s.key(Ek::Char('s'));
+        assert_eq!(s.sort, SortKey::Name);
+        assert_eq!(sort_name(SortKey::Newest), "newest first");
+    }
+
+    #[test]
+    fn changed_since_open_marks_new_and_edited_files() {
+        let mut s = loaded();
+        assert!(s.rows.iter().all(|r| !r.new), "nothing is new right after opening");
+        s.key(Ek::Char('r'));
+        let e = s.epoch;
+        s.apply(Done::Dir {
+            epoch: e,
+            id: String::new(),
+            res: Ok(listing(vec![
+                ent("zeta.txt", false, 10, 900_000),
+                ent("src", true, 0, 800_000),
+                ent("Docs", true, 0, 950_000),
+                ent("alpha.md", false, 2000, 995_000),
+                ent("fresh.txt", false, 1, 996_000),
+            ])),
+        });
+        let new = |s: &ExplorerState, id: &str| s.rows.iter().find(|r| r.id == id).unwrap().new;
+        assert!(new(&s, "alpha.md"), "mtime changed");
+        assert!(new(&s, "fresh.txt"), "appeared after the first listing");
+        assert!(!new(&s, "zeta.txt"));
+        assert!(!new(&s, "src"), "folders are never marked");
+    }
+
+    #[test]
+    fn marks_persist_and_send_as_mentions() {
+        let mut s = loaded();
+        // nothing marked: M sends the selected item
+        assert_eq!(s.key(Ek::Char('m')), Some(Act::Send { rels: vec!["Docs".into()], root: "/p".into() }));
+        s.key(Ek::Char(' '));
+        assert_eq!(s.cur_id().as_deref(), Some("src"), "Space marks and moves down");
+        s.key(Ek::Right);
+        s.apply(Done::Dir { epoch: 0, id: "src".into(), res: Ok(listing(vec![ent("main.rs", false, 100, 1)])) });
+        s.key(Ek::Right);
+        s.key(Ek::Char(' '));
+        assert!(s.rows.iter().find(|r| r.id == "Docs").unwrap().picked);
+        assert!(s.rows.iter().find(|r| r.id == "src/main.rs").unwrap().picked);
+        // folding keeps the marks
+        s.key(Ek::Left);
+        s.key(Ek::Left);
+        assert_eq!(s.picked.len(), 2);
+        assert_eq!(s.key(Ek::Char('M')), Some(Act::Send { rels: vec!["Docs".into(), "src/main.rs".into()], root: "/p".into() }));
+        s.sent();
+        assert!(s.picked.is_empty());
+        // Space toggles off
+        s.key(Ek::Home);
+        s.key(Ek::Char(' '));
+        s.key(Ek::Home);
+        s.key(Ek::Char(' '));
+        assert!(s.picked.is_empty());
     }
 
     #[test]
@@ -1471,7 +1707,8 @@ mod tests {
         s.apply(Done::Dir { epoch: 0, id: "src".into(), res: Ok(listing(vec![ent("it's.rs", false, 1, 1)])) });
         s.key(Ek::Down);
         assert_eq!(s.key(Ek::Char('t')), Some(Act::NewTab("/p/src".into())));
-        assert_eq!(s.key(Ek::Char('o')), Some(Act::Editor { file: "/p/src/it's.rs".into(), dir: "/p/src".into() }));
+        assert_eq!(s.key(Ek::Char('o')), Some(Act::OpenFile("/p/src/it's.rs".into())));
+        assert_eq!(s.key(Ek::Char('e')), Some(Act::Editor { file: "/p/src/it's.rs".into(), dir: "/p/src".into() }));
         assert_eq!(editor_command("/p/src/it's.rs"), "${EDITOR:-vi} -- '/p/src/it'\\''s.rs'\n");
     }
 

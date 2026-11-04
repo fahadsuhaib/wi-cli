@@ -48,6 +48,8 @@ pub enum SortKey {
     Name,
     Size,
     Modified,
+    /// Modified time, newest first.
+    Newest,
 }
 
 /// Directories first, then by `key`. Name ties break case-insensitively, then case-sensitively.
@@ -77,8 +79,12 @@ pub fn sort_entries(entries: &mut [DirEntry], key: SortKey, descending: bool) {
                 _ if a.is_dir && dir_by_name_only => Ordering::Equal,
                 SortKey::Size => opt(&a.size, &b.size),
                 SortKey::Modified => opt(&a.mtime, &b.mtime),
+                SortKey::Newest => match (a.mtime, b.mtime) {
+                    (Some(x), Some(y)) => y.cmp(&x),
+                    _ => opt(&a.mtime, &b.mtime),
+                },
             };
-            let k = if descending && key != SortKey::Name { k.reverse() } else { k };
+            let k = if descending && !matches!(key, SortKey::Name | SortKey::Newest) { k.reverse() } else { k };
             let n = by_name(a, b);
             let n = if descending && (key == SortKey::Name || (a.is_dir && dir_by_name_only)) { n.reverse() } else { n };
             k.then(n)
@@ -461,6 +467,13 @@ mod tests {
         assert_eq!(names(&v), ["d", "old", "new", "unk"]);
         sort_entries(&mut v, SortKey::Modified, true);
         assert_eq!(names(&v), ["d", "unk", "new", "old"]);
+    }
+
+    #[test]
+    fn sort_newest_first_puts_unknown_last() {
+        let mut v = vec![de("old", false, None, Some(10)), de("unk", false, None, None), de("new", false, None, Some(99)), de("d", true, None, Some(1))];
+        sort_entries(&mut v, SortKey::Newest, false);
+        assert_eq!(names(&v), ["d", "new", "old", "unk"]);
     }
 
     #[test]

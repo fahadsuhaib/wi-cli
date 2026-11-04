@@ -39,7 +39,7 @@ wi supports macOS and Linux.
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
   `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation
 - Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
-- File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane; Enter previews a file, O opens it in `$EDITOR` in a new tab
+- File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane. Enter shows a file in the detail pane and stays (Enter again, or O, opens it in the preview pane); E opens it in `$EDITOR` in a new tab. Just type to find: any letter that is not a command (and digits) starts the filter, Esc clears it. Space marks files (kept across folds and when you leave), M types the marks, or the selected path, as `@path ` mentions into your agent tab without pressing Enter. S cycles the sort (name, size, modified, newest first); files that changed or appeared since you opened it or last pressed R get a dot. The explorer keeps its folds, selection, sort and marks while wi runs.
 - Rename a tab (menu: search "rename", click the active tab, or double-click any tab); the name survives "Restart wi"
 - Pinned panes: pin any tab beside the active one (menu: search "pin"); ⇄ swaps left/right, ✕ unpins; the layout is remembered per workspace (needs 101+ columns)
 - Previews refresh by themselves when the file changes on disk (see Configuration)
