@@ -10,6 +10,9 @@ pub enum AskKey {
     Down,
     Left,
     Right,
+    WordLeft,
+    WordRight,
+    DeleteWord,
     Home,
     End,
     Enter,
@@ -152,6 +155,9 @@ impl Ask {
             }
             AskKey::Left => crate::lineedit::left(&mut e.cur),
             AskKey::Right => crate::lineedit::right(&e.buf, &mut e.cur),
+            AskKey::WordLeft => crate::lineedit::word_left(&e.buf, &mut e.cur),
+            AskKey::WordRight => crate::lineedit::word_right(&e.buf, &mut e.cur),
+            AskKey::DeleteWord => crate::lineedit::delete_word(&mut e.buf, &mut e.cur),
             AskKey::Home | AskKey::Up => e.cur = 0,
             AskKey::End | AskKey::Down => e.cur = len,
             AskKey::Backspace => crate::lineedit::backspace(&mut e.buf, &mut e.cur),
@@ -180,7 +186,11 @@ pub fn parse(buf: &[u8]) -> Vec<AskKey> {
                     j += 1;
                 }
                 let first = buf.get(i + 2).copied();
+                // Alt or Ctrl (modifier 3 or 5) with Left/Right: word moves.
+                let word = buf.get(i + 2..j).is_some_and(|p| p.starts_with(b"1;3") || p.starts_with(b"1;5"));
                 match buf.get(j) {
+                    Some(b'C') if word => keys.push(AskKey::WordRight),
+                    Some(b'D') if word => keys.push(AskKey::WordLeft),
                     Some(b'A') => keys.push(AskKey::Up),
                     Some(b'B') => keys.push(AskKey::Down),
                     Some(b'C') => keys.push(AskKey::Right),
@@ -196,6 +206,12 @@ pub fn parse(buf: &[u8]) -> Vec<AskKey> {
                     _ => {}
                 }
                 i = j + 1;
+                continue;
+            }
+            // Terminal.app style Alt+Left/Right/Backspace.
+            0x1b if matches!(buf.get(i + 1), Some(b'b' | b'f' | 0x7f)) => {
+                keys.push(match buf[i + 1] { b'b' => AskKey::WordLeft, b'f' => AskKey::WordRight, _ => AskKey::DeleteWord });
+                i += 2;
                 continue;
             }
             0x1b => keys.push(AskKey::Esc),
@@ -222,6 +238,12 @@ pub fn parse(buf: &[u8]) -> Vec<AskKey> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn word_keys_parse() {
+        assert_eq!(parse(b"\x1b[1;3D\x1b[1;5C\x1bb\x1bf\x1b\x7f"), vec![AskKey::WordLeft, AskKey::WordRight, AskKey::WordLeft, AskKey::WordRight, AskKey::DeleteWord]);
+        assert_eq!(parse(b"\x1b[D\x1b"), vec![AskKey::Left, AskKey::Esc]);
+    }
+
     use super::*;
     use crate::config::Config;
 

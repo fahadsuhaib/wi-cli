@@ -40,6 +40,49 @@ pub fn right(buf: &str, cur: &mut usize) {
     *cur = (*cur + 1).min(buf.chars().count());
 }
 
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Start of the word before the cursor (skips spaces and punctuation first).
+fn word_start(buf: &str, cur: usize) -> usize {
+    let cs: Vec<char> = buf.chars().collect();
+    let mut i = cur.min(cs.len());
+    while i > 0 && !is_word(cs[i - 1]) {
+        i -= 1;
+    }
+    while i > 0 && is_word(cs[i - 1]) {
+        i -= 1;
+    }
+    i
+}
+
+/// Move the cursor to the start of the previous word.
+pub fn word_left(buf: &str, cur: &mut usize) {
+    *cur = word_start(buf, *cur);
+}
+
+/// Move the cursor to the end of the next word.
+pub fn word_right(buf: &str, cur: &mut usize) {
+    let cs: Vec<char> = buf.chars().collect();
+    let mut i = (*cur).min(cs.len());
+    while i < cs.len() && !is_word(cs[i]) {
+        i += 1;
+    }
+    while i < cs.len() && is_word(cs[i]) {
+        i += 1;
+    }
+    *cur = i;
+}
+
+/// Delete the word before the cursor.
+pub fn delete_word(buf: &mut String, cur: &mut usize) {
+    let a = word_start(buf, *cur);
+    let (x, y) = (byte(buf, a), byte(buf, *cur));
+    buf.replace_range(x..y, "");
+    *cur = a;
+}
+
 /// Terminal columns from the start of the text to the cursor.
 pub fn cursor_col(buf: &str, cur: usize) -> usize {
     buf.chars().take(cur).map(|c| c.width().unwrap_or(0)).sum()
@@ -75,6 +118,30 @@ mod tests {
         c = 3;
         right(&b, &mut c);
         assert_eq!(c, 3);
+    }
+
+    #[test]
+    fn word_moves_and_delete_word() {
+        let b = "git commit  -m foo".to_string();
+        let mut c = b.chars().count();
+        word_left(&b, &mut c);
+        assert_eq!(c, 15);
+        word_left(&b, &mut c);
+        assert_eq!(c, 13);
+        word_left(&b, &mut c);
+        assert_eq!(c, 4);
+        c = 0;
+        word_right(&b, &mut c);
+        assert_eq!(c, 3);
+        word_right(&b, &mut c);
+        assert_eq!(c, 10);
+        let mut b = b;
+        c = 10;
+        delete_word(&mut b, &mut c);
+        assert_eq!((b.as_str(), c), ("git   -m foo", 4));
+        c = 0;
+        delete_word(&mut b, &mut c);
+        assert_eq!(c, 0);
     }
 
     #[test]

@@ -952,8 +952,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                 }
                                 Intent::EnterScroll => {
                                     sel = None;
-                                    mode = Mode::Scroll;
-                                    scroll_by(&mut app, 3);
+                                    // No history to browse: stay live (nothing to get stuck in).
+                                    if !scroll_by(&mut app, 3) { mode = Mode::Scroll; }
                                     dirty = true;
                                 }
                                 Intent::ScrollWheel(n) => {
@@ -1023,6 +1023,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                         out
                     }
                     InEv::PasteStart => {
+                        if matches!(mode, Mode::Scroll) { mode = Mode::Shell; dirty = true; }
+                        if matches!(mode, Mode::Shell) && !app.tabs[app.active].is_preview() && !app.tabs[app.active].side_focused() { snap_live(&mut app); }
                         let fwd = matches!(mode, Mode::Shell) && !app.tabs[app.active].is_preview() && !app.tabs[app.active].side_focused();
                         let wrap = app.tabs[app.active].parser.screen().bracketed_paste();
                         if fwd && wrap { app.tabs[app.active].write(b"\x1b[200~".to_vec()); }
@@ -1061,13 +1063,25 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             let page = (t.parser.screen().size().0.get() as usize).saturating_sub(1);
                             let mut off = t.parser.screen().scrollback();
                             let max = t.parser.screen().scrollback_len();
-                            for k in scroll::parse(chunk, menu_key) {
-                                if k == ScrollKey::Exit { mode = Mode::Shell; off = 0; break; }
+                            let sc = scroll::scan(chunk, menu_key);
+                            let mut exit = false;
+                            for k in sc.keys {
+                                if k == ScrollKey::Exit { exit = true; break; }
                                 off = scroll::apply(off, max, page, k);
                             }
-                            t.parser.screen_mut().set_scrollback(off);
+                            if exit { mode = Mode::Shell; off = 0; }
                             dirty = true;
-                            chunk = &[];
+                            match sc.input_at {
+                                // Typing while scrolled back: jump to the live bottom and let the
+                                // Shell branch deliver this input (and whatever follows it).
+                                Some(at) if !exit => {
+                                    off = 0;
+                                    mode = Mode::Shell;
+                                    chunk = &chunk[at..];
+                                }
+                                _ => chunk = &[],
+                            }
+                            app.tabs[app.active].parser.screen_mut().set_scrollback(off);
                         }
                         Mode::Shell => {
                             let (head, after_menu) = match chunk.iter().position(|&x| x == menu_key) {
@@ -1131,6 +1145,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     };
                                 }
                             } else if !head.is_empty() {
+                                // Typing with the view scrolled back: back to the live bottom first.
+                                snap_live(&mut app);
                                 app.tabs[app.active].write(head.to_vec());
                             }
                             match after_menu {
@@ -1695,9 +1711,13 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     0x1b => {
                                         if matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) {
                                             let first = chunk.get(i + 2).copied();
+                                            let i0 = i;
                                             i += 2;
                                             while i < chunk.len() && !(0x40..=0x7e).contains(&chunk[i]) { i += 1; }
+                                            let word = chunk.get(i0 + 2..i).is_some_and(|p| p.starts_with(b"1;3") || p.starts_with(b"1;5"));
                                             match chunk.get(i) {
+                                                Some(b'C') if word => crate::lineedit::word_right(&pr.input, &mut pr.cur),
+                                                Some(b'D') if word => crate::lineedit::word_left(&pr.input, &mut pr.cur),
                                                 Some(b'A') => arrows.push(false),
                                                 Some(b'B') => arrows.push(true),
                                                 Some(b'C') => crate::lineedit::right(&pr.input, &mut pr.cur),
@@ -1712,6 +1732,14 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                                 },
                                                 _ => {}
                                             }
+                                        } else if let Some(&w @ (b'b' | b'f' | 0x7f)) = chunk.get(i + 1) {
+                                            // Terminal.app style Alt+Left / Right / Backspace.
+                                            match w {
+                                                b'b' => crate::lineedit::word_left(&pr.input, &mut pr.cur),
+                                                b'f' => crate::lineedit::word_right(&pr.input, &mut pr.cur),
+                                                _ => crate::lineedit::delete_word(&mut pr.input, &mut pr.cur),
+                                            }
+                                            i += 1;
                                         } else {
                                             cancel = true;
                                         }
@@ -2117,6 +2145,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             message = Some("new output: find closed".into());
                         }
                         app.tabs[i].output(&data);
+                        // A program that switched to the alternate screen has no scrollback: the
+                        // scroll view would only swallow its keys.
+                        if i == app.active && matches!(mode, Mode::Scroll) && app.tabs[i].parser.screen().alternate_screen() {
+                            app.tabs[i].parser.screen_mut().set_scrollback(0);
+                            mode = Mode::Shell;
+                        }
                         if i != app.active && Some(i) != pin_partner(&app) { app.tabs[i].note_background_output(); }
                         dirty = true;
                     }
@@ -2967,6 +3001,14 @@ fn scroll_by(app: &mut App, n: isize) -> bool {
     let new = if n >= 0 { (cur + n as usize).min(max) } else { cur.saturating_sub(n.unsigned_abs()) };
     t.parser.screen_mut().set_scrollback(new);
     new == 0
+}
+
+/// Put the active tab's view back at the live bottom (typing needs it). Returns true if it moved.
+fn snap_live(app: &mut App) -> bool {
+    let t = &mut app.tabs[app.active];
+    if t.is_preview() || t.parser.screen().scrollback() == 0 { return false; }
+    t.parser.screen_mut().set_scrollback(0);
+    true
 }
 
 /// An in-progress or finished text selection.

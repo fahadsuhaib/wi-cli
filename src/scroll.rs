@@ -26,14 +26,25 @@ pub fn apply(offset: usize, max: usize, page: usize, key: ScrollKey) -> usize {
     }
 }
 
-/// Parse raw input into scroll keys. The menu key and a bare Esc both exit.
-pub fn parse(buf: &[u8], menu_key: u8) -> Vec<ScrollKey> {
-    let mut keys = Vec::new();
+/// What a chunk typed in scroll mode holds: scroll keys up to the first byte that is not one,
+/// and where that byte (typing, to be delivered to the tab) starts.
+#[derive(Debug, PartialEq, Eq, Default)]
+pub struct Scan {
+    pub keys: Vec<ScrollKey>,
+    pub input_at: Option<usize>,
+}
+
+/// Classify raw input: arrows, PgUp/PgDn, Home/End scroll; the menu key and a bare Esc exit (and
+/// end the scan); everything else (letters, Enter, Backspace, Tab, Ctrl-letters, Alt-keys, other
+/// escape sequences) is input: the scan stops at it and `input_at` says where it starts.
+pub fn scan(buf: &[u8], menu_key: u8) -> Scan {
+    let mut out = Scan::default();
     let mut i = 0;
     while i < buf.len() {
         let b = buf[i];
         if b == menu_key {
-            keys.push(ScrollKey::Exit);
+            out.keys.push(ScrollKey::Exit);
+            break;
         } else if b == 0x1b {
             if matches!(buf.get(i + 1), Some(b'[') | Some(b'O')) {
                 // Skip parameters up to the final byte.
@@ -42,7 +53,7 @@ pub fn parse(buf: &[u8], menu_key: u8) -> Vec<ScrollKey> {
                     j += 1;
                 }
                 if j >= buf.len() {
-                    break;
+                    break; // an incomplete sequence at the end of the read
                 }
                 let params = &buf[i + 2..j];
                 let key = match (buf[j], params) {
@@ -54,21 +65,38 @@ pub fn parse(buf: &[u8], menu_key: u8) -> Vec<ScrollKey> {
                     (b'~', b"6") => Some(ScrollKey::PageDown),
                     _ => None,
                 };
-                keys.extend(key);
+                match key {
+                    Some(k) => out.keys.push(k),
+                    None => {
+                        out.input_at = Some(i);
+                        break;
+                    }
+                }
                 i = j;
+            } else if matches!(buf.get(i + 1), None | Some(0x1b)) {
+                out.keys.push(ScrollKey::Exit);
+                break;
             } else {
-                keys.push(ScrollKey::Exit);
+                out.input_at = Some(i); // Alt+key
+                break;
             }
+        } else {
+            out.input_at = Some(i);
+            break;
         }
         i += 1;
     }
-    keys
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ScrollKey::*;
+
+    fn parse(b: &[u8], m: u8) -> Vec<ScrollKey> {
+        scan(b, m).keys
+    }
 
     #[test]
     fn offset_math() {
@@ -102,7 +130,29 @@ mod tests {
     }
 
     #[test]
-    fn unknown_sequences_and_text_are_ignored() {
-        assert!(parse(b"abc\x1b[3~\x1b[1;5C", 0).is_empty());
+    fn typing_is_input_not_a_scroll_key() {
+        assert_eq!(scan(b"a", 0), Scan { keys: vec![], input_at: Some(0) });
+        assert_eq!(scan(b"\x1b[A\x1b[Bls\r", 0), Scan { keys: vec![Up, Down], input_at: Some(6) });
+        assert_eq!(scan(b"\r", 0).input_at, Some(0));
+        assert_eq!(scan(b"\x7f", 0).input_at, Some(0));
+        assert_eq!(scan(b"\t", 0).input_at, Some(0));
+        assert_eq!(scan(b"\x03", 0).input_at, Some(0));
+        assert_eq!(scan(b"\x1b[3~", 0).input_at, Some(0));
+        assert_eq!(scan(b"\x1b[1;5C", 0).input_at, Some(0));
+        assert_eq!(scan(b"\x1b\r", 0).input_at, Some(0));
+        assert_eq!(scan(b"\x1b[5~x", 0), Scan { keys: vec![PageUp], input_at: Some(4) });
+    }
+
+    #[test]
+    fn exit_ends_the_scan_without_input() {
+        assert_eq!(scan(b"\x1b[Aq\x00zz", 0).input_at, Some(3));
+        assert_eq!(scan(b"\x00zz", 0), Scan { keys: vec![Exit], input_at: None });
+        assert_eq!(scan(b"\x1b", 0), Scan { keys: vec![Exit], input_at: None });
+    }
+
+    #[test]
+    fn incomplete_sequence_is_dropped() {
+        assert_eq!(scan(b"\x1b[", 0), Scan::default());
+        assert_eq!(scan(b"\x1b[1;", 0), Scan::default());
     }
 }

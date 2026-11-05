@@ -12,11 +12,13 @@ pub struct EnterMap {
     pub shift: &'static [u8],
     pub ctrl: &'static [u8],
     pub alt: &'static [u8],
+    /// Alt/Ctrl+Left/Right become ESC b / ESC f (word moves for shells and agent prompts).
+    pub words: bool,
 }
 
 impl EnterMap {
     /// Every Enter variant is a plain Enter (menus, prompts, previews).
-    pub const PLAIN: EnterMap = EnterMap { shift: b"\r", ctrl: b"\r", alt: b"\r" };
+    pub const PLAIN: EnterMap = EnterMap { shift: b"\r", ctrl: b"\r", alt: b"\r", words: false };
 
     /// Mapping for a shell tab. `setting` is `auto`, `newline`, `esc-cr` or `enter`.
     pub fn for_tab(setting: &str, agent: bool) -> EnterMap {
@@ -27,7 +29,7 @@ impl EnterMap {
             _ if agent => b"\n",
             _ => b"\r",
         };
-        EnterMap { shift: pick, ctrl: pick, alt: b"\x1b\r" }
+        EnterMap { shift: pick, ctrl: pick, alt: b"\x1b\r", words: true }
     }
 }
 
@@ -38,6 +40,8 @@ pub enum Key {
     ShiftEnter,
     CtrlEnter,
     AltEnter,
+    /// Alt or Ctrl with Left/Right (`right`, modifier value `mods`): a word move.
+    Word { right: bool, mods: u32 },
     /// Release/repeat events and combinations legacy terminals cannot express.
     Dropped,
 }
@@ -186,19 +190,37 @@ fn decode_csi(params: &str, fin: u8) -> Option<Key> {
             let code = parse_u32(fields[2])?;
             Some(map_key(code, mods, None, "", false))
         }
-        // Legacy-style functional keys carrying an event type (`CSI 1;2:3 A`): drop release,
-        // strip the event type from the rest.
-        b'A'..=b'D' | b'H' | b'F' | b'P' | b'Q' | b'S' | b'~' if params.contains(':') => {
-            let mut mp = fields.get(1)?.split(':');
-            let mods = mp.next()?;
+        // Alt/Ctrl+Left/Right, with or without an event type (`CSI 1;3D`, `CSI 1;3:1D`).
+        b'C' | b'D' if fields.len() == 2 && matches!(fields[0], "1" | "") => {
+            let mut mp = fields[1].split(':');
+            let mods = mp.next().and_then(parse_u32)?;
             let event = mp.next().and_then(parse_u32).unwrap_or(1);
+            if !matches!(mods, 3 | 5) {
+                return if params.contains(':') { decode_typed(params, fin) } else { None };
+            }
             if event >= 2 {
                 return Some(Key::Dropped);
             }
-            Some(Key::Bytes(format!("\x1b[{};{}{}", fields[0], mods, fin as char).into_bytes()))
+            Some(Key::Word { right: fin == b'C', mods })
         }
+        // Legacy-style functional keys carrying an event type (`CSI 1;2:3 A`): drop release,
+        // strip the event type from the rest.
+        b'A'..=b'D' | b'H' | b'F' | b'P' | b'Q' | b'S' | b'~' if params.contains(':') => decode_typed(params, fin),
         _ => None,
     }
+}
+
+/// A legacy-style functional key carrying an event type (`CSI 1;2:3 A`): drop release, strip the
+/// event type from the rest.
+fn decode_typed(params: &str, fin: u8) -> Option<Key> {
+    let fields: Vec<&str> = params.split(';').collect();
+    let mut mp = fields.get(1)?.split(':');
+    let mods = mp.next()?;
+    let event = mp.next().and_then(parse_u32).unwrap_or(1);
+    if event >= 2 {
+        return Some(Key::Dropped);
+    }
+    Some(Key::Bytes(format!("\x1b[{};{}{}", fields[0], mods, fin as char).into_bytes()))
 }
 
 impl KeyDecoder {
@@ -288,6 +310,8 @@ impl KeyDecoder {
                         Key::ShiftEnter => map.shift.to_vec(),
                         Key::CtrlEnter => map.ctrl.to_vec(),
                         Key::AltEnter => map.alt.to_vec(),
+                        Key::Word { right, .. } if map.words => vec![0x1b, if right { b'f' } else { b'b' }],
+                        Key::Word { right, mods } => format!("\x1b[1;{mods}{}", if right { 'C' } else { 'D' }).into_bytes(),
                         Key::Dropped => Vec::new(),
                     };
                     if raw.starts_with(b"\x1b[?") {
@@ -308,7 +332,7 @@ impl KeyDecoder {
 mod tests {
     use super::*;
 
-    const MAP: EnterMap = EnterMap { shift: b"S", ctrl: b"C", alt: b"\x1b\r" };
+    const MAP: EnterMap = EnterMap { shift: b"S", ctrl: b"C", alt: b"\x1b\r", words: false };
 
     fn dec(chunks: &[&[u8]]) -> Vec<u8> {
         let mut d = KeyDecoder::default();
@@ -413,6 +437,32 @@ mod tests {
     #[test] fn keypad_digits() { assert_eq!(one(b"\x1b[57400u"), b"1"); assert_eq!(one(b"\x1b[57414u"), b"\r"); }
     #[test] fn keypad_enter_shift() { assert_eq!(one(b"\x1b[57414;2u"), b"S"); }
     #[test] fn arrows_pass_through() { assert_eq!(one(b"\x1b[A\x1b[B\x1b[C\x1b[D"), b"\x1b[A\x1b[B\x1b[C\x1b[D"); }
+    fn shell(s: &[u8]) -> Vec<u8> { KeyDecoder::default().decode(s, &EnterMap::for_tab("auto", false), None) }
+    #[test] fn alt_arrows_are_words_in_a_shell() {
+        assert_eq!(shell(b"\x1b[1;3D"), b"\x1bb");
+        assert_eq!(shell(b"\x1b[1;3C"), b"\x1bf");
+        assert_eq!(shell(b"\x1b[1;3:1D"), b"\x1bb");
+        assert_eq!(shell(b"\x1b[1;3:2C"), b"");
+        assert_eq!(shell(b"\x1b[1;3:3C"), b"");
+        assert_eq!(shell(b"\x1b[1;5D\x1b[1;5C"), b"\x1bb\x1bf");
+        assert_eq!(shell(b"x\x1b[1;3Dy"), b"x\x1bby");
+    }
+    #[test] fn other_modified_arrows_unchanged_in_a_shell() {
+        assert_eq!(shell(b"\x1b[1;2D\x1b[1;3A\x1b[1;3B\x1b[1;4C\x1b[1;2:1C"), b"\x1b[1;2D\x1b[1;3A\x1b[1;3B\x1b[1;4C\x1b[1;2C");
+        assert_eq!(shell(b"\x1b[D"), b"\x1b[D");
+    }
+    #[test] fn word_keys_unchanged_outside_shell_tabs() { assert_eq!(one(b"\x1b[1;3D\x1b[1;5C"), b"\x1b[1;3D\x1b[1;5C"); assert_eq!(one(b"\x1b[1;3:1D"), b"\x1b[1;3D"); }
+    #[test] fn word_keys_pass_raw_when_the_app_speaks_the_protocol() {
+        assert_eq!(KeyDecoder::default().decode(b"\x1b[1;3D", &EnterMap::for_tab("auto", false), Some(0)), b"\x1b[1;3D");
+    }
+    #[test] fn word_key_split_across_reads() {
+        let m = EnterMap::for_tab("auto", false);
+        let mut d = KeyDecoder::default();
+        let mut out = d.decode(b"\x1b[1;", &m, None);
+        out.extend(d.decode(b"3", &m, None));
+        out.extend(d.decode(b"D", &m, None));
+        assert_eq!(out, b"\x1bb");
+    }
     #[test] fn modified_arrows_pass_through() { assert_eq!(one(b"\x1b[1;5A"), b"\x1b[1;5A"); assert_eq!(one(b"\x1b[1;2D"), b"\x1b[1;2D"); }
     #[test] fn home_end_pgup_pass_through() { assert_eq!(one(b"\x1b[H\x1b[F\x1b[5~\x1b[6~\x1b[3~"), b"\x1b[H\x1b[F\x1b[5~\x1b[6~\x1b[3~"); }
     #[test] fn f_keys_pass_through() { assert_eq!(one(b"\x1b[15;5~\x1b[1;2P\x1bOP"), b"\x1b[15;5~\x1b[1;2P\x1bOP"); }

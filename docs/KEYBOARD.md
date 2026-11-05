@@ -16,6 +16,7 @@ report Shift+Enter; `wi` asks for it on start and translates it per tab.
 ## What wi does
 - Agent tabs (started as an agent, or titled `claude` / `codex`): Shift+Enter and Ctrl+Enter send LF.
 - Other tabs: Shift+Enter sends Enter. Alt+Enter always sends ESC CR (a newline in Claude Code and Codex), whatever the terminal's key protocol.
+- Alt+Left / Alt+Right (and Ctrl+Left / Ctrl+Right) in a shell or agent tab send ESC b / ESC f, so they move by word in zsh, bash, fish, Claude Code and Codex; wi's own text fields take them (and Alt+Backspace) too.
 - Every other enhanced report (Ctrl+letter, Esc, Ctrl+Space ...) is turned back into the classic bytes, so
   programs and the `Ctrl-Space` menu behave exactly as before. Pasted text is never touched.
 - A program that turns the protocol on itself gets the raw reports instead.
