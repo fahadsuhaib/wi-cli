@@ -781,7 +781,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
         }
     }
 
-    let scroll_hint = v.scroll.map(|(n, m)| format!(" scroll: arrows, PgUp/PgDn, Home/End   Esc exits   scrollback {n}/{m}"));
+    let scroll_hint = v.scroll.map(|(n, m)| format!(" scroll: arrows, PgUp/PgDn, Home/End   Esc exits   typing goes live   scrollback {n}/{m}"));
     let preview_hint = active_prev.map(|p| {
         let total = p.display_len();
         let last = (p.top + preview_rows).min(total);

@@ -69,6 +69,8 @@ New line in an agent tab: Alt+Enter works in every terminal (Shift+Enter only wh
 | M | Mouse on/off | Y | Theme picker |
 | R | Reconnect (remote) | I / Q | Info / quit |
 
+Scrolled back (wheel up, or S): arrows, PgUp/PgDn, Home/End scroll, Esc leaves; typing or pasting anything else jumps to the live bottom and goes to the tab.
+
 Inside a preview: arrows and PgUp/PgDn scroll, F find, W wrap, M markdown source, R reload, H recent files, Esc back, Q close.
 
 ## Pinned panes (tabs side by side)
