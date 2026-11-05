@@ -97,6 +97,9 @@ impl Rename {
             }
             AskKey::Left => crate::lineedit::left(&mut self.cur),
             AskKey::Right => crate::lineedit::right(&self.buf, &mut self.cur),
+            AskKey::WordLeft => crate::lineedit::word_left(&self.buf, &mut self.cur),
+            AskKey::WordRight => crate::lineedit::word_right(&self.buf, &mut self.cur),
+            AskKey::DeleteWord => crate::lineedit::delete_word(&mut self.buf, &mut self.cur),
             AskKey::Home | AskKey::Up => self.cur = 0,
             AskKey::End | AskKey::Down => self.cur = len,
             AskKey::Backspace => crate::lineedit::backspace(&mut self.buf, &mut self.cur),

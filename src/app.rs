@@ -1711,9 +1711,13 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     0x1b => {
                                         if matches!(chunk.get(i + 1), Some(b'[') | Some(b'O')) {
                                             let first = chunk.get(i + 2).copied();
+                                            let i0 = i;
                                             i += 2;
                                             while i < chunk.len() && !(0x40..=0x7e).contains(&chunk[i]) { i += 1; }
+                                            let word = chunk.get(i0 + 2..i).is_some_and(|p| p.starts_with(b"1;3") || p.starts_with(b"1;5"));
                                             match chunk.get(i) {
+                                                Some(b'C') if word => crate::lineedit::word_right(&pr.input, &mut pr.cur),
+                                                Some(b'D') if word => crate::lineedit::word_left(&pr.input, &mut pr.cur),
                                                 Some(b'A') => arrows.push(false),
                                                 Some(b'B') => arrows.push(true),
                                                 Some(b'C') => crate::lineedit::right(&pr.input, &mut pr.cur),
@@ -1728,6 +1732,14 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                                 },
                                                 _ => {}
                                             }
+                                        } else if let Some(&w @ (b'b' | b'f' | 0x7f)) = chunk.get(i + 1) {
+                                            // Terminal.app style Alt+Left / Right / Backspace.
+                                            match w {
+                                                b'b' => crate::lineedit::word_left(&pr.input, &mut pr.cur),
+                                                b'f' => crate::lineedit::word_right(&pr.input, &mut pr.cur),
+                                                _ => crate::lineedit::delete_word(&mut pr.input, &mut pr.cur),
+                                            }
+                                            i += 1;
                                         } else {
                                             cancel = true;
                                         }

@@ -58,6 +58,13 @@ os.write(fd, MENU + b"s"); pump(0.5); os.write(fd, b"\x1b[5~"); pump(0.3)
 check("scroll keys not echoed to shell", "[5~" not in text())
 os.write(fd, b"\x1b"); pump(0.5)
 
+# (a2) Alt/Ctrl+Left/Right reach the shell as ESC b / ESC f (word moves)
+os.write(fd, b"cat -v\n"); pump(1)
+os.write(fd, b"\x1b[1;3D\x1b[1;3C\x1b[1;5D\x1b[1;3:1D\x1b[1;2D\r"); pump(1)
+check("Alt/Ctrl+Left/Right become ESC b / ESC f", "^[b^[f^[b^[b" in text())
+check("Shift+Left stays a CSI sequence", "^[[1;2D" in text())
+os.write(fd, b"\x03"); pump(0.5)
+
 # (b) paste into a plain program: no markers, no menu
 os.write(fd, b"cat -v\n"); pump(1)
 os.write(fd, PS + b"first line\nsecond\x00line\nthird" + PE); pump(1)
