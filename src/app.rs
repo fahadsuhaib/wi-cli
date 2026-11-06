@@ -263,7 +263,7 @@ struct AskCtx {
     tab: Option<usize>,
 }
 
-pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> {
+pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -> Result<()> {
     let Some(menu_key) = parse_prefix_key(&cfg.defaults.prefix_key) else {
         bail!("prefix_key '{}' is not valid; use ctrl-space or ctrl-<letter>", cfg.defaults.prefix_key);
     };
@@ -291,6 +291,29 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
             if sn.key == agents::workspace_key(ws, &app.root) {
                 sn.clamp();
                 restore = Some(sn);
+            }
+        }
+    }
+    let restore_on = cfg.defaults.restore_tabs && std::env::var("WICLI_RESTORE_TABS").as_deref() != Ok("0");
+    let mut reopened = false;
+    if restore.is_none() && (restore_on || fresh) {
+        // A normal start: reopen what the last quit in this workspace left (or, with --fresh, forget it).
+        let mut st = agents::State::load();
+        let key = agents::workspace_key(ws, &app.root);
+        if fresh {
+            if st.sessions.remove(&key).is_some() {
+                let _ = st.save();
+            }
+        } else if let Some(mut sn) = st.sessions.get(&key).cloned()
+            && sn.is_fresh(crate::restart::now_secs())
+        {
+            if !ws.is_remote() {
+                sn.prune(crate::restart::local_tab_exists);
+            }
+            if !sn.tabs.is_empty() {
+                sn.clamp();
+                restore = Some(sn);
+                reopened = true;
             }
         }
     }
@@ -395,7 +418,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
     let mut pasting: Option<(bool, bool)> = None;
     let mut message: Option<String> = None;
-    if restore.is_some() {
+    if reopened {
+        message = Some(format!("reopened {} tab{} from last session (config: restore_tabs = false to turn off)", app.tabs.len(), if app.tabs.len() == 1 { "" } else { "s" }));
+    } else if restore.is_some() {
         message = Some(format!("wi restarted: {} tab(s) back", app.tabs.len()));
     } else if ws.is_remote() && !backend.has_tmux() {
         message = Some("no tmux on this box (or use_tmux = false): plain shells, quitting ends them".into());
@@ -780,7 +805,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                     }
                     Some(r) => {
                         let n = r?;
-                        if n == 0 { return finish(&app, backend).await; }
+                        if n == 0 { save_session(&app, backend, ws, restore_on, true).await; return finish(&app, backend).await; }
                         let now = Instant::now();
                         if now.duration_since(last_input) > IDLE_REPAINT {
                             repaint = true;
@@ -1127,7 +1152,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                     } else {
                                         // a preview that is its own tab: close the tab
                                         let id = app.tabs[app.active].id;
-                                        if remove_tab(&mut app, id)? { return finish(&app, backend).await; }
+                                        if remove_tab(&mut app, id)? {
+                    save_session(&app, backend, ws, restore_on, false).await;
+                    return finish(&app, backend).await;
+                }
                                     }
                                 }
                                 if reload {
@@ -1866,9 +1894,13 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                             } else if let Some(a) = chosen {
                                 mode = Mode::Shell;
                                 match a {
-                                    Action::Quit => return finish(&app, backend).await,
+                                    Action::Quit => {
+                                        save_session(&app, backend, ws, restore_on, true).await;
+                                        return finish(&app, backend).await;
+                                    }
                                     Action::EndAndQuit => {
                                         backend.end_all_sessions().await;
+                                        save_session(&app, backend, ws, restore_on, false).await;
                                         return finish(&app, backend).await;
                                     }
                                     Action::Info => {
@@ -2053,7 +2085,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                                         let id = app.tabs[app.active].id;
                                         if let Some(name) = app.sessions.get(&id) { backend.end_session(name).await; }
                                         app.tabs[app.active].close();
-                                        if remove_tab(&mut app, id)? { return finish(&app, backend).await; }
+                                        if remove_tab(&mut app, id)? {
+                    save_session(&app, backend, ws, restore_on, false).await;
+                    return finish(&app, backend).await;
+                }
                                     }
                                     other => message = Some(format!("{other:?} arrives in a later milestone")),
                                 }
@@ -2128,9 +2163,18 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 }
                 dirty = true;
             }
-            _ = sigterm.recv() => return finish(&app, backend).await,
-            _ = sighup.recv() => return finish(&app, backend).await,
-            _ = sigint.recv() => return finish(&app, backend).await,
+            _ = sigterm.recv() => {
+                save_session(&app, backend, ws, restore_on, true).await;
+                return finish(&app, backend).await;
+            }
+            _ = sighup.recv() => {
+                save_session(&app, backend, ws, restore_on, true).await;
+                return finish(&app, backend).await;
+            }
+            _ = sigint.recv() => {
+                save_session(&app, backend, ws, restore_on, true).await;
+                return finish(&app, backend).await;
+            }
             _ = winch.recv() => {
                 resize_all(&mut app)?;
                 dirty = true;
@@ -2161,7 +2205,10 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config) -> Result<()> 
                 }
                 Some(Event::Exited(id)) => {
                     if app.tabs.get(app.active).is_some_and(|t| t.id == id) && matches!(mode, Mode::Scroll | Mode::OutFind(_)) { mode = Mode::Shell; }
-                    if remove_tab(&mut app, id)? { return finish(&app, backend).await; }
+                    if remove_tab(&mut app, id)? {
+                    save_session(&app, backend, ws, restore_on, false).await;
+                    return finish(&app, backend).await;
+                }
                     dirty = true;
                 }
                 None => return finish(&app, backend).await,
@@ -2527,6 +2574,25 @@ fn remove_tab(app: &mut App, id: usize) -> Result<bool> {
     Ok(false)
 }
 
+/// At a normal quit: remember the tabs for this workspace (`keep`), or forget them (the last tab
+/// was closed, or the sessions were ended). Only this workspace's entry changes; entries older
+/// than 30 days go. A lone plain shell saves nothing.
+async fn save_session(app: &App, backend: &Backend, ws: &Workspace, enabled: bool, keep: bool) {
+    if !enabled {
+        return;
+    }
+    let key = agents::workspace_key(ws, &app.root);
+    let snap = if keep { Some(build_snapshot(app, backend, ws).await).filter(|s| !s.is_trivial(&app.root)) } else { None };
+    let mut st = agents::State::load();
+    let now = crate::restart::now_secs();
+    st.sessions.retain(|_, s| s.is_fresh(now));
+    match snap {
+        Some(s) => st.sessions.insert(key, s),
+        None => st.sessions.remove(&key),
+    };
+    let _ = st.save();
+}
+
 async fn finish(app: &App, backend: &Backend) -> Result<()> {
     for t in &app.tabs {
         t.close();
@@ -2858,6 +2924,7 @@ async fn build_snapshot(app: &App, backend: &Backend, ws: &Workspace) -> crate::
         side: app.side.name().into(),
         pct: app.pct,
         tabs,
+        saved: crate::restart::now_secs(),
     }
 }
 

@@ -60,6 +60,7 @@ usage:
   wi <box>            remote workspace, a [[box]] name from the config
   wi <ssh-alias>      remote workspace, a Host from ~/.ssh/config
   wi fetch ...        download files from a box (see the docs)
+  wi --fresh [...]    start without reopening the last session's tabs (and forget them)
   wi --version, -V    print the version
   wi --help, -h       print this help
 
@@ -84,7 +85,9 @@ async fn real_main() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("fetch") {
         return fetch_cmd(&cfg).await;
     }
-    let ws = match std::env::args().nth(1) {
+    let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--fresh").collect();
+    let fresh = std::env::args().skip(1).any(|a| a == "--fresh");
+    let ws = match args.first().cloned() {
         // `wi` alone: local workspace in the current directory.
         None => workspace::Workspace::Local(std::env::current_dir()?),
         Some(arg) => {
@@ -101,7 +104,7 @@ async fn real_main() -> Result<()> {
     };
 
     let backend = ws.connect().await?;
-    app::run(&ws, &backend, &cfg).await
+    app::run(&ws, &backend, &cfg, fresh).await
 }
 
 /// Pick the theme (config, then saved menu choice, then the terminal's background) once at startup, after the config and the connection are known good (so error messages never

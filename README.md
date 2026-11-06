@@ -110,7 +110,18 @@ Backspace/Delete and paste work, Enter saves, Esc cancels. An empty name goes ba
 folder, agent). Names are trimmed, limited to 40 columns, and cut with an ellipsis in the strip (the full name is kept).
 The name wins over the automatic title and stays when the program changes its own terminal title; it does not affect how
 wi treats an agent tab (new-line keys). A single click on a tab that is not active still just switches to it.
-Custom names survive "Restart wi" (and the restart after an update); they are not remembered across a normal quit.
+Custom names survive "Restart wi" (and the restart after an update); they are also remembered across a normal quit (see Reopening your tabs).
+
+## Reopening your tabs
+
+Quit wi from the menu (or close the terminal) and the next `wi`, `wi <folder>` or `wi <box>` in the same workspace
+reopens the same tabs: folders, custom names, the active tab, previews and pinned layout. A status note says so
+("reopened 3 tabs from last session"). As with "Restart wi", running programs do not survive: shells start fresh
+in their folders, agent tabs start their remembered agent command again, remote tmux tabs reattach. Only folders,
+names, agent names and session names are saved (in `state.toml`, one entry per workspace; the last quit wins), never
+screen content. A snapshot older than 30 days is ignored, a tab whose folder is gone is skipped, and a workspace with
+only one plain shell saves nothing; closing the last tab forgets the session. `wi --fresh` starts with one tab and
+forgets the saved ones; `restore_tabs = false` in `[defaults]` turns the whole thing off.
 
 ## Menu items without a key
 
@@ -137,6 +148,7 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
     paint_background = true # wi paints the whole window (shell included) in the theme's
                             # colours; false leaves default colours to your terminal
     preview_side = "right"  # right, left or tab
+    restore_tabs = true     # reopen last session's tabs at start (wi --fresh skips it once)
     preview_autorefresh = true          # reload a visible file preview when the file changes
     preview_refresh_debounce_ms = 5000  # wait this long after the last change before reloading
 

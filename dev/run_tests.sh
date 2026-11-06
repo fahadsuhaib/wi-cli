@@ -6,6 +6,7 @@
 #   LOCAL_ONLY=1   with SHARD: leave out the remote runs (no test box available)
 #   LIST=1         only print which terminal runs would execute, then exit
 export PATH="$HOME/.cargo/bin:$PATH"
+export WICLI_RESTORE_TABS=0  # other scripts must not reopen each other's tabs; pty_restore.py unsets it
 cd "$(dirname "$0")/.." || exit 1
 S="${1:-/private/tmp/claude-501/-Users-fahad-work-devterm/86bba6c8-edb7-4e2c-8ea5-0b344d693470/scratchpad}"
 PY="$S/venv/bin/python"

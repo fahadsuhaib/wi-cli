@@ -51,6 +51,9 @@ pub struct Defaults {
     /// Paint the whole window (shell area included) with the theme's background and text
     /// colours. `false` leaves default colours to the terminal.
     pub paint_background: bool,
+    /// Reopen the tabs of the last session (folders, names, agents, pinned layout) when wi starts
+    /// in the same workspace; saved at a normal quit, ignored after 30 days. `wi --fresh` skips it.
+    pub restore_tabs: bool,
 }
 
 impl Default for Defaults {
@@ -78,6 +81,7 @@ impl Default for Defaults {
             theme: "auto".into(),
             ansi_remap: true,
             paint_background: true,
+            restore_tabs: true,
         }
     }
 }
@@ -313,6 +317,14 @@ pub fn prefix_label(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_tabs_defaults_on_and_can_be_turned_off() {
+        let c: Config = toml::from_str("").unwrap();
+        assert!(c.defaults.restore_tabs);
+        let c: Config = toml::from_str("[defaults]\nrestore_tabs = false\n").unwrap();
+        assert!(!c.defaults.restore_tabs);
+    }
 
     #[test]
     fn prefix_keys() {
