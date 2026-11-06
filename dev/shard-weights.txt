@@ -41,3 +41,4 @@ dev/pty_panes.py local 60
 dev/pty_newline.py local 12
 dev/pty_rename.py local 18
 dev/pty_scroll.py local 15
+dev/pty_restore.py local 45

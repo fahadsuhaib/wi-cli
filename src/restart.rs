@@ -48,9 +48,50 @@ pub struct Snapshot {
     pub pct: u16,
     #[serde(default)]
     pub tabs: Vec<SnapTab>,
+    /// Unix seconds when a quit saved it (0 for a "Restart wi" snapshot); see `is_fresh`.
+    #[serde(default)]
+    pub saved: u64,
+}
+
+/// A snapshot saved by a normal quit is ignored after this long.
+pub const MAX_AGE_SECS: u64 = 30 * 24 * 3600;
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 impl Snapshot {
+    /// Saved at most 30 days before `now` (a clock set back counts as fresh).
+    pub fn is_fresh(&self, now: u64) -> bool {
+        now.saturating_sub(self.saved) <= MAX_AGE_SECS
+    }
+
+    /// Nothing worth reopening: no tabs, or just one plain unnamed shell in the workspace folder.
+    pub fn is_trivial(&self, root: &str) -> bool {
+        match self.tabs.as_slice() {
+            [] => true,
+            [t] => t.kind == "shell" && t.name.is_empty() && (t.cwd.is_empty() || t.cwd == root),
+            _ => false,
+        }
+    }
+
+    /// Drop the tabs `keep` rejects, moving the active and pinned indexes along.
+    pub fn prune(&mut self, keep: impl Fn(&SnapTab) -> bool) {
+        let mut map = Vec::new();
+        let mut tabs = Vec::new();
+        for t in self.tabs.drain(..) {
+            if keep(&t) {
+                map.push(Some(tabs.len()));
+                tabs.push(t);
+            } else {
+                map.push(None);
+            }
+        }
+        self.active = map.get(self.active).copied().flatten().unwrap_or(0);
+        self.pinned = self.pinned.and_then(|p| map.get(p).copied().flatten());
+        self.tabs = tabs;
+    }
+
     /// Indexes are kept inside the tab list.
     pub fn clamp(&mut self) {
         if self.active >= self.tabs.len() {
@@ -60,6 +101,11 @@ impl Snapshot {
             self.pinned = None;
         }
     }
+}
+
+/// A local shell or agent tab whose folder is gone is not reopened (previews fail on their own).
+pub fn local_tab_exists(t: &SnapTab) -> bool {
+    t.kind == "preview" || t.cwd.is_empty() || std::path::Path::new(&t.cwd).is_dir()
 }
 
 /// `/usr/bin/wi (deleted)` (Linux, after the file was replaced) back to the real path.
@@ -94,6 +140,7 @@ mod tests {
                 SnapTab { kind: "agent".into(), backend: "local".into(), cwd: "/work".into(), title: "claude".into(), agent: "claude".into(), ..Default::default() },
                 SnapTab { kind: "preview".into(), backend: "local".into(), title: "x.md".into(), path: "/work/x.md".into(), ..Default::default() },
             ],
+            saved: 0,
         }
     }
 
@@ -105,6 +152,62 @@ mod tests {
         assert_eq!(back.restart, Some(sample()));
         // Nothing saved means no section at all.
         assert!(!toml::to_string_pretty(&crate::agents::State::default()).unwrap().contains("restart"));
+    }
+
+    #[test]
+    fn sessions_are_kept_per_workspace() {
+        let mut st = crate::agents::State::default();
+        st.sessions.insert("local:/a".into(), Snapshot { key: "local:/a".into(), saved: 5, ..sample() });
+        st.sessions.insert("box:dev:/b".into(), Snapshot { key: "box:dev:/b".into(), saved: 6, ..sample() });
+        let back: crate::agents::State = toml::from_str(&toml::to_string_pretty(&st).unwrap()).unwrap();
+        assert_eq!(back.sessions.len(), 2);
+        assert_eq!(back.sessions["box:dev:/b"].saved, 6);
+        // Replacing one workspace's entry leaves the other alone.
+        let mut back = back;
+        back.sessions.remove("local:/a");
+        assert!(back.sessions.contains_key("box:dev:/b"));
+        assert!(!toml::to_string_pretty(&crate::agents::State::default()).unwrap().contains("sessions"));
+    }
+
+    #[test]
+    fn expiry_after_thirty_days() {
+        let s = Snapshot { saved: 1000, ..sample() };
+        assert!(s.is_fresh(1000 + MAX_AGE_SECS));
+        assert!(!s.is_fresh(1001 + MAX_AGE_SECS));
+        assert!(s.is_fresh(5)); // clock went back
+    }
+
+    #[test]
+    fn trivial_means_one_plain_shell() {
+        let shell = |cwd: &str, name: &str| SnapTab { kind: "shell".into(), cwd: cwd.into(), name: name.into(), ..Default::default() };
+        let mk = |tabs| Snapshot { tabs, ..Default::default() };
+        assert!(mk(vec![]).is_trivial("/w"));
+        assert!(mk(vec![shell("/w", "")]).is_trivial("/w"));
+        assert!(!mk(vec![shell("/w/sub", "")]).is_trivial("/w"));
+        assert!(!mk(vec![shell("/w", "named")]).is_trivial("/w"));
+        assert!(!mk(vec![shell("/w", ""), shell("/w", "")]).is_trivial("/w"));
+        assert!(!sample().is_trivial("/work"));
+    }
+
+    #[test]
+    fn prune_moves_indexes() {
+        let mut s = sample(); // active 2, pinned 1
+        s.prune(|t| t.kind != "shell");
+        assert_eq!((s.tabs.len(), s.active, s.pinned), (2, 1, Some(0)));
+        let mut s = sample();
+        s.prune(|t| t.kind != "preview" && t.kind != "agent");
+        assert_eq!((s.tabs.len(), s.active, s.pinned), (1, 0, None));
+    }
+
+    #[test]
+    fn missing_folders_are_skipped() {
+        let dir = std::env::temp_dir().join(format!("wi-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mk = |p: &std::path::Path| SnapTab { kind: "shell".into(), cwd: p.to_string_lossy().into(), ..Default::default() };
+        let mut s = Snapshot { tabs: vec![mk(&dir), mk(&dir.join("gone"))], ..Default::default() };
+        s.prune(local_tab_exists);
+        assert_eq!(s.tabs.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

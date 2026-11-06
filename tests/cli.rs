@@ -56,3 +56,9 @@ fn help_flag_prints_usage() {
         assert!(text.contains("usage:") && text.contains("wi <folder>") && text.contains("wi fetch"), "{text}");
     }
 }
+
+#[test]
+fn help_mentions_fresh() {
+    let out = run("", &["--help"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("--fresh"));
+}
