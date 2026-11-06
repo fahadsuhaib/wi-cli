@@ -1,8 +1,35 @@
-# wi
+# wi: a terminal workspace for AI coding agents
 
-`wi` is a lightweight terminal workspace for working with AI coding tools (Claude Code, Codex), on your own machine
-or on a remote box over SSH. It gives you a good terminal with tabs, plus quick previews and diffs of what the AI
-produced. It has no debugger, no LSP and no built-in editor. Nothing is installed on the remote box beyond sshd.
+[![release](https://img.shields.io/github/v/release/fahadsuhaib/wi-cli)](https://github.com/fahadsuhaib/wi-cli/releases)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)
+
+Run Claude Code and Codex in tabs, preview and diff what they write, browse your files, and do all of it on your own
+machine or on a remote box over SSH, from one fast, lightweight terminal app. Nothing is installed on the server beyond
+sshd. It replaces the "VS Code window next to a terminal" workflow for agent work: no debugger, no LSP and no built-in
+editor, just the parts you actually use while an agent writes the code.
+
+## Why wi
+
+- **Built for the agent workflow.** Tabs show which agent is printing (`*`) or has gone quiet (`!`). Pin an agent tab
+  beside your shell. Previews refresh by themselves when the agent edits a file. The explorer can type `@path`
+  mentions straight into the agent's prompt.
+- **Remote without installing anything.** `wi my-box` connects over SSH (your `~/.ssh/config` works); tabs survive
+  disconnects through tmux if the box has it. Nothing runs on the server except sshd.
+- **Small and fast.** One Rust binary (static on Linux, universal on macOS), about 12 MB of memory when idle,
+  redraws only when something changes. No Electron, no background services.
+- **Simple keys.** One menu key (`Ctrl-Space`) opens a menu with underlined letters; everything else is letters,
+  arrows, Enter and Esc.
+- **Private by default.** No telemetry. Nothing is opened, downloaded or sent anywhere without your confirmation.
+
+## Quick start
+
+    curl -fsSL https://raw.githubusercontent.com/fahadsuhaib/wi-cli/main/install.sh | sh
+    cd your-project
+    wi
+
+Press `Ctrl-Space` for the menu. Try `P` to preview a file, `X` for the file explorer, `A` to start Claude Code or
+Codex in a tab, and `Y` to pick a theme. For a remote box: `wi my-box`.
 
 ## Install
 
@@ -30,7 +57,7 @@ wi supports macOS and Linux.
     wi <box>           # remote box from the config, or a Host from ~/.ssh/config
     wi --help
 
-## Features
+## All features
 
 - Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet)
 - Previews: text, markdown, CSV/TSV, JSON, binary stub; git changes and diffs
@@ -188,4 +215,4 @@ scripts and a Docker test box for remote mode, is `dev/run_tests.sh`; see [dev/R
 
 ## License
 
-License: not yet chosen
+[MIT](LICENSE)
