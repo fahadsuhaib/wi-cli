@@ -24,6 +24,8 @@ mod scroll;
 mod search;
 mod select;
 mod files;
+mod gitdiff;
+mod diffview;
 mod history;
 mod session;
 mod tab;

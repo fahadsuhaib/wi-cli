@@ -36,3 +36,12 @@ report Shift+Enter; `wi` asks for it on start and translates it per tab.
   It has no enhanced reporting, so this mapping applies in every tab, not only agent tabs.
 - GNOME Terminal, Konsole, others without support: use Alt+Enter (or Ctrl+J) for a newline.
 - tmux/ssh: wi sits in front of tmux, so nothing to set on the remote box.
+
+## Explorer and diff keys (Ctrl-Space then X)
+
+Explorer: Up/Down move, Left/Right fold, Enter shows a file in the detail pane (Enter again or O opens the preview pane), E editor, Space marks, M sends `@path` mentions to the agent tab, S sort, H hidden, G changed only, R reload, F or any other letter starts the find filter, D diff or content, Q leaves.
+A file with git changes opens to its diff by itself in the detail pane (read-only, unified, line numbers, added and removed lines tinted in the theme's colours; the header shows the path, staged or unstaged, +added -removed and hunk n/m). With the diff focused (Enter): Up/Down/J/K scroll, N/P next and previous hunk, Tab switches staged and unstaged when a file has both, E opens the editor, M sends `@path`, Esc goes back. D shows the file content instead (D again, the diff). The mark column shows two letters when the staged and unstaged halves differ (`AM`). An open diff refreshes by itself shortly after the file changes on disk (stat poll, no git polling; R reloads after a `git add`).
+
+## Markdown preview
+
+Inside a preview: arrows and PgUp/PgDn scroll, F find, W wrap, M markdown source, D mermaid diagrams or their source (all blocks at once, only when the file has a mermaid block), R reload, H recent files, Esc back, Q close. Mermaid blocks that cannot be drawn (error, unknown type, over 20 KB or 400 nodes, wider than the pane, pane under 40 columns) show their source with a dim `mermaid: not rendered (reason)` line.

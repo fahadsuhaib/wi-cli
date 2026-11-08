@@ -60,7 +60,7 @@ wi supports macOS and Linux.
 ## All features
 
 - Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet)
-- Previews: text, markdown, CSV/TSV, JSON, binary stub; git changes and diffs
+- Previews: text, markdown (mermaid blocks drawn as text diagrams: flowchart, sequence, class, state, ER, pie, gantt and more; `D` shows the source), CSV/TSV, JSON, binary stub; git changes and diffs; in the explorer a changed file opens to its own read-only diff (staged and unstaged, hunk jumps, auto-refresh)
 - Recent files: every file you preview is remembered per workspace (also across restarts). Press H in a preview, or menu then Space and type "recent", to pick one again; the full path of the shown file is always on the first row of the preview
 - Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste; the "Preview a file" and folder prompts are real line editors (a visible cursor, Left/Right/Home/End, Backspace/Delete, Ctrl-U, paste inserts at the cursor, Tab completes)
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
@@ -68,7 +68,7 @@ wi supports macOS and Linux.
   relative paths resolve against the shell's real folder (OSC 7 if it sends it, else asked from the OS when you click), then the workspace root and the tab's start folder; if none has it, one bounded search (depth 6, 5,000 entries, 4 s) finds a unique match by trailing path, and several matches raise a small picker (Enter chooses, Esc cancels), never a silent guess;
   a folder path (`src/`, `./out`, `~/work/app`, `/srv/app/`, local or on the box) opens the file explorer rooted there, and leaving returns to your tab
 - Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
-- File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane. Enter shows a file in the detail pane and stays (Enter again, or O, opens it in the preview pane); E opens it in `$EDITOR` in a new tab. Just type to find: any letter that is not a command (and digits) starts the filter, Esc clears it. Space marks files (kept across folds and when you leave), M types the marks, or the selected path, as `@path ` mentions into your agent tab without pressing Enter. S cycles the sort (name, size, modified, newest first); files that changed or appeared since you opened it or last pressed R get a dot. The explorer keeps its folds, selection, sort and marks while wi runs.
+- File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane. Enter shows a file in the detail pane and stays (Enter again, or O, opens it in the preview pane); E opens it in `$EDITOR` in a new tab. Just type to find: any letter that is not a command (and digits) starts the filter, Esc clears it. Space marks files (kept across folds and when you leave), M types the marks, or the selected path, as `@path ` mentions into your agent tab without pressing Enter. S cycles the sort (name, size, modified, newest first); files that changed or appeared since you opened it or last pressed R get a dot. The explorer keeps its folds, selection, sort and marks while wi runs. A file with git changes opens to its diff by itself in the detail pane (read-only, unified, line numbers, added and removed lines tinted in the theme's colours; the header shows the path, staged or unstaged, +added -removed and hunk n/m). With the diff focused (Enter): Up/Down/J/K scroll, N/P next and previous hunk, Tab switches staged and unstaged when a file has both, E opens the editor, M sends `@path`, Esc goes back. D shows the file content instead (D again, the diff). The mark column shows two letters when the staged and unstaged halves differ (`AM`). An open diff refreshes by itself shortly after the file changes on disk (stat poll, no git polling; R reloads after a `git add`).
 - Rename a tab (menu: search "rename", click the active tab, or double-click any tab); the name survives "Restart wi"
 - Pinned panes: pin any tab beside the active one (menu: search "pin"); ⇄ swaps left/right, ✕ unpins; the layout is remembered per workspace (needs 101+ columns)
 - Previews refresh by themselves when the file changes on disk (see Configuration)
@@ -100,7 +100,7 @@ Scrolled back (wheel up, or S): arrows, PgUp/PgDn, Home/End scroll, Esc leaves; 
 
 In a shell or agent tab Alt+Left/Right (also Ctrl+Left/Right) move by word; wi's own text fields accept them and Alt+Backspace.
 
-Inside a preview: arrows and PgUp/PgDn scroll, F find, W wrap, M markdown source, R reload, H recent files, Esc back, Q close.
+Inside a preview: arrows and PgUp/PgDn scroll, F find, W wrap, M markdown source, D mermaid diagrams or their source, R reload, H recent files, Esc back, Q close.
 
 ## Pinned panes (tabs side by side)
 

@@ -63,9 +63,15 @@ fn ui_rows(ex: &ExplorerState, t: &Theme) -> Vec<Row> {
                     _ => Cell::new(""),
                 };
                 let date = r.mtime.map_or(Cell::new(""), |m| Cell::styled(relative_time(ex.now, m), Style::default().fg(t.date_fg)));
+                let bold = |m: GitMark| Style::default().fg(mark_color(t, m)).add_modifier(Modifier::BOLD);
                 let mark = match (r.mark, r.dirty) {
-                    (Some(m), _) => Cell::styled(format_mark(m).to_string(), Style::default().fg(mark_color(t, m)).add_modifier(Modifier::BOLD)),
-                    (None, true) => Cell::styled("•", dim),
+                    // Staged and unstaged differ: both letters (staged first), in the unstaged colour.
+                    (Some(_), _) if matches!((r.staged, r.unstaged), (Some(a), Some(b)) if a != b) => {
+                        let (a, b) = (r.staged.unwrap_or(GitMark::Modified), r.unstaged.unwrap_or(GitMark::Modified));
+                        Cell::styled(format!("{}{}", format_mark(a), format_mark(b)), bold(b))
+                    }
+                    (Some(m), _) => Cell::styled(format!(" {}", format_mark(m)), Style::default().fg(mark_color(t, m)).add_modifier(Modifier::BOLD)),
+                    (None, true) => Cell::styled(" •", dim),
                     _ => Cell::new(""),
                 };
                 let flag = if r.picked {
@@ -121,6 +127,15 @@ pub fn draw(f: &mut Frame, ex: &ExplorerState) {
                 put(buf, x + 2, 1, "(Esc clears the filter)", w.saturating_sub(x as usize + 2), Style::default().fg(t.hintline_fg).bg(t.bg));
             }
         }
+        None if ex.focus_detail && matches!(ex.detail, DState::Diff(_)) => {
+            let both = matches!(&ex.detail, DState::Diff(v) if v.has_both());
+            let mut keys = vec![("Up/Dn", "scroll"), ("N/P", "hunk")];
+            if both {
+                keys.push(("Tab", "staged/unstaged"));
+            }
+            keys.extend([("D", "file"), ("E", "edit"), ("M", "send"), ("O", "open file"), ("Esc", "back")]);
+            HintBar::new(&keys).render(hint_row, buf, &t)
+        }
         None => HintBar::new(&[
             ("Up/Dn", "move"),
             ("L/R", "fold"),
@@ -134,6 +149,7 @@ pub fn draw(f: &mut Frame, ex: &ExplorerState) {
             ("Q", "back"),
             ("H", "hidden"),
             ("G", "changed"),
+            ("D", "diff"),
             ("T", "tab"),
             ("A", "agent"),
             ("C/P", "path"),
@@ -186,6 +202,7 @@ pub fn draw(f: &mut Frame, ex: &ExplorerState) {
             format!("lines {}-{} of {} · J/K scroll", (pos + 1).min(total), (pos + body).min(total), total)
         }
         DState::Lines(_) => format!("lines {}-{} of {} · J/K scroll", (pos + 1).min(total), (pos + ex.detail_h).min(total), total),
+        DState::Diff(_) => format!("rows {}-{} of {} · J/K scroll · N/P hunk", (pos + 1).min(total), (pos + ex.detail_h).min(total), total),
         _ => String::new(),
     };
     let ra = Panel::new(name).footer(footer).render(right, buf, &t);
@@ -194,7 +211,10 @@ pub fn draw(f: &mut Frame, ex: &ExplorerState) {
         return;
     }
     let src = ex.source_line();
-    if let Some(rest) = src.strip_prefix("Source:") {
+    if let DState::Diff(v) = &ex.detail {
+        let hl = v.header(body.width.saturating_sub(2) as usize);
+        Paragraph::new(vec![hl]).style(Style::default().fg(t.fg).bg(t.bg)).render(Rect::new(body.x + 1, body.y, body.width.saturating_sub(1), 1), buf);
+    } else if let Some(rest) = src.strip_prefix("Source:") {
         let x = put(buf, body.x + 1, body.y, "Source:", body.width as usize, Style::default().fg(t.dim).bg(t.bg));
         put(buf, body.x + 1 + x, body.y, rest, (body.width as usize).saturating_sub(x as usize + 1), Style::default().fg(t.fg).bg(t.bg));
     }
@@ -214,6 +234,10 @@ pub fn draw(f: &mut Frame, ex: &ExplorerState) {
         DState::Lines(l) => {
             let v: Vec<_> = l.iter().skip(ex.detail_pos()).take(content.height as usize).cloned().collect();
             Paragraph::new(v).style(base).render(content, buf);
+        }
+        DState::Diff(v) => {
+            let lines = v.visible(content.height as usize, content.width as usize);
+            Paragraph::new(lines).style(base).render(content, buf);
         }
         DState::File(p) => {
             if let Some(b) = p.banner.as_deref() {

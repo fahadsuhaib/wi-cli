@@ -7,6 +7,11 @@ mod markdown;
 mod table;
 mod text;
 
+/// True while a mermaid diagram is drawn under `catch_unwind`; the panic hook stays quiet then.
+pub fn mermaid_guard_active() -> bool {
+    markdown::mermaid_guard_active()
+}
+
 use crate::theme::theme;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -68,6 +73,10 @@ struct Md {
     /// Layout width of the rendered lines.
     width: u16,
     row_src: Vec<usize>,
+    /// The document has a mermaid block.
+    mermaid: bool,
+    /// Mermaid blocks drawn as diagrams (false: as source).
+    diagrams: bool,
 }
 
 /// Matches of the text typed in the preview's find prompt.
@@ -144,7 +153,8 @@ impl Preview {
                 let doc = markdown::parse(&body);
                 let r = markdown::render(&doc, 80);
                 p.lines = r.lines;
-                p.md = Some(Md { doc, body: body.to_string(), source: false, width: 80, row_src: r.row_src });
+                let mermaid = markdown::has_mermaid(&doc);
+                p.md = Some(Md { doc, body: body.to_string(), source: false, width: 80, row_src: r.row_src, mermaid, diagrams: true });
             }
             "csv" | "tsv" => {
                 let delim = if ext == "tsv" { b'\t' } else { b',' };
@@ -445,6 +455,7 @@ impl Preview {
             Wrap if self.md_rendered() => {}
             Wrap => self.toggle_wrap(),
             Source => self.toggle_md_source(),
+            Diagram => self.toggle_md_diagrams(),
             NextFile if self.find.is_some() && self.kind != Kind::Diff => self.find_step(true),
             PrevFile if self.find.is_some() && self.kind != Kind::Diff => self.find_step(false),
             NextFile => self.jump_file(true, page),
@@ -463,25 +474,37 @@ impl Preview {
 
     /// Status-hint text for the source toggle, for markdown only.
     pub fn md_hint(&self) -> Option<&'static str> {
-        self.md.as_ref().map(|m| if m.source { "M preview" } else { "M source" })
+        self.md.as_ref().map(|m| match (m.source, m.mermaid, m.diagrams) {
+            (true, _, _) => "M preview",
+            (false, false, _) => "M source",
+            (false, true, true) => "M source · D diagrams off",
+            (false, true, false) => "M source · D diagrams on",
+        })
     }
 
-    /// (raw source shown, layout width) so a reload can show the same view.
-    pub fn md_view(&self) -> Option<(bool, u16)> {
-        self.md.as_ref().map(|m| (m.source, m.width))
+    /// (raw source shown, layout width, diagrams on) so a reload can show the same view.
+    pub fn md_view(&self) -> Option<(bool, u16, bool)> {
+        self.md.as_ref().map(|m| (m.source, m.width, m.diagrams))
     }
 
     /// Show the view a previous copy of this preview had (after a reload).
-    pub fn restore_md_view(&mut self, view: Option<(bool, u16)>) {
-        let Some((source, width)) = view else { return };
-        if self.md.is_none() {
-            return;
-        }
+    pub fn restore_md_view(&mut self, view: Option<(bool, u16, bool)>) {
+        let Some((source, width, diagrams)) = view else { return };
+        let Some(m) = self.md.as_mut() else { return };
+        m.diagrams = diagrams;
         if source {
             self.set_md_source(true);
         } else {
             self.md_rerender(width);
         }
+    }
+
+    /// `D`: mermaid blocks as diagrams or as source (all of them), in the rendered view.
+    pub fn toggle_md_diagrams(&mut self) {
+        let Some(m) = self.md.as_mut().filter(|m| m.mermaid && !m.source) else { return };
+        m.diagrams = !m.diagrams;
+        let w = m.width;
+        self.md_rerender(w);
     }
 
     pub fn toggle_md_source(&mut self) {
@@ -521,7 +544,7 @@ impl Preview {
             self.gutter = gutter;
             self.top = line;
         } else {
-            let r = markdown::render(&m.doc, m.width as usize);
+            let r = markdown::render_with(&m.doc, m.width as usize, m.diagrams);
             self.lines = r.lines;
             m.row_src = r.row_src;
             self.gutter = 0;
@@ -536,7 +559,7 @@ impl Preview {
         let needle = self.find_needle.clone();
         let cur = self.find.as_ref().map(|f| f.cur);
         let Some(m) = self.md.as_mut() else { return };
-        let r = markdown::render(&m.doc, width as usize);
+        let r = markdown::render_with(&m.doc, width as usize, m.diagrams);
         self.lines = r.lines;
         m.row_src = r.row_src;
         m.width = width;

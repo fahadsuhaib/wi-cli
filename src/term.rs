@@ -62,6 +62,10 @@ const RESTORE_SEQ: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2
 pub fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // A panic the markdown preview catches around the mermaid renderer is not fatal.
+        if crate::preview::mermaid_guard_active() {
+            return;
+        }
         restore_terminal();
         prev(info);
         std::process::exit(1);

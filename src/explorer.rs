@@ -4,6 +4,8 @@
 //! terminal or a box.
 
 use crate::explorer_data::{DetailedListing, DirEntry, GitMark, GitMarks, SortKey, child_path, format_size, relative_time, sort_entries, summarize};
+use crate::diffview::DiffView;
+use crate::gitdiff::{DiffData, DiffSpec};
 use crate::mouse::{Button, Kind, MouseEvent};
 use crate::opener::{self, Handling, OpenCfg};
 use crate::preview::{Opts, Preview};
@@ -121,12 +123,15 @@ pub enum Req {
     Dir(String),
     Marks,
     Read(String),
+    /// The diff of one file (staged and/or unstaged); `reload` keeps the view's position.
+    Diff { id: String, spec: DiffSpec, reload: bool },
 }
 
 pub enum Done {
     Dir { epoch: u64, id: String, res: Result<DetailedListing, String> },
     Marks { epoch: u64, res: Result<Option<GitMarks>, String> },
     Read { epoch: u64, id: String, res: Result<(Vec<u8>, u64), String> },
+    Diff { epoch: u64, id: String, reload: bool, res: Result<DiffData, String> },
 }
 
 pub type ExJob<'a> = Pin<Box<dyn Future<Output = Done> + 'a>>;
@@ -160,6 +165,14 @@ pub fn start(backend: &Backend, root: String, epoch: u64, req: Req, read_cap: us
                     Err(e) => Err(to(e)),
                 };
                 Done::Read { epoch, id, res }
+            }
+            Req::Diff { id, spec, reload } => {
+                let r = tokio::time::timeout(LOAD_TIMEOUT, backend.file_diff(&root, &id, &spec)).await;
+                let res = match r {
+                    Ok(r) => r.map_err(|e| e.to_string()),
+                    Err(e) => Err(to(e)),
+                };
+                Done::Diff { epoch, id, reload, res }
             }
         }
     })
@@ -221,6 +234,9 @@ pub struct VRow {
     pub size: Option<u64>,
     pub mtime: Option<i64>,
     pub mark: Option<GitMark>,
+    /// Staged and unstaged halves of the mark (the status `X` and `Y` columns).
+    pub staged: Option<GitMark>,
+    pub unstaged: Option<GitMark>,
     /// A folder with a changed file somewhere inside.
     pub dirty: bool,
     /// Folder the notice belongs to (empty for the root).
@@ -236,6 +252,8 @@ pub enum DState {
     Loading,
     Lines(Vec<Line<'static>>),
     File(Box<Preview>),
+    /// The diff viewer (a changed file shows this by default).
+    Diff(Box<DiffView>),
     Error(String),
 }
 
@@ -297,6 +315,8 @@ pub struct ExplorerState {
     listed: HashSet<String>,
     /// Files that changed or appeared after their folder was first listed.
     changed_ids: HashSet<String>,
+    /// Changed files the user switched from the diff to the file content with `D`.
+    content_ids: HashSet<String>,
 }
 
 fn keep_order<T>(_: &Node<T>, _: &Node<T>) -> std::cmp::Ordering {
@@ -317,7 +337,7 @@ fn columns(sort: SortKey, desc: bool) -> Vec<Column> {
         Column::new(title("SIZE", SortKey::Size), Width::Min(7)).right(),
         Column::new(title("MODIFIED", SortKey::Modified), Width::Min(10)).right(),
         Column::new(" ", Width::Fixed(1)),
-        Column::new(" ", Width::Fixed(1)),
+        Column::new(" ", Width::Fixed(2)),
     ]
 }
 
@@ -389,6 +409,7 @@ impl ExplorerState {
             baseline: HashMap::new(),
             listed: HashSet::new(),
             changed_ids: HashSet::new(),
+            content_ids: HashSet::new(),
         };
         s.rebuild();
         s
@@ -441,8 +462,33 @@ impl ExplorerState {
                 let marks = res.ok().flatten();
                 self.set_marks(marks);
                 self.rebuild();
+                self.recheck_detail();
             }
-            Done::Read { epoch, id, res } if epoch == self.epoch && id == self.detail_for => {
+            Done::Diff { epoch, id, reload, res } if epoch == self.epoch && id == self.detail_for => {
+                let old = match std::mem::replace(&mut self.detail, DState::Empty) {
+                    DState::Diff(v) => Some(v),
+                    other => {
+                        self.detail = other;
+                        None
+                    }
+                };
+                match res {
+                    Err(e) => self.detail = DState::Error(e),
+                    Ok(data) => {
+                        let mut v = DiffView::new(&id, data);
+                        match old {
+                            Some(o) => v.carry_over(&o, self.detail_body_h()),
+                            None => self.detail_top = 0,
+                        }
+                        self.detail = DState::Diff(Box::new(v));
+                        if reload {
+                            self.message = Some(("diff refreshed".into(), false));
+                        }
+                        self.recheck_detail();
+                    }
+                }
+            }
+            Done::Read { epoch, id, res } if epoch == self.epoch && id == self.detail_for && !self.want_diff(&id) => {
                 self.detail_top = 0;
                 self.detail = match res {
                     Err(e) => DState::Error(e),
@@ -607,6 +653,8 @@ impl ExplorerState {
                     size: n.payload.size,
                     mtime: n.payload.mtime,
                     mark: self.mark_of(&n.id),
+                    staged: self.split_of(&n.id).0,
+                    unstaged: self.split_of(&n.id).1,
                     dirty: n.is_dir && self.dirty_dir(&n.id),
                     parent: parent_of(&n.id).to_string(),
                     new: !n.is_dir && self.changed_ids.contains(&n.id),
@@ -666,6 +714,8 @@ impl ExplorerState {
             size: None,
             mtime: None,
             mark: None,
+            staged: None,
+            unstaged: None,
             dirty: false,
             parent,
             new: false,
@@ -760,8 +810,89 @@ impl ExplorerState {
                 self.want_dir(&id);
             }
         } else {
-            self.queue.retain(|r| !matches!(r, Req::Read(_)));
-            self.queue.push(Req::Read(id));
+            self.request_file_detail(id);
+        }
+    }
+
+    /// Queue what the detail pane shows for a file: its diff when it has git changes (and the
+    /// user has not switched to the content with `D`), else its content.
+    fn request_file_detail(&mut self, id: String) {
+        self.queue.retain(|r| !matches!(r, Req::Read(_) | Req::Diff { reload: false, .. }));
+        match self.want_diff(&id).then(|| self.diff_spec(&id)).flatten() {
+            Some(spec) => self.queue.push(Req::Diff { id, spec, reload: false }),
+            None => self.queue.push(Req::Read(id)),
+        }
+    }
+
+    fn split_of(&self, id: &str) -> (Option<GitMark>, Option<GitMark>) {
+        let Some(m) = self.marks.as_ref() else { return (None, None) };
+        m.split.get(&self.mark_key(id)).copied().unwrap_or((None, None))
+    }
+
+    /// What to ask git for this file's diff, from its status mark (None: no changes known).
+    fn diff_spec(&self, id: &str) -> Option<DiffSpec> {
+        self.mark_of(id)?;
+        let (st, un) = self.split_of(id);
+        if st.is_none() && un.is_none() {
+            return None;
+        }
+        let orig = self.marks.as_ref().and_then(|m| m.renamed_from.get(&self.mark_key(id)).cloned());
+        Some(DiffSpec { staged: st.is_some(), unstaged: un.is_some_and(|m| m != GitMark::Untracked), untracked: un == Some(GitMark::Untracked), orig })
+    }
+
+    /// A changed file opens to its diff unless the user chose its content.
+    fn want_diff(&self, id: &str) -> bool {
+        !self.content_ids.contains(id) && self.diff_spec(id).is_some() && self.entry(id).is_some_and(|n| !n.is_dir)
+    }
+
+    /// The git marks arrived or changed: make the detail pane match (diff for a changed file).
+    fn recheck_detail(&mut self) {
+        let id = self.detail_for.clone();
+        if id.is_empty() || self.entry(&id).is_none_or(|n| n.is_dir) {
+            return;
+        }
+        let want = self.want_diff(&id);
+        let is_diff = matches!(self.detail, DState::Diff(_));
+        // The sides on screen no longer match the status (a `git add` since the diff was read).
+        if want && let DState::Diff(v) = &self.detail && let Some(spec) = self.diff_spec(&id) {
+            let stale = v.staged.is_some() != spec.staged || v.unstaged.is_some() != (spec.unstaged || spec.untracked);
+            if stale && !self.queue.iter().any(|r| matches!(r, Req::Diff { .. })) {
+                self.queue.push(Req::Diff { id, spec, reload: true });
+            }
+            return;
+        }
+        if want == is_diff || matches!(self.detail, DState::Error(_)) && !want {
+            return;
+        }
+        // A diff queued from older marks is replaced by one built from these.
+        self.queue.retain(|r| !matches!(r, Req::Diff { reload: false, .. }));
+        if want && self.queue.iter().any(|r| matches!(r, Req::Diff { .. })) {
+            return;
+        }
+        if !matches!(self.detail, DState::Loading) {
+            self.detail = DState::Loading;
+            self.detail_top = 0;
+        }
+        self.request_file_detail(id);
+    }
+
+    /// The file whose diff is on screen (absolute), for the auto-refresh stat poll.
+    pub fn diff_watch_path(&self) -> Option<String> {
+        (matches!(self.detail, DState::Diff(_)) && !self.detail_for.is_empty()).then(|| self.abs(&self.detail_for))
+    }
+
+    /// The file changed on disk: read its diff again (and the marks), keeping scroll and hunk.
+    pub fn reload_diff(&mut self) {
+        if !matches!(self.detail, DState::Diff(_)) {
+            return;
+        }
+        let id = self.detail_for.clone();
+        if let Some(spec) = self.diff_spec(&id) {
+            self.queue.retain(|r| !matches!(r, Req::Diff { reload: true, .. }));
+            self.queue.push(Req::Diff { id, spec, reload: true });
+        }
+        if !self.queue.contains(&Req::Marks) {
+            self.queue.push(Req::Marks);
         }
     }
 
@@ -885,6 +1016,10 @@ impl ExplorerState {
         if let DState::Lines(l) = &self.detail {
             self.detail_top = self.detail_top.min(l.len().saturating_sub(lines_h.max(1)));
         }
+        if let DState::Diff(v) = &mut self.detail {
+            let m = v.max_top(h.max(1));
+            v.top = v.top.min(m);
+        }
     }
 
     // ---- scrolling the detail
@@ -892,6 +1027,7 @@ impl ExplorerState {
     fn detail_len(&self) -> usize {
         match &self.detail {
             DState::File(p) => p.display_len(),
+            DState::Diff(v) => v.len(),
             DState::Lines(l) => l.len(),
             _ => 0,
         }
@@ -909,6 +1045,10 @@ impl ExplorerState {
         let max = self.detail_len().saturating_sub(self.detail_body_h()) as isize;
         match &mut self.detail {
             DState::File(p) => p.top = (p.top as isize + delta).clamp(0, max) as usize,
+            DState::Diff(v) => {
+                let h = self.detail_h.max(1);
+                v.scroll(delta, h);
+            }
             DState::Lines(_) => self.detail_top = (self.detail_top as isize + delta).clamp(0, max) as usize,
             _ => {}
         }
@@ -918,6 +1058,7 @@ impl ExplorerState {
     pub fn detail_pos(&self) -> usize {
         match &self.detail {
             DState::File(p) => p.top,
+            DState::Diff(v) => v.top,
             _ => self.detail_top,
         }
     }
@@ -1003,6 +1144,11 @@ impl ExplorerState {
                 }
             }
             Ek::Up | Ek::Down | Ek::PgUp | Ek::PgDn | Ek::Home | Ek::End => return self.nav(k),
+            Ek::Tab if self.focus_detail && matches!(&self.detail, DState::Diff(v) if v.has_both()) => {
+                if let DState::Diff(v) = &mut self.detail {
+                    v.switch_side();
+                }
+            }
             Ek::Tab => {
                 self.focus_detail = !self.focus_detail && self.lay.single.is_none();
                 self.entered = None;
@@ -1043,7 +1189,7 @@ impl ExplorerState {
                     // The first Enter stays here: the detail pane takes the keys (scroll with the arrows).
                     self.entered = Some(r.id.clone());
                     self.focus_detail = true;
-                    self.message = Some(("Enter again or O opens it in the preview pane · Esc back to the tree".into(), false));
+                    self.message = Some(("Enter again or O opens it in the preview · D diff/file · Esc back".into(), false));
                 }
             }
             Ek::Char(' ') => {
@@ -1088,11 +1234,35 @@ impl ExplorerState {
         None
     }
 
-    /// Plain-letter commands. The command letters are `Q J K F H G S R C P T A O E M`; any other
+    /// Plain-letter commands. The command letters are `Q J K F H G S R C P T A O E M D`; any other
     /// letter, digit, `.`, `_` or `-` starts the find filter with that character already typed.
     fn letter(&mut self, typed: char) -> Option<Act> {
         let c = typed.to_ascii_lowercase();
+        // With the diff focused, N and P step between hunks.
+        if self.focus_detail && matches!(c, 'n' | 'p') && matches!(self.detail, DState::Diff(_)) {
+            let h = self.detail_h.max(1);
+            if let DState::Diff(v) = &mut self.detail {
+                v.jump(c == 'n', h);
+            }
+            return None;
+        }
         match c {
+            'd' => {
+                let id = self.cur_id().filter(|_| self.selected().is_some_and(|r| r.kind == RowKind::Node))?;
+                if self.entry(&id).is_some_and(|n| n.is_dir) {
+                    self.message = Some(("D shows the changes of a file; select a file".into(), true));
+                } else if self.diff_spec(&id).is_none() {
+                    self.message = Some(("no git changes in this file".into(), true));
+                } else {
+                    let content = !self.content_ids.remove(&id);
+                    if content {
+                        self.content_ids.insert(id);
+                    }
+                    self.detail_for = String::new();
+                    self.update_detail();
+                    self.message = Some((if content { "showing the file (D for the diff)" } else { "showing the diff (D for the file)" }.into(), false));
+                }
+            }
             'q' => return Some(Act::Leave),
             'j' => self.scroll_detail(1),
             'k' => self.scroll_detail(-1),
@@ -1622,8 +1792,8 @@ mod tests {
         s.key(Ek::Char('1'));
         assert_eq!(s.filter.as_ref().unwrap().text, "1");
         s.key(Ek::Esc);
-        s.key(Ek::Char('D'));
-        assert_eq!(s.filter.as_ref().unwrap().text, "D");
+        s.key(Ek::Char('B'));
+        assert_eq!(s.filter.as_ref().unwrap().text, "B");
         // F still opens an empty prompt
         s.key(Ek::Esc);
         s.key(Ek::Char('f'));
@@ -1780,5 +1950,87 @@ mod tests {
         assert!(s.focus_detail);
         s.key(Ek::Esc);
         assert!(!s.focus_detail);
+    }
+
+    fn split_marks(m: &mut GitMarks, path: &str, st: Option<GitMark>, un: Option<GitMark>) {
+        m.split.insert(path.into(), (st, un));
+    }
+
+    fn diff_data(path: &str, both: bool) -> DiffData {
+        let f = crate::gitdiff::parse_diff(&format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-a\n+b\n"), false).remove(0);
+        DiffData { staged: both.then(|| f.clone()), unstaged: Some(f) }
+    }
+
+    #[test]
+    fn changed_file_opens_to_its_diff_and_d_toggles() {
+        let mut s = loaded();
+        let mut m = marks(&[("alpha.md", GitMark::Modified)]);
+        split_marks(&mut m, "alpha.md", Some(GitMark::Modified), Some(GitMark::Modified));
+        s.apply(Done::Marks { epoch: 0, res: Ok(Some(m)) });
+        s.queue.clear();
+        // select alpha.md (third row)
+        s.key(Ek::Down);
+        s.key(Ek::Down);
+        assert_eq!(s.cur_id().as_deref(), Some("alpha.md"));
+        let spec = DiffSpec { staged: true, unstaged: true, untracked: false, orig: None };
+        s.queue.retain(|r| !matches!(r, Req::Dir(_)));
+        assert_eq!(s.queue, vec![Req::Diff { id: "alpha.md".into(), spec, reload: false }]);
+        s.apply(Done::Diff { epoch: 0, id: "alpha.md".into(), reload: false, res: Ok(diff_data("alpha.md", true)) });
+        assert!(matches!(s.detail, DState::Diff(_)));
+        assert_eq!(s.diff_watch_path().as_deref(), Some("/p/alpha.md"));
+        // Tab switches sides only with the detail focused
+        s.focus_detail = true;
+        s.key(Ek::Tab);
+        assert!(s.focus_detail);
+        assert!(matches!(&s.detail, DState::Diff(v) if v.side == crate::gitdiff::Side::Staged));
+        // N moves nothing harmful, Esc leaves the detail
+        s.key(Ek::Char('n'));
+        s.key(Ek::Esc);
+        assert!(!s.focus_detail);
+        // D shows the content, D again the diff
+        s.queue.clear();
+        s.key(Ek::Char('d'));
+        assert_eq!(s.queue, vec![Req::Read("alpha.md".into())]);
+        s.key(Ek::Char('D'));
+        assert!(matches!(s.queue[..], [Req::Diff { reload: false, .. }]));
+        // a file without changes says so
+        s.key(Ek::Down);
+        s.key(Ek::Char('d'));
+        assert!(s.message.as_ref().is_some_and(|m| m.0.contains("no git changes")));
+    }
+
+    #[test]
+    fn marks_arriving_late_turn_a_pending_read_into_a_diff() {
+        let mut s = loaded();
+        s.key(Ek::Down);
+        s.key(Ek::Down);
+        assert!(s.queue.contains(&Req::Read("alpha.md".into())));
+        let mut m = marks(&[("alpha.md", GitMark::Modified)]);
+        split_marks(&mut m, "alpha.md", None, Some(GitMark::Modified));
+        s.apply(Done::Marks { epoch: 0, res: Ok(Some(m)) });
+        assert!(!s.queue.iter().any(|r| matches!(r, Req::Read(_))));
+        assert!(s.queue.iter().any(|r| matches!(r, Req::Diff { .. })));
+        // a stale content read finishing now must not replace the diff request
+        s.apply(Done::Read { epoch: 0, id: "alpha.md".into(), res: Ok((b"x".to_vec(), 1)) });
+        assert!(matches!(s.detail, DState::Loading));
+    }
+
+    #[test]
+    fn reload_keeps_position_and_untracked_has_no_staged_side() {
+        let mut s = loaded();
+        let mut m = marks(&[("alpha.md", GitMark::Untracked)]);
+        split_marks(&mut m, "alpha.md", None, Some(GitMark::Untracked));
+        s.apply(Done::Marks { epoch: 0, res: Ok(Some(m)) });
+        s.key(Ek::Down);
+        s.key(Ek::Down);
+        assert!(s.queue.iter().any(|r| matches!(r, Req::Diff { spec, .. } if spec.untracked && !spec.staged && !spec.unstaged)));
+        s.apply(Done::Diff { epoch: 0, id: "alpha.md".into(), reload: false, res: Ok(diff_data("alpha.md", false)) });
+        s.queue.clear();
+        s.reload_diff();
+        assert!(s.queue.iter().any(|r| matches!(r, Req::Diff { reload: true, .. })));
+        assert!(s.queue.contains(&Req::Marks));
+        s.apply(Done::Diff { epoch: 0, id: "alpha.md".into(), reload: true, res: Ok(diff_data("alpha.md", false)) });
+        assert!(matches!(s.detail, DState::Diff(_)));
+        assert_eq!(s.message.as_ref().map(|m| m.0.as_str()), Some("diff refreshed"));
     }
 }
