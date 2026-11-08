@@ -110,6 +110,8 @@ the kit so the whole app looks like the reference.
 E1 and E2 are independent (pure logic), so two agents build them in parallel; one agent then
 integrates E3 to E5. About 1 to 1.5 days of agent work end to end.
 
+Git diffs in the explorer (a changed file opens to its diff, `D` toggles) are specified in `06-git-diff.md` (phase 1 built).
+
 ## 6. Open questions (my defaults in brackets)
 
 1. **Enter on a file**: decided: the first Enter stays and focuses the detail pane, the second

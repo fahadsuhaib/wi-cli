@@ -183,6 +183,11 @@ pub fn format_mark(m: GitMark) -> char {
 pub struct GitMarks {
     /// Paths relative to the repository root, as git prints them.
     pub marks: HashMap<String, GitMark>,
+    /// The staged (index) and unstaged (work tree) halves of each mark, from the `X` and `Y`
+    /// columns of the status line. A conflict or untracked file is only in the unstaged half.
+    pub split: HashMap<String, (Option<GitMark>, Option<GitMark>)>,
+    /// Staged renames: new path -> original path (both relative to the repository root).
+    pub renamed_from: HashMap<String, String>,
     /// Every ancestor directory (relative, no trailing slash) of a changed path.
     pub dirty_dirs: HashSet<String>,
     pub branch: Option<String>,
@@ -205,16 +210,35 @@ fn classify(x: u8, y: u8) -> Option<GitMark> {
     })
 }
 
+/// One half of a status mark: the `X` (index) or `Y` (work tree) column on its own.
+fn half(c: u8) -> Option<GitMark> {
+    match c {
+        b'R' | b'C' => Some(GitMark::Renamed),
+        b'D' => Some(GitMark::Deleted),
+        b'A' => Some(GitMark::Added),
+        b'M' | b'T' => Some(GitMark::Modified),
+        _ => None,
+    }
+}
+
+type Split = HashMap<String, (Option<GitMark>, Option<GitMark>)>;
+
+pub struct Parsed {
+    pub marks: HashMap<String, GitMark>,
+    pub dirty: HashSet<String>,
+    pub split: Split,
+    pub renamed_from: HashMap<String, String>,
+}
+
 /// Parse `git status --porcelain=v1 -z` output. Each entry is `XY path`, and a rename or copy
-/// is followed by a field holding the original path (skipped). With `truncated`, the last
-/// field may be cut short and is dropped. Returns the marks and the (relative) dirty folders.
-pub fn parse_porcelain_z(data: &[u8], truncated: bool) -> (HashMap<String, GitMark>, HashSet<String>) {
+/// is followed by a field holding the original path. With `truncated`, the last field may be
+/// cut short and is dropped.
+pub fn parse_porcelain_full(data: &[u8], truncated: bool) -> Parsed {
     let mut fields: Vec<&[u8]> = data.split(|&b| b == 0).collect();
     // A well-formed stream ends with NUL, leaving an empty last piece. Anything else is a cut.
     // With `truncated` that piece may be a cut field; either way it is dropped.
     let _ = (fields.pop(), truncated);
-    let mut marks = HashMap::new();
-    let mut dirty = HashSet::new();
+    let mut p = Parsed { marks: HashMap::new(), dirty: HashSet::new(), split: HashMap::new(), renamed_from: HashMap::new() };
     let mut it = fields.into_iter();
     while let Some(f) = it.next() {
         if f.len() < 4 || f[2] != b' ' {
@@ -222,20 +246,35 @@ pub fn parse_porcelain_z(data: &[u8], truncated: bool) -> (HashMap<String, GitMa
         }
         let (x, y) = (f[0], f[1]);
         let path = String::from_utf8_lossy(&f[3..]).into_owned();
+        let mut orig = None;
         if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') {
-            it.next(); // original path
+            orig = it.next().map(|o| String::from_utf8_lossy(o).into_owned()); // original path
         }
         let Some(mark) = classify(x, y) else { continue };
         if mark != GitMark::Ignored {
             let mut end = path.len();
             while let Some(i) = path[..end].rfind('/') {
-                dirty.insert(path[..i].to_string());
+                p.dirty.insert(path[..i].to_string());
                 end = i;
             }
+            let halves = match mark {
+                GitMark::Untracked | GitMark::Conflict => (None, Some(mark)),
+                _ => (half(x), half(y)),
+            };
+            p.split.insert(path.clone(), halves);
+            if matches!(x, b'R' | b'C') && let Some(o) = orig {
+                p.renamed_from.insert(path.clone(), o);
+            }
         }
-        marks.insert(path, mark);
+        p.marks.insert(path, mark);
     }
-    (marks, dirty)
+    p
+}
+
+#[cfg(test)]
+pub fn parse_porcelain_z(data: &[u8], truncated: bool) -> (HashMap<String, GitMark>, HashSet<String>) {
+    let p = parse_porcelain_full(data, truncated);
+    (p.marks, p.dirty)
 }
 
 /// Parse what `git_marks` runs: line 1 the repo root, line 2 the branch, the rest status -z.
@@ -247,8 +286,8 @@ pub fn parse_git_output(stdout: &[u8], truncated: bool) -> Option<GitMarks> {
         return None;
     }
     let branch = String::from_utf8_lossy(&stdout[nl1 + 1..nl2]).trim().to_string();
-    let (marks, dirty_dirs) = parse_porcelain_z(&stdout[nl2 + 1..], truncated);
-    Some(GitMarks { marks, dirty_dirs, branch: (!branch.is_empty()).then_some(branch), repo_root, truncated })
+    let p = parse_porcelain_full(&stdout[nl2 + 1..], truncated);
+    Some(GitMarks { marks: p.marks, split: p.split, renamed_from: p.renamed_from, dirty_dirs: p.dirty, branch: (!branch.is_empty()).then_some(branch), repo_root, truncated })
 }
 
 impl Backend {
@@ -594,5 +633,19 @@ mod tests {
         assert_eq!(g.branch, None);
         assert!(parse_git_output(b"", false).is_none());
         assert!(parse_git_output(b"\n\n", false).is_none());
+    }
+
+    #[test]
+    fn staged_and_unstaged_halves_are_kept() {
+        let p = parse_porcelain_full(b"MM a\0A  b\0 M c\0?? d\0R  new\0old\0UU e\0 D f\0", false);
+        assert_eq!(p.split["a"], (Some(GitMark::Modified), Some(GitMark::Modified)));
+        assert_eq!(p.split["b"], (Some(GitMark::Added), None));
+        assert_eq!(p.split["c"], (None, Some(GitMark::Modified)));
+        assert_eq!(p.split["d"], (None, Some(GitMark::Untracked)));
+        assert_eq!(p.split["new"], (Some(GitMark::Renamed), None));
+        assert_eq!(p.renamed_from["new"], "old");
+        assert_eq!(p.split["e"], (None, Some(GitMark::Conflict)));
+        assert_eq!(p.split["f"], (None, Some(GitMark::Deleted)));
+        assert_eq!(p.marks["a"], GitMark::Modified);
     }
 }

@@ -559,9 +559,14 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
         }
         let due = last_draw + frame;
         // Polling runs only while a file preview is on screen; an idle wi with none has no timer.
-        let vis = if refresh_on { visible_files(&app) } else { Vec::new() };
+        let mut vis = if refresh_on { visible_files(&app) } else { Vec::new() };
+        // A diff open in the explorer is watched through the file it shows (no git polling).
+        let ex_diff = match &mode { Mode::Explorer(ex) if refresh_on => ex.diff_watch_path(), _ => None };
+        if let Some(p) = &ex_diff && !vis.contains(p) {
+            vis.push(p.clone());
+        }
         if refresh_on && !watches.is_empty() {
-            watches.retain(|k, _| app.tabs.iter().any(|t| t.preview.iter().chain(t.side.iter()).any(|p| &p.path == k)));
+            watches.retain(|k, _| ex_diff.as_ref() == Some(k) || app.tabs.iter().any(|t| t.preview.iter().chain(t.side.iter()).any(|p| &p.path == k)));
         }
         if vis.is_empty() { rjob = None; }
         if decoder.alt_enter_seen && !agent_state.newline_hint_seen {
@@ -620,7 +625,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         for (path, obs) in v {
                             let w = watches.entry(path.clone()).or_insert_with(|| crate::refresh::Watch::new(refresh_debounce));
                             match w.observe(now, obs) {
-                                crate::refresh::Step::Reload => to_read.push(path),
+                                crate::refresh::Step::Reload => {
+                                    let mut is_diff = false;
+                                    if let Mode::Explorer(ex) = &mut mode && ex.diff_watch_path().as_deref() == Some(path.as_str()) {
+                                        ex.reload_diff();
+                                        is_diff = true;
+                                        dirty = true;
+                                    }
+                                    let shown = app.tabs.iter().any(|t| t.preview.iter().chain(t.side.iter()).any(|p| p.path == path && !matches!(p.kind, crate::preview::Kind::Diff | crate::preview::Kind::Stub)));
+                                    if shown || !is_diff { to_read.push(path); }
+                                }
                                 crate::refresh::Step::Removed => {
                                     message = Some("file removed".into());
                                     note = Some((now + Duration::from_secs(4), "file removed".into()));

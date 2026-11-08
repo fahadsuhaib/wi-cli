@@ -227,6 +227,8 @@ def main():
     check("modified file carries the M mark", r.scr.buffer[ymain][47].data == "M" and r.fg(47, ymain) == WARN)
     r.send(b"\x1b[C\x1b[C", 0.8)
     check("Right twice selects main.rs; detail shows its code with line numbers", "main.rs" in (r.sel_name() or "") and re.search(r"\b1\s+fn main", r.right()) is not None and "hello explorer" in r.right())
+    check("a changed file opens to its diff (header: path, side, counts)", re.search(r"src/main\.rs · diff unstaged · \+1 -0", r.right()) is not None)
+    r.send(b"d", 1.0)
     check("detail Source line: path, size, time, git word", re.search(r"Source: src/main\.rs · \d+ B · modified (just now|\dm ago) · modified", r.right()) is not None)
     r.send(b"\x1b[D", 0.3)
     check("Left from a child jumps to the folder", re.search(r"▾ src", r.sel_name() or "") is not None)

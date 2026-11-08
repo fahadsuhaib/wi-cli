@@ -394,6 +394,22 @@ pub fn blend(fg: Color, bg: Color) -> Color {
     }
 }
 
+/// A faint background for a diff line: `accent` (diff add / remove / hunk colour) mixed into the
+/// canvas at `pct` percent. None when either colour is not a plain RGB value.
+pub fn diff_tint(accent: Color, bg: Color, pct: u32) -> Option<Color> {
+    match (accent, bg) {
+        (Color::Rgb(a, b, c), Color::Rgb(x, y, z)) => {
+            let m = |f: u8, g: u8| ((f as u32 * pct + g as u32 * (100 - pct)) / 100) as u8;
+            Some(Color::Rgb(m(a, x), m(b, y), m(c, z)))
+        }
+        _ => None,
+    }
+}
+
+/// Percentages used by the diff viewer for added/removed lines and the hunk header row.
+pub const DIFF_LINE_TINT: u32 = 20;
+pub const DIFF_HUNK_TINT: u32 = 14;
+
 pub fn ansi_remap() -> bool {
     ANSI_REMAP.load(Ordering::Relaxed)
 }
@@ -664,6 +680,31 @@ mod tests {
                 let r = contrast(fg, bg);
                 assert!(r >= need(&t), "{} {name}: contrast {r:.2} < {}", k.name, need(&t));
             }
+        }
+    }
+
+    #[test]
+    fn diff_viewer_colours_are_readable_in_every_theme() {
+        for t in ALL {
+            let add = diff_tint(t.diff_add, t.bg, DIFF_LINE_TINT).unwrap();
+            let del = diff_tint(t.diff_remove, t.bg, DIFF_LINE_TINT).unwrap();
+            let hunk = diff_tint(t.diff_hunk, t.bg, DIFF_HUNK_TINT).unwrap();
+            for (name, fg, bg, min) in [
+                ("text on added line", t.fg, add, need(&t)),
+                ("text on removed line", t.fg, del, need(&t)),
+                ("sign on added line", t.diff_add, add, 3.0),
+                ("sign on removed line", t.diff_remove, del, 3.0),
+                ("hunk header", t.diff_hunk, hunk, 3.0),
+                ("line numbers on added line", t.gutter, add, 3.0),
+                ("line numbers on removed line", t.gutter, del, 3.0),
+                ("dim on added line", t.dim, add, 3.0),
+            ] {
+                let r = contrast(fg, bg);
+                assert!(r >= min, "{} {name}: contrast {r:.2} < {min}", t.name);
+            }
+            // The two tints must look different from the canvas and from each other.
+            assert!(contrast(add, t.bg) >= 1.03 || contrast(del, t.bg) >= 1.03, "{} tints vanish", t.name);
+            assert_ne!(add, del, "{} add and remove tints are equal", t.name);
         }
     }
 
