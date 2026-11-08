@@ -1,6 +1,6 @@
 [package]
 name = "wicli"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2024"
 description = "A terminal workspace for AI coding agents (Claude Code, Codex): tabs, previews, file explorer, local or over SSH"
 license = "MIT"
