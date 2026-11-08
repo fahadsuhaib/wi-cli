@@ -60,7 +60,7 @@ wi supports macOS and Linux.
 ## All features
 
 - Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet)
-- Previews: text, markdown, CSV/TSV, JSON, binary stub; git changes and diffs; in the explorer a changed file opens to its own read-only diff (staged and unstaged, hunk jumps, auto-refresh)
+- Previews: text, markdown (mermaid blocks drawn as text diagrams: flowchart, sequence, class, state, ER, pie, gantt and more; `D` shows the source), CSV/TSV, JSON, binary stub; git changes and diffs; in the explorer a changed file opens to its own read-only diff (staged and unstaged, hunk jumps, auto-refresh)
 - Recent files: every file you preview is remembered per workspace (also across restarts). Press H in a preview, or menu then Space and type "recent", to pick one again; the full path of the shown file is always on the first row of the preview
 - Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste; the "Preview a file" and folder prompts are real line editors (a visible cursor, Left/Right/Home/End, Backspace/Delete, Ctrl-U, paste inserts at the cursor, Tab completes)
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
@@ -100,7 +100,7 @@ Scrolled back (wheel up, or S): arrows, PgUp/PgDn, Home/End scroll, Esc leaves; 
 
 In a shell or agent tab Alt+Left/Right (also Ctrl+Left/Right) move by word; wi's own text fields accept them and Alt+Backspace.
 
-Inside a preview: arrows and PgUp/PgDn scroll, F find, W wrap, M markdown source, R reload, H recent files, Esc back, Q close.
+Inside a preview: arrows and PgUp/PgDn scroll, F find, W wrap, M markdown source, D mermaid diagrams or their source, R reload, H recent files, Esc back, Q close.
 
 ## Pinned panes (tabs side by side)
 

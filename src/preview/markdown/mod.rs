@@ -1,15 +1,34 @@
 //! Rendered markdown: a parsed document laid out for a given pane width. The renderer does all
 //! its own wrapping (hanging indents for lists and quotes, panels for code, boxes for tables).
 
+mod mermaid;
 mod parse;
 
 pub use parse::{Doc, parse};
+
+/// True while a mermaid diagram is being drawn under `catch_unwind` (the panic hook stays quiet).
+/// Whether the document has a mermaid block anywhere (so `D` means something).
+pub fn has_mermaid(doc: &Doc) -> bool {
+    fn any(nodes: &[Node]) -> bool {
+        nodes.iter().any(|n| match &n.block {
+            Block::Code { lang, .. } => mermaid::is_mermaid(lang),
+            Block::Quote(inner) => any(inner),
+            Block::List { items, .. } => items.iter().any(|i| any(&i.blocks)),
+            _ => false,
+        })
+    }
+    any(&doc.nodes)
+}
+
+pub fn mermaid_guard_active() -> bool {
+    mermaid::in_guard()
+}
 use parse::{Block, Fl, Inl, Inlines, Item, Node};
 use crate::theme::theme;
 use pulldown_cmark::Alignment;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 type Cell = (char, Style);
 type Row = Vec<Span<'static>>;
@@ -171,10 +190,10 @@ fn pad(n: usize) -> Span<'static> {
     Span::raw(" ".repeat(n))
 }
 
-fn seq(nodes: &[Node], w: usize, depth: usize, base: Style, gap: bool) -> Vec<Row> {
+fn seq(nodes: &[Node], w: usize, depth: usize, base: Style, gap: bool, dg: bool) -> Vec<Row> {
     let mut out: Vec<Row> = Vec::new();
     for n in nodes {
-        let r = block_rows(&n.block, w, depth, base);
+        let r = block_rows(&n.block, w, depth, base, dg);
         if r.is_empty() {
             continue;
         }
@@ -190,7 +209,7 @@ fn rule_row(ch: char, w: usize, color: ratatui::style::Color) -> Row {
     vec![Span::styled(ch.to_string().repeat(w), Style::default().fg(color))]
 }
 
-fn block_rows(b: &Block, w: usize, depth: usize, base: Style) -> Vec<Row> {
+fn block_rows(b: &Block, w: usize, depth: usize, base: Style, dg: bool) -> Vec<Row> {
     let t = theme();
     match b {
         Block::Heading(level, inl) => {
@@ -217,11 +236,12 @@ fn block_rows(b: &Block, w: usize, depth: usize, base: Style) -> Vec<Row> {
         Block::Para(inl) | Block::Text(inl) => wrap_rows(inl, w, base),
         Block::Rule => vec![rule_row('─', w, t.md_rule)],
         Block::Quote(nodes) => {
-            let inner = seq(nodes, w.saturating_sub(2).max(1), depth, base.fg(t.md_quote), true);
+            let inner = seq(nodes, w.saturating_sub(2).max(1), depth, base.fg(t.md_quote), true, dg);
             let bar = Span::styled("▌ ", Style::default().fg(t.md_quote_bar));
             indent(inner, bar.clone(), bar, true)
         }
-        Block::List { start, items, loose } => list_rows(*start, items, *loose, w, depth, base),
+        Block::List { start, items, loose } => list_rows(*start, items, *loose, w, depth, base, dg),
+        Block::Code { lang, text } if dg && mermaid::is_mermaid(lang) => mermaid_rows(lang, text, w),
         Block::Code { lang, text } => code_rows(lang, text, w),
         Block::Table { align, rows } => table_rows(align, rows, w, base),
         Block::Html(s) => {
@@ -240,7 +260,7 @@ fn block_rows(b: &Block, w: usize, depth: usize, base: Style) -> Vec<Row> {
     }
 }
 
-fn list_rows(start: Option<u64>, items: &[Item], loose: bool, w: usize, depth: usize, base: Style) -> Vec<Row> {
+fn list_rows(start: Option<u64>, items: &[Item], loose: bool, w: usize, depth: usize, base: Style, dg: bool) -> Vec<Row> {
     let t = theme();
     let last = start.map(|s| s + items.len().saturating_sub(1) as u64);
     let digits = last.map(|n| n.to_string().len()).unwrap_or(0);
@@ -255,7 +275,7 @@ fn list_rows(start: Option<u64>, items: &[Item], loose: bool, w: usize, depth: u
             },
         };
         let mw: usize = marker.chars().map(cw).sum();
-        let inner = seq(&it.blocks, w.saturating_sub(mw).max(1), depth + 1, base, loose);
+        let inner = seq(&it.blocks, w.saturating_sub(mw).max(1), depth + 1, base, loose, dg);
         let rows = if inner.is_empty() { vec![Vec::new()] } else { inner };
         if loose && !out.is_empty() {
             out.push(Vec::new());
@@ -296,6 +316,37 @@ fn code_rows(lang: &str, text: &str, w: usize) -> Vec<Row> {
         }
     }
     out
+}
+
+/// A mermaid block as a bordered text diagram, or its source plus a dim note when it cannot be drawn.
+fn mermaid_rows(lang: &str, text: &str, w: usize) -> Vec<Row> {
+    let t = theme();
+    match mermaid::render(text, w) {
+        Ok(d) => {
+            let dim = Style::default().fg(t.dim);
+            let content = d.lines.iter().map(|l| l.width()).max().unwrap_or(0);
+            let title = format!(" mermaid · {} ", d.title);
+            let inner = (content + 2).max(title.width() + 2);
+            let mut out: Vec<Row> = Vec::new();
+            out.push(vec![Span::styled(format!("╭─{title}{}╮", "─".repeat(inner.saturating_sub(title.width() + 1))), dim)]);
+            for l in &d.lines {
+                let fill = inner.saturating_sub(l.width() + 1);
+                out.push(vec![
+                    Span::styled("│ ", dim),
+                    Span::raw(l.clone()),
+                    Span::styled(format!("{}│", " ".repeat(fill)), dim),
+                ]);
+            }
+            out.push(vec![Span::styled(format!("╰{}╯", "─".repeat(inner)), dim)]);
+            out
+        }
+        Err(why) => {
+            let mut out = code_rows(lang, text, w);
+            let note = vec![Inl::Text(format!("mermaid: not rendered ({why})"), Fl { dim: true, ..Fl::default() })];
+            out.extend(wrap_rows(&note, w, Style::default()));
+            out
+        }
+    }
 }
 
 fn flat_width(inl: &[Inl]) -> usize {
@@ -399,6 +450,11 @@ fn front_rows(lines: &[String], w: usize) -> Vec<Row> {
 
 /// Lay the document out for a pane `width` columns wide.
 pub fn render(doc: &Doc, width: usize) -> Rendered {
+    render_with(doc, width, true)
+}
+
+/// Like [`render`]; `diagrams` false shows mermaid blocks as plain source.
+pub fn render_with(doc: &Doc, width: usize, diagrams: bool) -> Rendered {
     let w = width.saturating_sub(2).clamp(4, MAX_WIDTH);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut row_src: Vec<usize> = Vec::new();
@@ -422,7 +478,7 @@ pub fn render(doc: &Doc, width: usize) -> Rendered {
         push(front_rows(f, w), 0, &mut lines);
     }
     for n in &doc.nodes {
-        push(block_rows(&n.block, w, 0, Style::default()), n.line, &mut lines);
+        push(block_rows(&n.block, w, 0, Style::default(), diagrams), n.line, &mut lines);
     }
     Rendered { lines, row_src }
 }
@@ -724,5 +780,85 @@ mod tests {
     fn width_changes_the_wrapping() {
         let src = "- a long list item with many words that will wrap at narrow widths for sure\n";
         assert!(at(src, 100).len() < at(src, 30).len());
+    }
+
+    fn md(block: &str) -> String {
+        format!("# Doc\n\n```mermaid\n{block}```\n\nafter\n")
+    }
+
+    const GOLDEN: &[(&str, &str)] = &[
+        ("flow_lr", "flowchart LR\n  A[Checkout] --> B{Tests pass?}\n  B -- yes --> C([Deploy])\n  B -- no --> D[Notify]\n"),
+        ("flow_td_subgraph", "graph TD\n  subgraph Build\n    A[Compile] --> B[Link]\n  end\n  B --> C[Package]\n  C --> A\n"),
+        ("sequence", "sequenceDiagram\n  participant U as User\n  participant W as wi\n  U->>W: open file\n  W-->>U: preview\n"),
+        ("class", "classDiagram\n  class Animal {\n    +String name\n    +eat()\n  }\n  class Dog {\n    +bark()\n  }\n  Animal <|-- Dog\n"),
+        ("state", "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Running: start\n  Running --> Idle: stop\n"),
+        ("er", "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  ORDER ||--|{ LINE_ITEM : contains\n"),
+    ];
+
+    /// Rendered text of each sample at 80 and 120 columns against `golden/<name>_<width>.txt`.
+    /// `UPDATE_GOLDEN=1 cargo test mermaid_golden` rewrites the files.
+    #[test]
+    fn mermaid_golden_text() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/preview/markdown/golden");
+        for (name, block) in GOLDEN {
+            for width in [80, 120] {
+                let got = at(&md(block), width).join("\n") + "\n";
+                let file = dir.join(format!("{name}_{width}.txt"));
+                if std::env::var("UPDATE_GOLDEN").is_ok() {
+                    std::fs::write(&file, &got).unwrap();
+                }
+                let want = std::fs::read_to_string(&file).unwrap_or_default();
+                assert_eq!(got, want, "{name} at {width} columns differs from {}", file.display());
+                assert!(got.contains("╭─ mermaid · "), "{name}: bordered block with a title");
+                assert!(!got.contains("not rendered"), "{name}: drawn, not source");
+            }
+        }
+    }
+
+    #[test]
+    fn mermaid_block_is_bordered_and_dim() {
+        let l = lines(&md("graph LR\n  A --> B\n"), 80);
+        let top = l.iter().position(|l| plain(l).contains("mermaid · flowchart")).expect("title row");
+        assert_eq!(l[top].spans[1].style.fg, Some(theme().dim));
+        assert_eq!(l[top + 1].spans[2].style.fg, None, "diagram text uses the theme text colour");
+        let t = at(&md("graph LR\n  A --> B\n"), 80);
+        let wid = |s: &String| s.chars().count();
+        assert_eq!(wid(&t[top]), wid(&t[top + 1]), "box rows are as wide as the top border");
+    }
+
+    #[test]
+    fn mermaid_failures_show_source_and_a_note() {
+        let note = |src: &str, width: usize| at(&md(src), width);
+        let t = note("graph LR\n  A --> B\n", 30);
+        assert!(t.iter().any(|l| l.contains("graph LR")), "narrow pane shows source");
+        let joined = t.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(joined.contains("mermaid: not rendered (pane under 40 columns)"), "wrapped note: {t:?}");
+        let t = note("whatever is this\n", 80);
+        assert!(t.iter().any(|l| l.contains("whatever is this")));
+        assert!(t.iter().any(|l| l.contains("mermaid: not rendered (unknown diagram type 'whatever')")), "{t:?}");
+        let t = note("", 80);
+        assert!(t.iter().any(|l| l.contains("mermaid: not rendered (empty diagram)")), "{t:?}");
+        let note_line = lines(&md("nonsense\n"), 80).into_iter().find(|l| plain(l).contains("not rendered")).unwrap();
+        assert_eq!(note_line.spans[1].style.fg, Some(theme().dim));
+        assert!(!t.iter().any(|l| l.contains('╭') && l.contains("mermaid ·")));
+    }
+
+    #[test]
+    fn mermaid_off_shows_plain_source_without_note() {
+        let doc = parse(&md("graph LR\n  A --> B\n"));
+        assert!(has_mermaid(&doc));
+        let off: Vec<String> = render_with(&doc, 80, false).lines.iter().map(plain).collect();
+        assert!(off.iter().any(|l| l.contains("graph LR")));
+        assert!(!off.iter().any(|l| l.contains("not rendered") || l.contains('╭')));
+        assert!(!has_mermaid(&parse("```rust\nfn main() {}\n```\n")));
+    }
+
+    #[test]
+    fn mermaid_in_quote_and_list_and_several_blocks() {
+        let src = "> ```mermaid\n> graph LR\n>   A --> B\n> ```\n\n- item\n\n  ```mermaid\n  graph TD\n    X --> Y\n  ```\n\n```mermaid\nsequenceDiagram\n  A->>B: hi\n```\n";
+        assert!(has_mermaid(&parse(src)));
+        let t = text(src);
+        assert_eq!(t.iter().filter(|l| l.contains("╭─ mermaid · ")).count(), 3, "{t:?}");
+        assert!(t.iter().any(|l| l.starts_with(" ▌ ") && l.contains("╭─")), "inside the quote");
     }
 }
