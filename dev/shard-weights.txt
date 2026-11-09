@@ -2,6 +2,7 @@
 # format: <script> <local|remote> <seconds>   (scripts not listed get a default weight)
 dev/pty_agents.py local 32
 dev/pty_compat.py local 21
+dev/pty_dictate.py local 70
 dev/pty_fetch.py local 0
 dev/pty_fetch.py remote 6
 dev/pty_git.py local 21

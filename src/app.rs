@@ -1,5 +1,7 @@
 //! Event loop: input, resize, shell output from every tab, coalesced redraw.
 
+use crate::dictate;
+use crate::voice;
 use crate::input::{InEv, PasteFilter};
 use crate::keys::{EnterMap, KeyDecoder};
 use crate::scroll::{self, ScrollKey};
@@ -44,6 +46,8 @@ enum Mode {
     ThemePick(ui::themepick::ThemePick),
     /// A yes/no question before anything is opened or downloaded.
     Confirm(Confirm),
+    /// Dictation set-up or settings (see `voice.rs`).
+    Voice(voice::Dlg),
     /// A download is running; Esc cancels it.
     Fetch,
     /// Every path and link on screen is labelled with a letter.
@@ -418,6 +422,18 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
     // While a paste is in flight: (forward it to the shell, wrap it in markers).
     let mut pasting: Option<(bool, bool)> = None;
     let mut message: Option<String> = None;
+    // Hands-free dictation: the `wi-audio listen` child reports phrases here; one run at a time.
+    let (dict_tx, mut dict_rx) = mpsc::unbounded_channel::<(u64, dictate::Ev)>();
+    let mut dict: Option<dictate::Dictation> = None;
+    let mut dict_gen: u64 = 0;
+    let tcfg = cfg.transcribe.clone();
+    let tuning = dictate::Tuning::from_env();
+    // First-use set-up and settings of dictation: workers report here, tagged with the run.
+    let (voice_tx, mut voice_rx) = mpsc::unbounded_channel::<(u64, voice::VEv)>();
+    let mut vgen: u64 = 0;
+    let mut vargv: Option<Vec<String>> = None;
+    let mut vcancel = Arc::new(AtomicBool::new(false));
+    let mut vstarted = Instant::now();
     if reopened {
         message = Some(format!("reopened {} tab{} from last session (config: restore_tabs = false to turn off)", app.tabs.len(), if app.tabs.len() == 1 { "" } else { "s" }));
     } else if restore.is_some() {
@@ -534,6 +550,118 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
             on_update_event(ev, &mut mode, &mut pending, &mut message, &mut app, &mut updating, &opts, remote, backend.has_tmux());
             dirty = true;
         }
+        // Dictation: switch off after the idle time, and paste waiting phrases when the focused
+        // pane can take them and the user is not mid-keystroke.
+        let mut dict_wake: Option<Instant> = None;
+        if let Some(d) = dict.as_mut() {
+            let now = Instant::now();
+            if !d.idle.is_zero() && now >= d.idle_deadline() && matches!(d.state, dictate::Listen::Listening | dictate::Listen::Loading) {
+                let secs = d.idle.as_secs_f64();
+                let span = if secs >= 60.0 && secs % 60.0 == 0.0 { format!("{} min", secs / 60.0) } else { format!("{secs} s") };
+                dict = None;
+                message = Some(format!("dictation off: {span} of silence"));
+                dirty = true;
+            } else {
+                let t = &app.tabs[app.active];
+                let can = matches!(mode, Mode::Shell) && pasting.is_none() && !t.is_preview() && !t.side_focused();
+                let recent = d.last_paste.is_some_and(|p| now.duration_since(p) < Duration::from_millis(1500));
+                let lead = tuning.leading_space && !d.skip_space && (recent || !dictate::after_space(t.parser.screen()));
+                match dictate::next_step(&mut d.held, now, last_input, can, Duration::from_secs(tuning.held_timeout_s), lead) {
+                    dictate::Step::Control(c) => {
+                        use dictate::Control;
+                        match c {
+                            Control::Scratch => match d.last_phrase {
+                                Some((tab, n)) if tab == t.id && n > 0 && d.last_paste.is_some_and(|p| last_input <= p) => {
+                                    t.write(vec![0x7f; n]);
+                                    d.last_phrase = None;
+                                    d.pending_send = None;
+                                    message = Some("scratched the last phrase: say it again".into());
+                                    crate::dictlog::log(&format!("scratch chars={n}"));
+                                }
+                                _ => {
+                                    message = Some("nothing to scratch: only the last phrase, and only before you type".into());
+                                    crate::dictlog::log("scratch refused (nothing to remove, or you typed since)");
+                                }
+                            },
+                            Control::NewLine | Control::NewParagraph => {
+                                if t.is_agent() {
+                                    let n = if c == Control::NewParagraph { 2 } else { 1 };
+                                    for _ in 0..n { t.write(b"\x1b\r".to_vec()); }
+                                    d.skip_space = true;
+                                    d.last_phrase = None;
+                                    crate::dictlog::log(&format!("newline x{n}"));
+                                } else {
+                                    message = Some("new line works in an agent prompt (a plain shell would run the command)".into());
+                                }
+                            }
+                        }
+                        snap_live(&mut app);
+                        dict_wake = Some(now + Duration::from_millis(150));
+                        dirty = true;
+                    }
+                    dictate::Step::Paste(s) => {
+                        let wrap = t.parser.screen().bracketed_paste();
+                        let chars = s.chars().count();
+                        t.write(dictate::paste_bytes(&s, wrap));
+                        d.last_paste = Some(now);
+                        d.last_phrase = Some((t.id, chars));
+                        d.skip_space = false;
+                        d.send_note = "";
+                        crate::dictlog::log(&format!("paste tab={} chars={chars} bracketed={wrap} auto_send={}", t.id, agent_state.auto_enter()));
+                        if agent_state.auto_enter() {
+                            d.pending_send = Some(app.tabs[app.active].id);
+                        }
+                        snap_live(&mut app);
+                        dict_wake = Some(now + Duration::from_millis(150));
+                        dirty = true;
+                    }
+                    dictate::Step::Dropped(n) => {
+                        message = Some(format!("dictation: dropped {n} phrase{} the pane could not take", if n == 1 { "" } else { "s" }));
+                        dirty = true;
+                    }
+                    dictate::Step::Wait(w) => dict_wake = w,
+                }
+                // Auto-send: after the quiet, press Enter in the pane the text went to.
+                if d.pending_send.is_some() {
+                    let t = &app.tabs[app.active];
+                    let can = matches!(mode, Mode::Shell) && pasting.is_none() && !t.is_preview() && !t.side_focused();
+                    match dictate::send_step(d.pending_send, t.id, can, !d.held.is_empty(), matches!(d.state, dictate::Listen::Hearing), now, d.last_paste, d.last_speech, last_input, dictate::auto_send_delay()) {
+                        dictate::Send::Enter => {
+                            crate::dictlog::log("auto Enter: sent");
+                            t.write(b"\r".to_vec());
+                            d.pending_send = None;
+                            message = Some("dictation pressed Enter".into());
+                            snap_live(&mut app);
+                            dirty = true;
+                        }
+                        dictate::Send::Cancel(why) => {
+                            d.pending_send = None;
+                            crate::dictlog::log(&format!("auto Enter: cancelled ({why})"));
+                            message = Some(format!("auto Enter cancelled: {why}"));
+                            dirty = true;
+                        }
+                        dictate::Send::WaitUntil(w) => {
+                            if d.send_note != "armed" {
+                                d.send_note = "armed";
+                                crate::dictlog::log(&format!("auto Enter: armed, due in {} ms", w.saturating_duration_since(now).as_millis()));
+                            }
+                            dict_wake = Some(dict_wake.map_or(w, |x| x.min(w)));
+                        }
+                        dictate::Send::Nothing => {
+                            let why = if !d.held.is_empty() { "a phrase is waiting to be typed" } else if matches!(d.state, dictate::Listen::Hearing) { "speech is being heard" } else if !can { "this pane cannot take keys now (a dialog is open, or a preview or side pane has focus)" } else { "waiting" };
+                            if d.send_note != why {
+                                d.send_note = why;
+                                crate::dictlog::log(&format!("auto Enter: holding ({why})"));
+                            }
+                        }
+                    }
+                }
+                if !d.idle.is_zero() && matches!(d.state, dictate::Listen::Listening | dictate::Listen::Loading) {
+                    let idle_at = d.idle_deadline();
+                    dict_wake = Some(dict_wake.map_or(idle_at, |w| w.min(idle_at)));
+                }
+            }
+        }
         // Keep the header on the active tab's folder and that folder's branch.
         if let Some(fi) = folder_tab(&app) {
             let (fid, fdir) = (app.tabs[fi].id, app.tabs[fi].dir.as_str());
@@ -589,6 +717,108 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
             .map(|(_, t)| t.last_output + app.quiet)
             .min();
         tokio::select! {
+            _ = sleep_until(dict_wake.unwrap_or(due).into()), if dict_wake.is_some() => { dirty = true; }
+            Some((g, ev)) = voice_rx.recv() => {
+                use voice::VEv;
+                if g == vgen && matches!(mode, Mode::Shell | Mode::Voice(_)) {
+                    let recheck = |vgen: &mut u64| {
+                        *vgen += 1;
+                        voice::spawn_check(&voice_tx, *vgen, voice::locate());
+                    };
+                    match ev {
+                        VEv::Checked { argv, status } => {
+                            vargv = argv;
+                            let (st, err) = match status {
+                                Some(Ok(s)) => (Some(s), None),
+                                Some(Err(e)) => (None, Some(e)),
+                                None => (None, None),
+                            };
+                            let vstatus = st;
+                            if let Some(e) = err {
+                                mode = Mode::Voice(voice::Dlg::info("The voice helper does not answer", vec![e, "Choose Remove voice in the Dictation options, then Dictation again, to reinstall it.".into()]));
+                            } else {
+                                match voice::next(vargv.is_some(), vstatus.as_ref(), &agent_state.voice_declined, agent_state.voice_mic_ok) {
+                                    voice::Next::Ask(step) => mode = Mode::Voice(voice::Dlg::ask(step, vstatus.as_ref().map_or(0, |s| s.speech_total))),
+                                    voice::Next::NotNow(step) => message = Some(voice::not_now_text(step).into()),
+                                    voice::Next::Start => start_dictation(vargv.as_deref().unwrap_or(&[]), &tcfg, &mut dict_gen, &dict_tx, &mut dict, &mut message),
+                                }
+                            }
+                        }
+                        VEv::Status(s) => {
+                            if let Mode::Voice(d) = &mut mode { d.status_line(&s); }
+                        }
+                        VEv::Progress { what, done, total } => {
+                            if let Mode::Voice(d) = &mut mode { d.progress(&what, done, total); }
+                        }
+                        VEv::Level(v) => {
+                            if let Mode::Voice(d) = &mut mode { d.level(v, vstarted.elapsed()); }
+                        }
+                        VEv::Installed(Ok(path)) => {
+                            agent_state.voice_touched = true; agent_state.voice_declined.retain(|d| d != "helper");
+                            let _ = agent_state.save();
+                            message = Some(format!("voice helper installed: {}", path.display()));
+                            if let Mode::Voice(d) = &mut mode { d.status_line("installed. Checking ..."); }
+                            recheck(&mut vgen);
+                        }
+                        VEv::Installed(Err(e)) => mode = Mode::Voice(voice::Dlg::info("Could not install the voice helper", vec![e])),
+                        VEv::ModelDone(Ok(())) => {
+                            agent_state.voice_touched = true; agent_state.voice_declined.retain(|d| d != "model" && !d.starts_with("upgrade:"));
+                            let _ = agent_state.save();
+                            message = Some("speech model downloaded".into());
+                            if let Mode::Voice(d) = &mut mode { d.status_line("downloaded and checked. Continuing ..."); }
+                            recheck(&mut vgen);
+                        }
+                        VEv::ModelDone(Err(e)) => mode = Mode::Voice(voice::Dlg::info("Could not download the speech model", vec![e])),
+                        VEv::Heard(Ok(text)) => mode = Mode::Voice(voice::Dlg::heard(&text)),
+                        VEv::Heard(Err((kind, msg))) => mode = Mode::Voice(voice::Dlg::info("Microphone test", voice::friendly(&kind, &msg).split('\n').map(String::from).collect())),
+                        VEv::Removed(Ok(msg)) => {
+                            message = Some(msg);
+                            mode = Mode::Shell;
+                        }
+                        VEv::Removed(Err(e)) => mode = Mode::Voice(voice::Dlg::info("Could not remove voice", vec![e])),
+                    }
+                    dirty = true;
+                }
+            }
+            Some((g, ev)) = dict_rx.recv() => {
+                use dictate::{Ev, Held, Listen};
+                if dict.as_ref().is_some_and(|d| d.gen_id == g) {
+                    let before = dict.as_ref().map(|d| (d.button_text(false), d.held_text()));
+                    let now = Instant::now();
+                    let mut stopped = false;
+                    if let Some(d) = dict.as_mut() {
+                        match ev {
+                            Ev::State(s) => {
+                                d.state = s;
+                                if matches!(s, Listen::Hearing | Listen::Transcribing) { d.last_speech = now; }
+                            }
+                            Ev::Level(v) => d.push_level(v),
+                            Ev::Final(text) => {
+                                d.last_speech = now;
+                                let ctl = dictate::control(&text);
+                                crate::dictlog::log(&format!("final chars={} control={ctl:?}", text.chars().count()));
+                                d.held.push_back(Held { text, at: now, ctl });
+                            }
+                            Ev::Error { kind, msg } => {
+                                message = Some(dictate::friendly_error(&kind, &msg));
+                                if dictate::is_fatal(&kind) { d.shown_error = true; }
+                                dirty = true;
+                            }
+                            Ev::Off(why) => d.off_why = Some(why),
+                            Ev::Exited(last) => {
+                                if let (false, Some(why)) = (d.shown_error, d.off_why.as_deref()) {
+                                    message = Some(format!("dictation off: {why}"));
+                                } else if !d.shown_error {
+                                    message = Some(if last.is_empty() { "dictation stopped".to_string() } else { format!("dictation stopped: {last}") });
+                                }
+                                stopped = true;
+                            }
+                        }
+                    }
+                    if stopped { dict = None; dirty = true; }
+                    if dict.as_ref().map(|d| (d.button_text(false), d.held_text())) != before { dirty = true; }
+                }
+            }
             _ = sleep_until(quiet_at.unwrap_or(due).into()), if quiet_at.is_some() => {
                 let now = Instant::now();
                 let mut went_quiet = false;
@@ -750,6 +980,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                 };
                 let confirm_ref = match &mode { Mode::Confirm(c) => Some(c), Mode::Fetch => progress_dlg.as_ref(), _ => None };
                 let hints_ref = match &mode { Mode::Hints(h) => Some((&h.hints[..], h.typed.as_str())), _ => None };
+                let term_w = crossterm::terminal::size().map(|s| s.0).unwrap_or(80);
+                let mic_btn = dictate::button(dict.as_ref(), term_w, tcfg.enabled);
+                let held_text = dict.as_ref().and_then(|d| d.held_text());
                 let view = View {
                     partner,
                     pin: pin_view,
@@ -778,6 +1011,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                     find_hl: &find_hl,
                     status: status_s.as_deref(),
                     explorer: match &mode { Mode::Explorer(e) => Some(&**e), _ => None },
+                    mic: mic_btn.as_ref().map(|(t, s)| (t.as_str(), *s)),
+                    held: held_text.as_deref(),
+                    voice: match &mode { Mode::Voice(d) => Some(&d.view), _ => None },
                 };
                 let full = std::mem::take(&mut repaint);
                 if full {
@@ -872,6 +1108,23 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                 continue;
                             }
                             let (tc, tr) = crossterm::terminal::size()?;
+                            // A click on the mic button (right end of the top bar): off -> set up / turn on,
+                            // on -> turn off. The tab strip is a different row, so tab clicks are untouched.
+                            if matches!(mode, Mode::Shell) && matches!(m.kind, Kind::Down(Button::Left)) && m.row == 0
+                                && let Some((txt, _)) = dictate::button(dict.as_ref(), tc, tcfg.enabled)
+                            {
+                                let (x, w) = ui::mic_span(&txt, tc);
+                                if m.col >= x && m.col < x + w {
+                                    if dict.take().is_some() {
+                                        message = Some("dictation off".into());
+                                    } else {
+                                        vgen += 1;
+                                        voice::spawn_check(&voice_tx, vgen, voice::locate());
+                                    }
+                                    dirty = true;
+                                    continue;
+                                }
+                            }
                             let strip_h = u16::from(app.tabs.len() > 1);
                             let main = Rect::new(0, 1 + strip_h, tc, tr.saturating_sub(2 + strip_h).max(1));
                             if matches!(mode, Mode::Shell | Mode::Scroll) && matches!(m.kind, Kind::Down(_) | Kind::WheelUp | Kind::WheelDown)
@@ -1557,6 +1810,102 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                             dirty = true;
                             chunk = &[];
                         }
+                        Mode::Voice(ref d) => {
+                            use voice::{Key, Kind, Step};
+                            let (key, kind) = (d.key(chunk, menu_key), d.kind.clone());
+                            chunk = &[];
+                            dirty = true;
+                            let argv = vargv.clone();
+                            match (kind, key) {
+                                (Kind::Ask(step), Key::Yes) => {
+                                    vgen += 1;
+                                    vcancel = Arc::new(AtomicBool::new(false));
+                                    vstarted = Instant::now();
+                                    match (step, argv) {
+                                        (Step::Install, _) => voice::spawn_install(&voice_tx, vgen),
+                                        (Step::Model | Step::Upgrade, Some(a)) => voice::spawn_fetch(&voice_tx, vgen, a, vcancel.clone(), false),
+                                        (Step::Mic, Some(a)) => voice::spawn_probe(&voice_tx, vgen, a, vcancel.clone()),
+                                        _ => {}
+                                    }
+                                    mode = Mode::Voice(voice::Dlg::busy(step));
+                                }
+                                (Kind::Ask(step), Key::No) => {
+                                    mode = Mode::Shell;
+                                    if step == Step::Mic {
+                                        if !agent_state.voice_declined.iter().any(|d| d == "mic") { agent_state.voice_touched = true; agent_state.voice_declined.push("mic".into()); let _ = agent_state.save(); }
+                                        start_dictation(vargv.as_deref().unwrap_or(&[]), &tcfg, &mut dict_gen, &dict_tx, &mut dict, &mut message);
+                                    } else if step == Step::Upgrade {
+                                        // Keep working with the model we have; do not ask about this upgrade again.
+                                        let key = format!("upgrade:{}", voice::BEST_MODEL);
+                                        if !agent_state.voice_declined.contains(&key) { agent_state.voice_touched = true; agent_state.voice_declined.push(key); let _ = agent_state.save(); }
+                                        start_dictation(vargv.as_deref().unwrap_or(&[]), &tcfg, &mut dict_gen, &dict_tx, &mut dict, &mut message);
+                                        message = Some(voice::not_now_text(step).into());
+                                    } else {
+                                        if !agent_state.voice_declined.iter().any(|d| d == step.key()) { agent_state.voice_touched = true; agent_state.voice_declined.push(step.key().into()); let _ = agent_state.save(); }
+                                        message = Some(voice::not_now_text(step).into());
+                                    }
+                                }
+                                (Kind::Busy(_), Key::No) => {
+                                    vgen += 1;
+                                    vcancel.store(true, Ordering::Relaxed);
+                                    mode = Mode::Shell;
+                                    message = Some("cancelled".into());
+                                }
+                                (Kind::Heard, Key::Yes) => {
+                                    agent_state.voice_touched = true; agent_state.voice_mic_ok = true;
+                                    agent_state.voice_touched = true; agent_state.voice_declined.retain(|d| d != "mic");
+                                    let _ = agent_state.save();
+                                    mode = Mode::Shell;
+                                    start_dictation(vargv.as_deref().unwrap_or(&[]), &tcfg, &mut dict_gen, &dict_tx, &mut dict, &mut message);
+                                }
+                                (Kind::Heard | Kind::Info, Key::Yes | Key::No) => mode = Mode::Shell,
+                                (Kind::On, Key::Yes) => {
+                                    dict = None;
+                                    mode = Mode::Shell;
+                                    message = Some("dictation off".into());
+                                }
+                                (Kind::On, Key::Char('o')) => mode = Mode::Voice(voice::Dlg::options(agent_state.auto_enter())),
+                                (Kind::On, Key::No) => mode = Mode::Shell,
+                                (Kind::Options, Key::Char('t')) => {
+                                    // The test needs the microphone: dictation stops, and starts again after it.
+                                    dict = None;
+                                    vargv = voice::locate();
+                                    vgen += 1;
+                                    vcancel = Arc::new(AtomicBool::new(false));
+                                    vstarted = Instant::now();
+                                    if let Some(a) = vargv.clone() { voice::spawn_probe(&voice_tx, vgen, a, vcancel.clone()); }
+                                    mode = Mode::Voice(voice::Dlg::busy(Step::Mic));
+                                }
+                                (Kind::Options, Key::Char('a')) => {
+                                    agent_state.voice_touched = true; agent_state.voice_auto_send = Some(!agent_state.auto_enter());
+                                    let _ = agent_state.save();
+                                    if let Some(d) = dict.as_mut() { d.pending_send = None; }
+                                    message = Some(if agent_state.auto_enter() { "dictation: Enter is pressed after 3 s of quiet".into() } else { "dictation: Enter is yours again".into() });
+                                    mode = Mode::Voice(voice::Dlg::options(agent_state.auto_enter()));
+                                }
+                                (Kind::Options, Key::Char('d')) => {
+                                    // Fetch the current speech model again (the old file is replaced only after the new one checks out).
+                                    dict = None;
+                                    vargv = voice::locate();
+                                    vgen += 1;
+                                    vcancel = Arc::new(AtomicBool::new(false));
+                                    vstarted = Instant::now();
+                                    if let Some(a) = vargv.clone() { voice::spawn_fetch(&voice_tx, vgen, a, vcancel.clone(), true); }
+                                    mode = Mode::Voice(voice::Dlg::busy(Step::Model));
+                                }
+                                (Kind::Options, Key::Char('r')) => mode = Mode::Voice(voice::Dlg::ask_remove()),
+                                (Kind::Options, Key::No) => mode = Mode::Voice(voice::Dlg::on()),
+                                (Kind::AskRemove, Key::Yes) => {
+                                    dict = None;
+                                    vgen += 1;
+                                    voice::spawn_remove(&voice_tx, vgen, voice::locate());
+                                    mode = Mode::Shell;
+                                    message = Some("removing voice ...".into());
+                                }
+                                (Kind::AskRemove, Key::No) => mode = Mode::Voice(voice::Dlg::options(agent_state.auto_enter())),
+                                _ => {}
+                            }
+                        }
                         Mode::Confirm(_) => {
                             let (mut yes, mut no) = (false, false);
                             for (i, &b) in chunk.iter().enumerate() {
@@ -1965,7 +2314,31 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                         let t = &app.tabs[app.active];
                                         mode = Mode::Rename(crate::rename::Rename::new(t.id, t.custom.as_deref().unwrap_or(&t.title)));
                                     }
+                                    Action::DictationEnter => {
+                                        agent_state.voice_touched = true;
+                                        agent_state.voice_auto_send = Some(!agent_state.auto_enter());
+                                        let _ = agent_state.save();
+                                        if let Some(d) = dict.as_mut() { d.pending_send = None; }
+                                        message = Some(if agent_state.auto_enter() { "dictation auto-Enter ON: Enter is pressed after 3 s of quiet (typing cancels it)".into() } else { "dictation auto-Enter OFF: Enter is yours".into() });
+                                    }
                                     Action::Theme => mode = Mode::ThemePick(ui::themepick::ThemePick::new(theme_mode)),
+                                    #[cfg(target_os = "macos")]
+                                    Action::Dictation => {
+                                        if !tcfg.enabled {
+                                            message = Some("dictation is turned off in the config ([transcribe] enabled = false)".into());
+                                        } else if dict.is_some() {
+                                            mode = Mode::Voice(voice::Dlg::on());
+                                        } else {
+                                            vgen += 1;
+                                            voice::spawn_check(&voice_tx, vgen, voice::locate());
+                                        }
+                                    }
+                                    // Voice dictation is macOS only for now (the menu entry is hidden elsewhere).
+                                    #[cfg(not(target_os = "macos"))]
+                                    Action::Dictation => {
+                                        let _ = (&tcfg, &dict_tx, &mut dict_gen, &mut dict, &voice_tx, &mut vgen, &mut vargv, &mut vcancel, &mut vstarted);
+                                        message = Some("Dictation is macOS only for now".into());
+                                    }
                                     Action::Restart => {
                                         mode = restart_dialog(&app, remote, backend.has_tmux(), None);
                                         pending = Some(Pending::Restart { updated: None });
@@ -1977,7 +2350,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                             let mut lines = vec![
                                                 "This contacts github.com to check the latest release of".to_string(),
                                                 format!("{} and nothing else. Nothing is sent until you confirm.", crate::update::REPO),
-                                                "It updates this computer's wi, never a remote box. Your tabs stay open.".to_string(),
+                                                "It updates this computer's wi (and the voice helper, if you installed it), never a remote box. Your tabs stay open.".to_string(),
                                             ];
                                             if let Some(u) = crate::update::override_url() { lines.push(format!("(test source: {u})")); }
                                             mode = Mode::Confirm(Confirm { title: "Update wi: check for a new version?".into(), lines, yes: "Check".into() });
@@ -2894,6 +3267,18 @@ enum UpdEv {
     Installed(Result<crate::update::Installed, String>),
 }
 
+/// Start the hands-free mode with the helper found at `prefix`.
+fn start_dictation(prefix: &[String], tcfg: &crate::config::Transcribe, gen_id: &mut u64, tx: &mpsc::UnboundedSender<(u64, dictate::Ev)>, dict: &mut Option<dictate::Dictation>, message: &mut Option<String>) {
+    *gen_id += 1;
+    match dictate::Dictation::spawn(prefix, tcfg, *gen_id, tx.clone()) {
+        Ok(d) => {
+            *dict = Some(d);
+            *message = Some("dictation on: speak, phrases are typed without Enter · menu > Dictation or a click on the mic turns it off".into());
+        }
+        Err(e) => *message = Some(e),
+    }
+}
+
 fn restart_dialog(app: &App, remote: bool, tmux: bool, updated: Option<&str>) -> Mode {
     Mode::Confirm(Confirm {
         title: match updated {
@@ -3158,7 +3543,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Rename(_) | Mode::Pick(_) | Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
+        Mode::Rename(_) | Mode::Pick(_) | Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Voice(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
         Mode::GrepPrompt(p) => match m.kind {
             Kind::Down(mouse::Button::Left) => ui::search::grep_chip_at(main, p, m.col, m.row).map_or(Intent::None, |k| Intent::Synth(k.to_vec())),
             _ => Intent::None,

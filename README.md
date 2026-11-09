@@ -74,6 +74,7 @@ wi supports macOS and Linux.
 - Previews refresh by themselves when the file changes on disk (see Configuration)
 - Search in files, find file, find in output
 - Themes: `dark`, `light` and fourteen more modelled on VS Code's (see Themes below); Y opens a picker that previews each one live. The chosen theme paints the whole window, shell included, so a light theme looks light on a dark terminal; auto follows your terminal's colours on each start
+- Voice dictation, macOS only for now (the mic button in the top bar, or menu: search "dictate"); audio stays on your machine (see Voice below)
 - Update wi from the menu (search "update"): asks before contacting github.com, checks the SHA256, replaces the binary, then offers to restart wi with the same tabs ("Restart wi" does the restart alone)
 
 ## Keys
@@ -154,7 +155,13 @@ forgets the saved ones; `restore_tabs = false` in `[defaults]` turns the whole t
 
 A few items have no letter because they are all taken. Press Ctrl-Space, then Space, and type a few letters:
 `pin` (Pin tab right / left, Swap pane sides, Unsplit), `recent` (Recent files), `update` (Update wi),
-`restart` (Restart wi), `rename` (Rename tab; also `title`, `name`, `label`).
+`restart` (Restart wi), `dictate` (Dictation; also `voice`, `mic`), `rename` (Rename tab; also `title`, `name`, `label`).
+
+## Voice
+
+macOS (Apple Silicon) only for now. Click the `○ mic` at the right end of the top bar, or choose Dictation in the menu (search "dictate"): the first time, wi offers to install a small helper and download a 296 MB speech model, then tests your microphone.
+After that every phrase you say is typed into the focused pane without Enter (it presses Enter itself after 3 seconds of quiet; switch that off with the menu entry "Auto-Enter for dictation"); click the mic again to stop, or press `O` in the Dictation menu screen for options (test the microphone, remove voice).
+Audio never leaves your computer: no cloud, nothing is recorded to disk, and it turns itself off after 10 minutes of silence. More in [docs/AUDIO.md](docs/AUDIO.md).
 
 ## Updating
 
@@ -178,6 +185,10 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
     restore_tabs = true     # reopen last session's tabs at start (wi --fresh skips it once)
     preview_autorefresh = true          # reload a visible file preview when the file changes
     preview_refresh_debounce_ms = 5000  # wait this long after the last change before reloading
+
+    [transcribe]              # voice dictation (macOS), see docs/AUDIO.md
+    enabled = true
+    idle_minutes = 10         # switches itself off after this long without speech
 
     [agents.claude]
     command = "claude --continue"                  # your usual command, listed first

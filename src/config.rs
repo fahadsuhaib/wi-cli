@@ -86,6 +86,22 @@ impl Default for Defaults {
     }
 }
 
+/// `[transcribe]`: voice dictation (macOS only for now). Everything else about it is internal.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct Transcribe {
+    /// Allow the Dictation menu entry to work.
+    pub enabled: bool,
+    /// Dictation turns itself off after this many minutes without speech (0 = never).
+    pub idle_minutes: u32,
+}
+
+impl Default for Transcribe {
+    fn default() -> Self {
+        Self { enabled: true, idle_minutes: 10 }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct BoxConfig {
     pub name: String,
@@ -144,6 +160,8 @@ pub struct Config {
     pub agents: std::collections::HashMap<String, AgentCfg>,
     #[serde(default)]
     pub defaults: Defaults,
+    #[serde(default)]
+    pub transcribe: Transcribe,
     #[serde(default, rename = "box")]
     pub boxes: Vec<BoxConfig>,
 }

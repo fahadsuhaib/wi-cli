@@ -37,6 +37,11 @@ pub enum Action {
     RenameTab,
     /// Restart wi in place (the same tabs come back).
     Restart,
+    /// Dictation: set it up, turn it on or off, and (while on) its options.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Dictation,
+    /// Switch dictation's automatic Enter (after a few seconds of quiet) on or off.
+    DictationEnter,
     Agent,
     CloseTab,
     Reconnect,
@@ -180,6 +185,9 @@ pub const MENU: &[MenuItem] = &[
     mi("Info", 'i', Action::Info, false, "SESSION", &["status", "folder", "box", "about"]),
     mi("Reconnect", 'r', Action::Reconnect, true, "SESSION", &["connection", "ssh", "retry"]),
     mi("Download", 'd', Action::Download, true, "SESSION", &["fetch", "copy", "save", "file"]),
+    #[cfg(target_os = "macos")]
+    mi("Dictation", NO_KEY, Action::Dictation, false, "AGENT", &["dictate", "voice", "speak", "talk", "listen", "microphone", "options"]),
+    mi("Auto-Enter for dictation", NO_KEY, Action::DictationEnter, false, "AGENT", &["auto", "enter", "send", "submit", "mic"]),
     mi("Update wi", NO_KEY, Action::Update, false, "SESSION", &["upgrade", "new", "version", "release", "download", "latest"]),
     mi("Restart wi", NO_KEY, Action::Restart, false, "SESSION", &["reload", "relaunch", "again", "new version"]),
     mi("Quit", 'q', Action::Quit, false, "SESSION", &["exit", "detach", "disconnect", "leave"]),
@@ -469,6 +477,16 @@ pub struct Confirm {
     pub yes: String,
 }
 
+/// A dictation set-up or settings dialog: a title, text lines and a line of key hints.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoiceView {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub footer: String,
+    /// The first line is a heading (bold, followed by a blank line).
+    pub heading: bool,
+}
+
 /// A label drawn over a link on screen (position relative to the whole terminal screen).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hint {
@@ -565,6 +583,29 @@ pub struct View<'a> {
     pub status: Option<&'a str>,
     /// The file explorer, drawn over the whole screen (no header, tab strip or status bar).
     pub explorer: Option<&'a crate::explorer::ExplorerState>,
+    /// The mic button at the right end of the top bar: its text and state.
+    pub mic: Option<(&'a str, MicState)>,
+    /// A dictated phrase waiting for the pane, shown at the right end of the status bar.
+    pub held: Option<&'a str>,
+    /// The dictation set-up or settings dialog, when open.
+    pub voice: Option<&'a VoiceView>,
+}
+
+/// What the mic button shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MicState {
+    /// Dictation is off: a dim `○ mic`.
+    Off,
+    /// Starting up.
+    Loading,
+    /// Listening, hearing or converting: the accent dot.
+    Live,
+}
+
+/// Where a right-aligned label sits on its row: (first column, width), with a space on each side.
+pub fn mic_span(text: &str, width: u16) -> (u16, u16) {
+    let w = (text.chars().count() as u16 + 2).min(width);
+    (width - w, w)
 }
 
 /// A vt100 colour as a wi colour. `default` is what the terminal's default colour becomes: the
@@ -659,12 +700,29 @@ fn draw_frame(f: &mut Frame, v: &View) {
 
     let tail = if v.remote { "  connected" } else { "" };
     let fixed = format!(" wicli  {}  ", v.name).chars().count() + tail.chars().count();
-    let room = (header.width as usize).saturating_sub(fixed);
+    // The mic button keeps its place at the right end; the folder text gives way first.
+    let mic_w = v.mic.map_or(0, |(m, _)| mic_span(m, header.width).1 as usize);
+    let room = (header.width as usize).saturating_sub(fixed + mic_w);
     let detail = left_trim(v.detail, room);
     f.render_widget(
         Paragraph::new(format!(" wicli  {}  {detail}{tail}", v.name)).style(bar.fg(t.header).add_modifier(Modifier::BOLD)),
         header,
     );
+
+    if let Some((m, st)) = v.mic {
+        let (x, w) = mic_span(m, header.width);
+        let r = Rect::new(header.x + x, header.y, w, 1);
+        let color = match st {
+            MicState::Off => t.tab_inactive,
+            MicState::Loading => t.header,
+            MicState::Live => t.diff_remove,
+        };
+        let mut style = bar.fg(color).add_modifier(Modifier::BOLD);
+        if st == MicState::Off {
+            style = bar.fg(color).add_modifier(Modifier::DIM);
+        }
+        f.render_widget(Paragraph::new(format!(" {m} ")).style(style), r);
+    }
 
     if strip_h == 1 {
         let mut spans = Vec::new();
@@ -801,6 +859,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
     let status_text = v.status.map(|t| format!(" {t}"));
     let hint = match (v.menu.as_ref(), v.message) {
         _ if status_text.is_some() => status_text.unwrap_or_default(),
+        _ if v.voice.is_some() => format!(" {}", v.voice.map(|d| d.footer.as_str()).unwrap_or_default()),
         _ if v.confirm.is_some_and(|c| c.yes.is_empty()) => " Esc cancels the download".to_string(),
         _ if v.confirm.is_some() => " Y or Enter to continue · N or Esc to cancel".to_string(),
         _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
@@ -820,9 +879,18 @@ fn draw_frame(f: &mut Frame, v: &View) {
         (None, None) => format!(" {}  menu", v.menu_label),
     };
     f.render_widget(Paragraph::new(hint).style(status_bar), status);
+    if let Some(h) = v.held {
+        let (x, w) = mic_span(h, status.width);
+        let r = Rect::new(status.x + x, status.y, w, 1);
+        f.render_widget(Paragraph::new(format!(" {h} ")).style(status_bar.add_modifier(Modifier::BOLD)), r);
+    }
 
     if let Some(c) = v.confirm {
         draw_confirm(f, main, c);
+        return;
+    }
+    if let Some(d) = v.voice {
+        draw_voice(f, main, d);
         return;
     }
     if let Some(a) = v.ask {
@@ -1156,16 +1224,132 @@ fn draw_pick(f: &mut Frame, main: Rect, p: &crate::pick::Pick) {
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(&title, t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
 }
 
-fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {
-    let w = 78.min(main.width);
-    let h = (c.lines.len() as u16 + 5).min(main.height);
+/// Word-wrap `text` to `width` display columns. Explicit newlines start new lines, leading spaces
+/// of a paragraph are kept as an indent on its first line, and a word longer than the width is cut.
+pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for para in text.split('\n') {
+        let indent = para.chars().take_while(|c| *c == ' ').count().min(width.saturating_sub(1));
+        let mut line = " ".repeat(indent);
+        let mut empty = true;
+        for word in para.split_whitespace() {
+            let mut word = word.to_string();
+            loop {
+                let ww = UnicodeWidthStr::width(word.as_str());
+                let lw = UnicodeWidthStr::width(line.as_str());
+                let sep = if empty { 0 } else { 1 };
+                if lw + sep + ww <= width {
+                    if !empty {
+                        line.push(' ');
+                    }
+                    line.push_str(&word);
+                    empty = false;
+                    break;
+                }
+                if !empty {
+                    out.push(std::mem::take(&mut line));
+                    empty = true;
+                    continue;
+                }
+                // A single word wider than the line: cut it at the width.
+                let mut cut = String::new();
+                let mut used = lw;
+                let mut rest = String::new();
+                for c in word.chars() {
+                    let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+                    if rest.is_empty() && used + cw <= width {
+                        cut.push(c);
+                        used += cw;
+                    } else {
+                        rest.push(c);
+                    }
+                }
+                if cut.is_empty() {
+                    cut.push_str(&rest.chars().take(1).collect::<String>());
+                    rest = rest.chars().skip(1).collect();
+                }
+                line.push_str(&cut);
+                out.push(std::mem::take(&mut line));
+                empty = true;
+                if rest.is_empty() {
+                    break;
+                }
+                word = rest;
+            }
+        }
+        out.push(line);
+    }
+    out
+}
+
+/// Split a key-hint footer such as "Enter or Y: yes  ·  N or Esc: not now" into (keys, action) pairs.
+fn footer_pairs(footer: &str) -> Vec<(String, String)> {
+    footer
+        .split("  ·  ")
+        .map(|seg| match seg.split_once(':') {
+            Some((k, a)) => (k.trim().to_string(), a.trim().to_string()),
+            None => (seg.trim().to_string(), String::new()),
+        })
+        .collect()
+}
+
+fn draw_voice(f: &mut Frame, main: Rect, d: &VoiceView) {
+    let t = theme();
+    let dim = Style::default().fg(t.dialog_dim);
+    let key_style = Style::default().bg(t.menu_sel_bg).fg(t.menu_sel_fg).add_modifier(Modifier::BOLD);
+    // Box width: up to 76 columns, never wider than the screen minus a margin (full width when tiny).
+    let w = if main.width < 50 { main.width } else { 76.min(main.width.saturating_sub(2)) };
+    let inner = (w as usize).saturating_sub(4).max(8); // borders and one space of padding each side
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for (i, l) in d.lines.iter().enumerate() {
+        for row in wrap_text(&sanitize(l), inner) {
+            let st = if i == 0 && d.heading { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() };
+            lines.push(Line::from(Span::styled(format!(" {row}"), st)));
+        }
+        if i == 0 && d.heading {
+            lines.push(Line::from(""));
+        }
+    }
+    lines.push(Line::from(""));
+    // Key hints: each key as a badge, its action dim; wrap to new rows when they do not fit.
+    let mut row: Vec<Span> = vec![Span::raw(" ")];
+    let mut used = 1usize;
+    for (keys, action) in footer_pairs(&sanitize(&d.footer)) {
+        let badge = format!(" {keys} ");
+        let need = unicode_width::UnicodeWidthStr::width(badge.as_str()) + 1 + unicode_width::UnicodeWidthStr::width(action.as_str()) + 3;
+        if used > 1 && used + need > inner + 1 {
+            lines.push(Line::from(std::mem::take(&mut row)));
+            row = vec![Span::raw(" ")];
+            used = 1;
+        }
+        row.push(Span::styled(badge.clone(), key_style));
+        if !action.is_empty() {
+            row.push(Span::styled(format!(" {action}"), dim));
+        }
+        row.push(Span::raw("   "));
+        used += need;
+    }
+    lines.push(Line::from(row));
+    lines.push(Line::from(""));
+    let h = (lines.len() as u16 + 2).min(main.height);
     let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(&format!(" {} ", sanitize(&d.title)), t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
+}
+
+fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {
+    let w = if main.width < 50 { main.width } else { 78.min(main.width.saturating_sub(2)) };
+    let inner = (w as usize).saturating_sub(3).max(8);
     let t = theme();
     let dim = Style::default().fg(t.dialog_dim);
     let sel = Style::default().bg(t.menu_sel_bg).fg(t.menu_sel_fg);
     let mut lines: Vec<Line> = vec![Line::from("")];
     for l in &c.lines {
-        lines.push(Line::from(format!(" {}", sanitize(l))));
+        for row in wrap_text(&sanitize(l), inner) {
+            lines.push(Line::from(format!(" {row}")));
+        }
     }
     lines.push(Line::from(""));
     if c.yes.is_empty() {
@@ -1178,6 +1362,8 @@ fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {
             Span::styled("   Y / Enter  ·  N / Esc", dim),
         ]));
     }
+    let h = (lines.len() as u16 + 2).min(main.height);
+    let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(&format!(" {} ", sanitize(&c.title)), t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
 }
@@ -1185,6 +1371,29 @@ fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn wrap_text_fits_the_width_and_keeps_words() {
+        let s = "Say a short sentence for 3 seconds; macOS may ask to allow your terminal to use the microphone.";
+        for w in [20usize, 30, 50, 72] {
+            let rows = wrap_text(s, w);
+            assert!(rows.iter().all(|r| unicode_width::UnicodeWidthStr::width(r.as_str()) <= w), "{w}: {rows:?}");
+            assert_eq!(rows.join(" ").split_whitespace().collect::<Vec<_>>(), s.split_whitespace().collect::<Vec<_>>());
+        }
+        assert_eq!(wrap_text("a\n\nb", 10), ["a", "", "b"]);
+        assert_eq!(wrap_text("  indented words here", 12), ["  indented", "words here"]);
+        let long = wrap_text("abcdefghijklmnopqrstuvwxyz", 10);
+        assert!(long.iter().all(|r| r.chars().count() <= 10) && long.concat() == "abcdefghijklmnopqrstuvwxyz");
+        // Wide characters count as two columns.
+        assert!(wrap_text("日本語日本語日本語", 6).iter().all(|r| unicode_width::UnicodeWidthStr::width(r.as_str()) <= 6));
+    }
+
+    #[test]
+    fn footer_pairs_split_keys_from_actions() {
+        assert_eq!(footer_pairs("Enter or Y: yes  ·  N or Esc: not now"), [("Enter or Y".to_string(), "yes".to_string()), ("N or Esc".to_string(), "not now".to_string())]);
+        assert_eq!(footer_pairs("Esc cancels"), [("Esc cancels".to_string(), String::new())]);
+    }
 
     #[test]
     fn sanitize_removes_control_and_bidi_tricks() {

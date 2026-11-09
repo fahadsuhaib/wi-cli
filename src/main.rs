@@ -5,6 +5,8 @@ mod clip;
 mod compat;
 mod config;
 mod cwd;
+mod dictate;
+mod dictlog;
 mod exec;
 mod explorer;
 mod explorer_data;
@@ -35,6 +37,7 @@ mod transfer;
 mod tui;
 mod ui;
 mod update;
+mod voice;
 mod workspace;
 
 use anyhow::{Result, bail};
