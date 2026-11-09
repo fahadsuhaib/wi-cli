@@ -78,6 +78,15 @@ pub fn vad_model() -> Option<PathBuf> {
     VAD.present().then(|| VAD.path())
 }
 
+/// Where a file is fetched from: `WICLI_AUDIO_MODEL_URL` (a base URL or `file:///dir`, for tests)
+/// replaces the Hugging Face address.
+pub fn url_for(m: &ModelFile) -> String {
+    match std::env::var("WICLI_AUDIO_MODEL_URL").ok().filter(|v| !v.trim().is_empty()) {
+        Some(b) => format!("{}/{}", b.trim_end_matches('/'), m.file),
+        None => m.url.to_string(),
+    }
+}
+
 pub fn mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
@@ -137,7 +146,7 @@ pub fn install(m: &ModelFile, yes: bool) -> Result<bool, String> {
     }
     std::fs::create_dir_all(dir()).map_err(|e| format!("cannot create {}: {e}", dir().display()))?;
     let part = dir().join(format!("{}.part", m.file));
-    download(m.url, &part)?;
+    download(&url_for(m), &part)?;
     let got = sha256_file(&part)?;
     if got != m.sha256 {
         let _ = std::fs::remove_file(&part);
@@ -146,6 +155,48 @@ pub fn install(m: &ModelFile, yes: bool) -> Result<bool, String> {
     std::fs::rename(&part, m.path()).map_err(|e| e.to_string())?;
     println!("Installed {}.", m.path().display());
     Ok(true)
+}
+
+/// Download `url` into `dest` (a `.part` file renamed on success), calling `progress(done, total)`
+/// about every 200 ms, and refuse the file unless its size and SHA256 match.
+pub fn fetch_to(url: &str, dest: &Path, bytes: u64, sha256: &str, progress: &mut dyn FnMut(u64, u64)) -> Result<(), String> {
+    let part = PathBuf::from(format!("{}.part", dest.display()));
+    if let Some(d) = dest.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("cannot create {}: {e}", d.display()))?;
+    }
+    let mut cmd = if have("curl") {
+        let mut c = Command::new("curl");
+        c.args(["-fsSL", "--connect-timeout", "15", "-o"]).arg(&part).arg(url);
+        c
+    } else if have("wget") {
+        let mut c = Command::new("wget");
+        c.args(["-q", "-T", "15", "-O"]).arg(&part).arg(url);
+        c
+    } else {
+        return Err("downloading needs curl or wget, and neither was found".into());
+    };
+    let mut child = cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+        progress(std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0), bytes);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    if !status.success() {
+        let _ = std::fs::remove_file(&part);
+        return Err("the download failed: check your connection".into());
+    }
+    progress(bytes, bytes);
+    let len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    let got = sha256_file(&part)?;
+    if len != bytes || got != sha256 {
+        let _ = std::fs::remove_file(&part);
+        return Err("the downloaded file did not match its checksum, so it was deleted".into());
+    }
+    std::fs::rename(&part, dest).map_err(|e| e.to_string())
 }
 
 pub fn remove_all() -> Result<usize, String> {
@@ -181,6 +232,42 @@ mod tests {
         std::fs::write(&p, b"abc").unwrap();
         assert_eq!(sha256_file(&p).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         std::fs::remove_file(&p).unwrap();
+    }
+
+    fn fixture(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wi-audio-fetch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn fetch_accepts_a_matching_file_and_reports_progress() {
+        let d = fixture("ok");
+        std::fs::write(d.join("src.bin"), b"abc").unwrap();
+        let mut seen = Vec::new();
+        let url = format!("file://{}", d.join("src.bin").display());
+        let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        fetch_to(&url, &d.join("out/model.gguf"), 3, sha, &mut |a, b| seen.push((a, b))).unwrap();
+        assert_eq!(std::fs::read(d.join("out/model.gguf")).unwrap(), b"abc");
+        assert_eq!(seen.last(), Some(&(3, 3)));
+        assert!(!d.join("out/model.gguf.part").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn fetch_rejects_a_wrong_hash_and_a_wrong_size_and_leaves_nothing() {
+        let d = fixture("bad");
+        std::fs::write(d.join("src.bin"), b"abd").unwrap();
+        let url = format!("file://{}", d.join("src.bin").display());
+        let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let e = fetch_to(&url, &d.join("m.gguf"), 3, sha, &mut |_, _| {}).unwrap_err();
+        assert!(e.contains("checksum"), "{e}");
+        assert!(!d.join("m.gguf").exists() && !d.join("m.gguf.part").exists());
+        std::fs::write(d.join("src.bin"), b"abcd").unwrap();
+        assert!(fetch_to(&url, &d.join("m.gguf"), 3, sha, &mut |_, _| {}).is_err());
+        assert!(fetch_to("file:///nonexistent/zzz", &d.join("m.gguf"), 3, sha, &mut |_, _| {}).is_err());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

@@ -104,6 +104,12 @@ pub struct State {
     /// Pinned-pane layout per workspace (`workspace_key`).
     #[serde(default)]
     pub panes: BTreeMap<String, PaneLayout>,
+    /// Dictation set-up steps answered "not now" (`helper`, `model`, `mic`): not asked again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voice_declined: Vec<String>,
+    /// The microphone test passed once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub voice_mic_ok: bool,
 }
 
 /// What is remembered about a workspace's pinned pane.

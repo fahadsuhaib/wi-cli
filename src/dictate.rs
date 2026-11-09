@@ -21,9 +21,6 @@ use tokio::sync::mpsc::UnboundedSender;
 /// A phrase that finishes within this long after a key waits until typing pauses.
 pub const TYPING_GAP: Duration = Duration::from_millis(300);
 
-/// Where to get the engine when it is missing.
-pub const INSTALL_HELP: &str = "no wi-audio found: download it from github.com/fahadsuhaib/wi-cli/releases, then run: wi-audio models install";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Listen {
     Loading,
@@ -100,32 +97,59 @@ pub fn split_command(cmd: &str) -> Vec<String> {
     out
 }
 
-/// The full command line: the configured command, `listen`, and the tuning options.
-pub fn command_line(cfg: &Transcribe, idle: Duration) -> Vec<String> {
-    let mut v = split_command(&cfg.command);
+/// Internal tuning. Fixed values; the environment overrides are for tests and debugging only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tuning {
+    pub end_silence_ms: u32,
+    pub min_speech_ms: u32,
+    pub vad_threshold: f32,
+    pub input_device: String,
+    pub held_timeout_s: u64,
+    pub leading_space: bool,
+}
+
+impl Tuning {
+    pub fn from_env() -> Tuning {
+        fn num<T: std::str::FromStr>(k: &str, d: T) -> T {
+            std::env::var(k).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d)
+        }
+        Tuning {
+            end_silence_ms: num("WICLI_VOICE_END_SILENCE_MS", 700),
+            min_speech_ms: num("WICLI_VOICE_MIN_SPEECH_MS", 250),
+            vad_threshold: num("WICLI_VOICE_VAD", 0.5),
+            input_device: std::env::var("WICLI_VOICE_DEVICE").unwrap_or_default(),
+            held_timeout_s: num("WICLI_VOICE_HELD_S", 30),
+            leading_space: std::env::var("WICLI_VOICE_LEADING_SPACE").as_deref() != Ok("0"),
+        }
+    }
+}
+
+/// The full command line: the helper, `listen`, and the tuning options.
+pub fn command_line(prefix: &[String], t: &Tuning, idle: Duration) -> Vec<String> {
+    let mut v = prefix.to_vec();
     if v.is_empty() {
         v.push("wi-audio".into());
     }
     v.push("listen".into());
-    v.extend(["--end-silence-ms".into(), cfg.end_silence_ms.to_string()]);
-    v.extend(["--min-speech-ms".into(), cfg.min_speech_ms.to_string()]);
-    v.extend(["--vad-threshold".into(), cfg.vad_threshold.to_string()]);
+    v.extend(["--end-silence-ms".into(), t.end_silence_ms.to_string()]);
+    v.extend(["--min-speech-ms".into(), t.min_speech_ms.to_string()]);
+    v.extend(["--vad-threshold".into(), t.vad_threshold.to_string()]);
     // wi switches the mode off itself at `idle`; the child gets a little more as a backstop.
     let backstop = if idle.is_zero() { 0 } else { idle.as_secs() + 10 };
     v.extend(["--idle-secs".into(), backstop.to_string()]);
-    if !cfg.input_device.trim().is_empty() {
-        v.extend(["--device".into(), cfg.input_device.trim().to_string()]);
+    if !t.input_device.trim().is_empty() {
+        v.extend(["--device".into(), t.input_device.trim().to_string()]);
     }
     v
 }
 
-/// The idle timeout: `WICLI_LISTEN_IDLE_SECS` (tests) beats `listen_idle_minutes`.
+/// The idle timeout: `WICLI_LISTEN_IDLE_SECS` (tests) beats `[transcribe] idle_minutes`.
 pub fn idle_timeout(cfg: &Transcribe) -> Duration {
     std::env::var("WICLI_LISTEN_IDLE_SECS")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .map(Duration::from_secs_f64)
-        .unwrap_or_else(|| Duration::from_secs(u64::from(cfg.listen_idle_minutes) * 60))
+        .unwrap_or_else(|| Duration::from_secs(u64::from(cfg.idle_minutes) * 60))
 }
 
 /// One-line, actionable text for an error event.
@@ -227,9 +251,9 @@ pub struct Dictation {
 }
 
 impl Dictation {
-    pub fn spawn(cfg: &Transcribe, gen_id: u64, tx: UnboundedSender<(u64, Ev)>) -> Result<Dictation, String> {
+    pub fn spawn(prefix: &[String], cfg: &Transcribe, gen_id: u64, tx: UnboundedSender<(u64, Ev)>) -> Result<Dictation, String> {
         let idle = idle_timeout(cfg);
-        let argv = command_line(cfg, idle);
+        let argv = command_line(prefix, &Tuning::from_env(), idle);
         let mut child = Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(Stdio::piped())
@@ -238,7 +262,7 @@ impl Dictation {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound { INSTALL_HELP.to_string() } else { format!("cannot start {}: {e}", argv[0]) }
+                if e.kind() == std::io::ErrorKind::NotFound { "the voice helper is missing: open menu > Dictation settings".to_string() } else { format!("cannot start {}: {e}", argv[0]) }
             })?;
         let stdout = child.stdout.take().ok_or("no output from the engine")?;
         let stderr = child.stderr.take().ok_or("no error output from the engine")?;
@@ -290,27 +314,51 @@ impl Dictation {
         self.last_speech + self.idle
     }
 
-    /// The text for the right end of the status line.
-    pub fn indicator(&self) -> String {
+    fn meter(&self, n: usize) -> String {
         const BARS: [char; 5] = [' ', '▁', '▂', '▅', '▇'];
-        let meter: String = self.levels.iter().map(|l| BARS[((l.clamp(0.0, 1.0)) * 4.0).round() as usize]).collect();
-        let base = match self.state {
+        let skip = self.levels.len().saturating_sub(n);
+        self.levels.iter().skip(skip).map(|l| BARS[((l.clamp(0.0, 1.0)) * 4.0).round() as usize]).collect()
+    }
+
+    /// The text of the mic button while on; `narrow` is just the dot.
+    pub fn button_text(&self, narrow: bool) -> String {
+        if narrow {
+            return "●".into();
+        }
+        match self.state {
             Listen::Loading => "● loading".to_string(),
-            Listen::Listening => format!("● listening {meter}"),
-            Listen::Hearing => format!("● hearing {meter}"),
+            Listen::Listening => format!("● listening {}", self.meter(3)).trim_end().to_string(),
+            Listen::Hearing => format!("● hearing {}", self.meter(3)).trim_end().to_string(),
             Listen::Transcribing => "● ...".to_string(),
-        };
-        match self.held.front() {
-            Some(h) => {
-                let mut t: String = h.text.chars().take(24).collect();
-                if h.text.chars().count() > 24 {
-                    t.push('…');
-                }
-                format!("held: \"{t}\"  {}", base.trim_end())
-            }
-            None => base.trim_end().to_string(),
         }
     }
+
+    /// A phrase waiting for the pane, for the status line.
+    pub fn held_text(&self) -> Option<String> {
+        let h = self.held.front()?;
+        let mut t: String = h.text.chars().take(24).collect();
+        if h.text.chars().count() > 24 {
+            t.push('…');
+        }
+        Some(format!("held: \"{t}\""))
+    }
+}
+
+/// Columns below which the mic button is just a dot.
+pub const NARROW: u16 = 60;
+
+/// The mic button for the top bar: None when dictation is not available (not macOS, or turned off
+/// in the config).
+pub fn button(d: Option<&Dictation>, width: u16, enabled: bool) -> Option<(String, crate::ui::MicState)> {
+    use crate::ui::MicState;
+    if !cfg!(target_os = "macos") || !enabled {
+        return None;
+    }
+    let narrow = width < NARROW;
+    Some(match d {
+        None => (if narrow { "○" } else { "○ mic" }.to_string(), MicState::Off),
+        Some(d) => (d.button_text(narrow), if d.state == Listen::Loading { MicState::Loading } else { MicState::Live }),
+    })
 }
 
 #[cfg(test)]
@@ -349,15 +397,15 @@ mod tests {
 
     #[test]
     fn command_line_carries_the_tuning() {
-        let cfg = Transcribe { command: "wi-audio --x".into(), input_device: " USB ".into(), ..Transcribe::default() };
-        let v = command_line(&cfg, Duration::from_secs(600));
+        let t = Tuning { input_device: " USB ".into(), ..Tuning::from_env() };
+        let v = command_line(&split_command("wi-audio --x"), &t, Duration::from_secs(600));
         assert_eq!(&v[..3], ["wi-audio", "--x", "listen"]);
         let at = |k: &str| v[v.iter().position(|a| a == k).unwrap() + 1].clone();
         assert_eq!(at("--end-silence-ms"), "700");
         assert_eq!(at("--min-speech-ms"), "250");
         assert_eq!(at("--idle-secs"), "610");
         assert_eq!(at("--device"), "USB");
-        let none = command_line(&Transcribe { command: "  ".into(), ..Transcribe::default() }, Duration::ZERO);
+        let none = command_line(&[], &t, Duration::ZERO);
         assert_eq!(none[0], "wi-audio");
         assert_eq!(none[none.iter().position(|a| a == "--idle-secs").unwrap() + 1], "0", "never idle: the engine gets no timeout either");
     }
@@ -424,28 +472,37 @@ mod tests {
     }
 
     #[test]
-    fn indicator_shows_state_meter_and_held_text() {
+    fn button_shows_state_meter_and_held_text() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
-            let cfg = Transcribe { command: "sleep 5".into(), ..Transcribe::default() };
             // `sleep 5 listen ...` fails fast, which is fine: only the struct is used here.
-            let mut d = Dictation::spawn(&cfg, 1, tx).unwrap();
-            assert_eq!(d.indicator(), "● loading");
+            let mut d = Dictation::spawn(&split_command("sleep 5"), &Transcribe::default(), 1, tx).unwrap();
+            assert_eq!(d.button_text(false), "● loading");
             d.state = Listen::Listening;
             d.push_level(0.0);
             d.push_level(1.0);
-            assert_eq!(d.indicator(), "● listening  ▇");
+            assert_eq!(d.button_text(false), "● listening  ▇");
+            assert_eq!(d.button_text(true), "●");
             d.state = Listen::Transcribing;
-            assert_eq!(d.indicator(), "● ...");
+            assert_eq!(d.button_text(false), "● ...");
+            assert_eq!(d.held_text(), None);
             d.held.push_back(held("a very long phrase that does not fit in the status line", Instant::now()));
-            assert!(d.indicator().starts_with("held: \"a very long phrase that …\""));
+            assert_eq!(d.held_text().as_deref(), Some("held: \"a very long phrase that …\""));
+            if cfg!(target_os = "macos") {
+                assert_eq!(button(Some(&d), 100, true).unwrap().0, "● ...");
+                assert_eq!(button(None, 100, true), Some(("○ mic".into(), crate::ui::MicState::Off)));
+                assert_eq!(button(None, 59, true), Some(("○".into(), crate::ui::MicState::Off)));
+                assert_eq!(button(None, 100, false), None);
+            } else {
+                assert_eq!(button(None, 100, true), None);
+            }
         });
     }
 
     #[test]
     fn idle_timeout_reads_the_override() {
-        let cfg = Transcribe { listen_idle_minutes: 7, ..Transcribe::default() };
+        let cfg = Transcribe { idle_minutes: 7, ..Transcribe::default() };
         // SAFETY: tests that touch this variable are this one only.
         unsafe { std::env::remove_var("WICLI_LISTEN_IDLE_SECS") };
         assert_eq!(idle_timeout(&cfg), Duration::from_secs(420));

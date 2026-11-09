@@ -36,6 +36,7 @@ mod transfer;
 mod tui;
 mod ui;
 mod update;
+mod voice;
 mod workspace;
 
 use anyhow::{Result, bail};

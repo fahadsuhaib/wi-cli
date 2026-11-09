@@ -177,7 +177,7 @@ fn read_small(path: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-fn sha256_of(path: &Path) -> Result<String, String> {
+pub(crate) fn sha256_of(path: &Path) -> Result<String, String> {
     let attempts: [(&str, &[&str]); 2] = [("sha256sum", &[]), ("shasum", &["-a", "256"])];
     for (cmd, args) in attempts {
         let out = Command::new(cmd).args(args).arg(path).stdin(Stdio::null()).stderr(Stdio::null()).output();
@@ -191,7 +191,7 @@ fn sha256_of(path: &Path) -> Result<String, String> {
     Err("needs sha256sum or shasum to verify the download".into())
 }
 
-fn scratch_dir() -> Result<PathBuf, String> {
+pub(crate) fn scratch_dir() -> Result<PathBuf, String> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let dir = std::env::temp_dir().join(format!("wi-update-{}-{nanos}", std::process::id()));
     std::fs::create_dir(&dir).map_err(|e| format!("could not make a temporary folder: {e}"))?;
@@ -201,6 +201,21 @@ fn scratch_dir() -> Result<PathBuf, String> {
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
     Ok(dir)
+}
+
+/// `download` without a progress callback, for the voice helper installer.
+pub(crate) fn download_to(url: &str, dest: &Path, limit: Duration, max_bytes: u64) -> Result<(), String> {
+    download(url, dest, limit, max_bytes, || {})
+}
+
+pub(crate) fn read_text(path: &Path) -> Result<String, String> {
+    read_small(path)
+}
+
+/// Unpack a `.tar.gz` into `out`.
+pub(crate) fn unpack(archive: &Path, out: &Path) -> Result<(), String> {
+    let st = run_limited(Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(out), Duration::from_secs(60), || {}).map_err(|e| format!("tar: {e}"))?;
+    if st.success() { Ok(()) } else { Err("could not unpack the archive".into()) }
 }
 
 // ---------------------------------------------------------------- the two steps
@@ -248,7 +263,16 @@ pub fn install(rel: &Release, status: &mut dyn FnMut(String)) -> Result<Installe
     let dir = scratch_dir()?;
     let keep = match install_in(rel, &exe, &base, &dir, status) {
         Ok(Installed::NeedsSudo { tmp, target, version }) => return Ok(Installed::NeedsSudo { tmp, target, version }),
-        Ok(done) => Ok(done),
+        Ok(done) => {
+            // The voice helper, when we installed one, is updated from the same release.
+            if let Some(r) = crate::voice::update_helper(&base, status) {
+                status(match r {
+                    Ok(_) => "voice helper updated".to_string(),
+                    Err(e) => format!("voice helper not updated ({e})"),
+                });
+            }
+            Ok(done)
+        }
         Err(e) => Err(e),
     };
     let _ = std::fs::remove_dir_all(&dir);

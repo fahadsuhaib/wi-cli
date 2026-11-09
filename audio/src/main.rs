@@ -40,6 +40,7 @@ usage:
   wi-audio doctor [--verify]      what is installed, microphone access, a test recording
   wi-audio models install [--tiny] [--yes]   download the speech model after a confirmation
   wi-audio models list | remove
+  wi-audio status | fetch-models [--tiny] | probe   (used by wi itself)
   wi-audio --version
 
 options:
@@ -129,6 +130,9 @@ fn main() {
         "transcribe" => cmd_transcribe(&args),
         "doctor" => doctor::run(args.has("verify")),
         "models" => cmd_models(&args),
+        "status" => cmd_status(),
+        "fetch-models" => cmd_fetch_models(&args),
+        "probe" => cmd_probe(&args),
         other => fail(&format!("unknown command '{other}' (try: wi-audio --help)")),
     }
 }
@@ -228,6 +232,79 @@ fn cmd_transcribe(a: &Args) {
     let mut engine = load_engine();
     let text = engine::transcribe_long(&mut engine, &pcm).unwrap_or_else(|e| fail(&e));
     println!("{text}");
+}
+
+/// What wi asks before it offers anything: one JSON line.
+fn cmd_status() {
+    let speech = models::speech_model();
+    let size = speech.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "{}",
+        serde_json::json!({
+            "ev": "status",
+            "protocol": 1,
+            "version": env!("CARGO_PKG_VERSION"),
+            "speech": speech.is_some(),
+            "speech_bytes": size,
+            "speech_total": models::SMALL.bytes,
+            "vad": models::vad_model().is_some(),
+            "models_dir": models::dir().display().to_string(),
+        })
+    );
+}
+
+/// Download the missing model files (wi has already asked the user), one JSON line per step.
+fn cmd_fetch_models(a: &Args) {
+    use listen::Emit;
+    let mut out = listen::Stdout;
+    let speech = if a.has("tiny") { &models::TINY } else { &models::SMALL };
+    for m in [speech, &models::VAD] {
+        if m.present() {
+            continue;
+        }
+        let mut last = 0u64;
+        let mut step = |done: u64, total: u64| {
+            if done != last {
+                last = done;
+                let mut o = listen::Stdout;
+                o.emit(serde_json::json!({"ev":"progress","what":m.id,"done":done,"total":total}));
+            }
+        };
+        if let Err(e) = models::fetch_to(&models::url_for(m), &m.path(), m.bytes, m.sha256, &mut step) {
+            out.emit(serde_json::json!({"ev":"error","kind":"download","msg":e}));
+            std::process::exit(2);
+        }
+    }
+    out.emit(serde_json::json!({"ev":"done"}));
+}
+
+/// A 3 second test recording for wi's first-use check.
+fn cmd_probe(a: &Args) {
+    use listen::Emit;
+    watch_stdin(true);
+    let mut out = listen::Stdout;
+    let src = match source::open(a.flags.get("device").map(String::as_str)) {
+        Ok(s) => s,
+        Err(e) => {
+            let kind = if e.contains("denied") { "mic_denied" } else { "mic" };
+            out.emit(serde_json::json!({"ev":"error","kind":kind,"msg":e}));
+            std::process::exit(2);
+        }
+    };
+    let rec = record::probe(&src, a.num("seconds", 3), &STOP, &mut out);
+    drop(src);
+    if rec.peak == 0.0 && source::test_file().is_none() {
+        out.emit(serde_json::json!({"ev":"error","kind":"mic_silent","msg":source::MIC_DENIED}));
+        std::process::exit(2);
+    }
+    let text = match models::speech_model().map(|p| engine::Moonshine::load(&p)) {
+        Some(Ok(mut e)) => {
+            use engine::Transcriber;
+            e.transcribe(&rec.pcm).map(|t| text::clean(&t)).unwrap_or_default()
+        }
+        _ => String::new(),
+    };
+    out.emit(serde_json::json!({"ev":"heard","text":text,"peak":rec.peak}));
 }
 
 fn cmd_models(a: &Args) {

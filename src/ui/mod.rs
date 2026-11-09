@@ -37,7 +37,7 @@ pub enum Action {
     RenameTab,
     /// Restart wi in place (the same tabs come back).
     Restart,
-    /// Hands-free dictation on or off: each spoken phrase is typed into the focused pane.
+    /// Dictation: set it up, turn it on or off, and (while on) its options.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Dictation,
     Agent,
@@ -184,7 +184,7 @@ pub const MENU: &[MenuItem] = &[
     mi("Reconnect", 'r', Action::Reconnect, true, "SESSION", &["connection", "ssh", "retry"]),
     mi("Download", 'd', Action::Download, true, "SESSION", &["fetch", "copy", "save", "file"]),
     #[cfg(target_os = "macos")]
-    mi("Dictation (voice) on/off", NO_KEY, Action::Dictation, false, "AGENT", &["dictate", "voice", "speak", "talk", "microphone", "mic", "listen", "speech"]),
+    mi("Dictation", NO_KEY, Action::Dictation, false, "AGENT", &["dictate", "voice", "speak", "talk", "listen", "microphone", "options"]),
     mi("Update wi", NO_KEY, Action::Update, false, "SESSION", &["upgrade", "new", "version", "release", "download", "latest"]),
     mi("Restart wi", NO_KEY, Action::Restart, false, "SESSION", &["reload", "relaunch", "again", "new version"]),
     mi("Quit", 'q', Action::Quit, false, "SESSION", &["exit", "detach", "disconnect", "leave"]),
@@ -474,6 +474,14 @@ pub struct Confirm {
     pub yes: String,
 }
 
+/// A dictation set-up or settings dialog: a title, text lines and a line of key hints.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoiceView {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub footer: String,
+}
+
 /// A label drawn over a link on screen (position relative to the whole terminal screen).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hint {
@@ -570,11 +578,26 @@ pub struct View<'a> {
     pub status: Option<&'a str>,
     /// The file explorer, drawn over the whole screen (no header, tab strip or status bar).
     pub explorer: Option<&'a crate::explorer::ExplorerState>,
-    /// The dictation indicator for the right end of the status bar, while the mode is on.
-    pub mic: Option<&'a str>,
+    /// The mic button at the right end of the top bar: its text and state.
+    pub mic: Option<(&'a str, MicState)>,
+    /// A dictated phrase waiting for the pane, shown at the right end of the status bar.
+    pub held: Option<&'a str>,
+    /// The dictation set-up or settings dialog, when open.
+    pub voice: Option<&'a VoiceView>,
 }
 
-/// Where the dictation indicator sits on the status row: (first column, width), right-aligned.
+/// What the mic button shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MicState {
+    /// Dictation is off: a dim `○ mic`.
+    Off,
+    /// Starting up.
+    Loading,
+    /// Listening, hearing or converting: the accent dot.
+    Live,
+}
+
+/// Where a right-aligned label sits on its row: (first column, width), with a space on each side.
 pub fn mic_span(text: &str, width: u16) -> (u16, u16) {
     let w = (text.chars().count() as u16 + 2).min(width);
     (width - w, w)
@@ -672,12 +695,29 @@ fn draw_frame(f: &mut Frame, v: &View) {
 
     let tail = if v.remote { "  connected" } else { "" };
     let fixed = format!(" wicli  {}  ", v.name).chars().count() + tail.chars().count();
-    let room = (header.width as usize).saturating_sub(fixed);
+    // The mic button keeps its place at the right end; the folder text gives way first.
+    let mic_w = v.mic.map_or(0, |(m, _)| mic_span(m, header.width).1 as usize);
+    let room = (header.width as usize).saturating_sub(fixed + mic_w);
     let detail = left_trim(v.detail, room);
     f.render_widget(
         Paragraph::new(format!(" wicli  {}  {detail}{tail}", v.name)).style(bar.fg(t.header).add_modifier(Modifier::BOLD)),
         header,
     );
+
+    if let Some((m, st)) = v.mic {
+        let (x, w) = mic_span(m, header.width);
+        let r = Rect::new(header.x + x, header.y, w, 1);
+        let color = match st {
+            MicState::Off => t.tab_inactive,
+            MicState::Loading => t.header,
+            MicState::Live => t.diff_remove,
+        };
+        let mut style = bar.fg(color).add_modifier(Modifier::BOLD);
+        if st == MicState::Off {
+            style = bar.fg(color).add_modifier(Modifier::DIM);
+        }
+        f.render_widget(Paragraph::new(format!(" {m} ")).style(style), r);
+    }
 
     if strip_h == 1 {
         let mut spans = Vec::new();
@@ -814,6 +854,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
     let status_text = v.status.map(|t| format!(" {t}"));
     let hint = match (v.menu.as_ref(), v.message) {
         _ if status_text.is_some() => status_text.unwrap_or_default(),
+        _ if v.voice.is_some() => format!(" {}", v.voice.map(|d| d.footer.as_str()).unwrap_or_default()),
         _ if v.confirm.is_some_and(|c| c.yes.is_empty()) => " Esc cancels the download".to_string(),
         _ if v.confirm.is_some() => " Y or Enter to continue · N or Esc to cancel".to_string(),
         _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
@@ -833,15 +874,18 @@ fn draw_frame(f: &mut Frame, v: &View) {
         (None, None) => format!(" {}  menu", v.menu_label),
     };
     f.render_widget(Paragraph::new(hint).style(status_bar), status);
-    if let Some(m) = v.mic {
-        let (x, w) = mic_span(m, status.width);
+    if let Some(h) = v.held {
+        let (x, w) = mic_span(h, status.width);
         let r = Rect::new(status.x + x, status.y, w, 1);
-        let hot = !m.starts_with("● loading");
-        f.render_widget(Paragraph::new(format!(" {m} ")).style(Style::default().bg(t.status_bg).fg(if hot { Color::Red } else { t.status_fg }).add_modifier(Modifier::BOLD)), r);
+        f.render_widget(Paragraph::new(format!(" {h} ")).style(status_bar.add_modifier(Modifier::BOLD)), r);
     }
 
     if let Some(c) = v.confirm {
         draw_confirm(f, main, c);
+        return;
+    }
+    if let Some(d) = v.voice {
+        draw_voice(f, main, d);
         return;
     }
     if let Some(a) = v.ask {
@@ -1173,6 +1217,20 @@ fn draw_pick(f: &mut Frame, main: Rect, p: &crate::pick::Pick) {
     let title = format!(" Which {}? ", sanitize(&p.path.chars().take(40).collect::<String>()));
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(&title, t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
+}
+
+fn draw_voice(f: &mut Frame, main: Rect, d: &VoiceView) {
+    let w = 84.min(main.width);
+    let h = (d.lines.len() as u16 + 4).min(main.height);
+    let area = Rect::new(main.x + main.width.saturating_sub(w) / 2, main.y + main.height.saturating_sub(h) / 2, w, h);
+    let t = theme();
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for l in &d.lines {
+        lines.push(Line::from(format!(" {}", sanitize(l))));
+    }
+    lines.push(Line::from(""));
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).style(Style::default().bg(t.dialog_bg).fg(t.dialog_fg)).block(bordered(&format!(" {} ", sanitize(&d.title)), t.dialog_border, t.dialog_bg, t.dialog_fg)), area);
 }
 
 fn draw_confirm(f: &mut Frame, main: Rect, c: &Confirm) {

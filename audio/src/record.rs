@@ -71,6 +71,30 @@ pub fn capture(src: &Source, lim: &Limits, stop: &AtomicBool) -> Recording {
     Recording { pcm, why, peak }
 }
 
+/// A short test recording for wi's first-use check: level events while it records. The caller
+/// decides what to say about the result.
+pub fn probe(src: &Source, seconds: u32, stop: &AtomicBool, out: &mut dyn crate::listen::Emit) -> Recording {
+    let end = Instant::now() + Duration::from_secs(u64::from(seconds));
+    let mut pcm: Vec<f32> = Vec::new();
+    let mut peak = 0.0f32;
+    let mut last = Instant::now() - Duration::from_millis(100);
+    while Instant::now() < end && !stop.load(Ordering::Relaxed) {
+        match src.recv(Duration::from_millis(100)) {
+            Recv::End => break,
+            Recv::Empty => {}
+            Recv::Chunk(c) => {
+                peak = c.iter().fold(peak, |p, x| p.max(x.abs()));
+                pcm.extend(c);
+            }
+        }
+        if last.elapsed() >= Duration::from_millis(100) && pcm.len() >= FRAME {
+            last = Instant::now();
+            out.emit(serde_json::json!({"ev":"level","v":crate::vad::level(&pcm[pcm.len() - FRAME..])}));
+        }
+    }
+    Recording { pcm, why: "done", peak }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +135,21 @@ mod tests {
         let r = capture(&s, &Limits { max_seconds: 30, silence_stop_ms: 500, meter: false }, &AtomicBool::new(false));
         assert_eq!(r.why, "end of audio");
         assert_eq!(r.peak, 0.0);
+    }
+
+    #[test]
+    fn probe_reports_levels_and_returns_what_it_heard() {
+        struct C(Vec<serde_json::Value>);
+        impl crate::listen::Emit for C {
+            fn emit(&mut self, v: serde_json::Value) {
+                self.0.push(v);
+            }
+        }
+        let s = src(vec![tone(0.5)]);
+        let mut c = C(vec![]);
+        let r = probe(&s, 3, &AtomicBool::new(false), &mut c);
+        assert!(r.peak > 0.2 && r.pcm.len() == 8000);
+        assert!(!c.0.is_empty() && c.0.iter().all(|e| e["ev"] == "level"));
     }
 
     #[test]

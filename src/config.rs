@@ -86,48 +86,19 @@ impl Default for Defaults {
     }
 }
 
-/// `[transcribe]`: hands-free dictation through the separate `wi-audio` program.
+/// `[transcribe]`: voice dictation (macOS only for now). Everything else about it is internal.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct Transcribe {
-    /// The engine program (any program that speaks the `listen` event lines). Words are split on
-    /// spaces, quotes keep them together; `listen` and the options below are appended.
-    pub command: String,
-    /// Longest single recording of "dictate once" (seconds). Reserved: wi's hands-free mode cuts
-    /// phrases by itself.
-    pub max_seconds: u32,
-    /// Silence that stops "dictate once" after speech (milliseconds, 0 = off). Reserved.
-    pub silence_stop_ms: u32,
-    /// Silence that ends a phrase (milliseconds).
-    pub end_silence_ms: u32,
-    /// Speech that starts a phrase (milliseconds).
-    pub min_speech_ms: u32,
+    /// Allow the Dictation menu entry to work.
+    pub enabled: bool,
     /// Dictation turns itself off after this many minutes without speech (0 = never).
-    pub listen_idle_minutes: u32,
-    /// How sure the voice detector must be that it hears speech (0 to 1).
-    pub vad_threshold: f32,
-    /// Part of the microphone's name; empty means the system default.
-    pub input_device: String,
-    /// Start a phrase with a space when the character before the cursor is not blank.
-    pub paste_leading_space: bool,
-    /// A phrase the pane could not take is dropped after this many seconds.
-    pub held_timeout_s: u64,
+    pub idle_minutes: u32,
 }
 
 impl Default for Transcribe {
     fn default() -> Self {
-        Self {
-            command: "wi-audio".into(),
-            max_seconds: 120,
-            silence_stop_ms: 0,
-            end_silence_ms: 700,
-            min_speech_ms: 250,
-            listen_idle_minutes: 10,
-            vad_threshold: 0.5,
-            input_device: String::new(),
-            paste_leading_space: true,
-            held_timeout_s: 30,
-        }
+        Self { enabled: true, idle_minutes: 10 }
     }
 }
 
