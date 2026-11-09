@@ -571,6 +571,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         let wrap = t.parser.screen().bracketed_paste();
                         t.write(dictate::paste_bytes(&s, wrap));
                         d.last_paste = Some(now);
+                        if agent_state.voice_auto_send {
+                            d.pending_send = Some(app.tabs[app.active].id);
+                        }
                         snap_live(&mut app);
                         dict_wake = Some(now + Duration::from_millis(150));
                         dirty = true;
@@ -580,6 +583,22 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         dirty = true;
                     }
                     dictate::Step::Wait(w) => dict_wake = w,
+                }
+                // Auto-send: after the quiet, press Enter in the pane the text went to.
+                if d.pending_send.is_some() {
+                    let t = &app.tabs[app.active];
+                    let can = matches!(mode, Mode::Shell) && pasting.is_none() && !t.is_preview() && !t.side_focused();
+                    match dictate::send_step(d.pending_send, t.id, can, !d.held.is_empty(), matches!(d.state, dictate::Listen::Hearing), now, d.last_paste, d.last_speech, last_input, dictate::auto_send_delay()) {
+                        dictate::Send::Enter => {
+                            t.write(b"\r".to_vec());
+                            d.pending_send = None;
+                            snap_live(&mut app);
+                            dirty = true;
+                        }
+                        dictate::Send::Cancel => d.pending_send = None,
+                        dictate::Send::WaitUntil(w) => dict_wake = Some(dict_wake.map_or(w, |x| x.min(w))),
+                        dictate::Send::Nothing => {}
+                    }
                 }
                 if !d.idle.is_zero() && matches!(d.state, dictate::Listen::Listening | dictate::Listen::Loading) {
                     let idle_at = d.idle_deadline();
@@ -1781,7 +1800,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     mode = Mode::Shell;
                                     message = Some("dictation off".into());
                                 }
-                                (Kind::On, Key::Char('o')) => mode = Mode::Voice(voice::Dlg::options()),
+                                (Kind::On, Key::Char('o')) => mode = Mode::Voice(voice::Dlg::options(agent_state.voice_auto_send)),
                                 (Kind::On, Key::No) => mode = Mode::Shell,
                                 (Kind::Options, Key::Char('t')) => {
                                     // The test needs the microphone: dictation stops, and starts again after it.
@@ -1793,6 +1812,13 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     if let Some(a) = vargv.clone() { voice::spawn_probe(&voice_tx, vgen, a, vcancel.clone()); }
                                     mode = Mode::Voice(voice::Dlg::busy(Step::Mic));
                                 }
+                                (Kind::Options, Key::Char('a')) => {
+                                    agent_state.voice_auto_send = !agent_state.voice_auto_send;
+                                    let _ = agent_state.save();
+                                    if let Some(d) = dict.as_mut() { d.pending_send = None; }
+                                    message = Some(if agent_state.voice_auto_send { "dictation: Enter is pressed after 3 s of quiet".into() } else { "dictation: Enter is yours again".into() });
+                                    mode = Mode::Voice(voice::Dlg::options(agent_state.voice_auto_send));
+                                }
                                 (Kind::Options, Key::Char('r')) => mode = Mode::Voice(voice::Dlg::ask_remove()),
                                 (Kind::Options, Key::No) => mode = Mode::Voice(voice::Dlg::on()),
                                 (Kind::AskRemove, Key::Yes) => {
@@ -1802,7 +1828,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     mode = Mode::Shell;
                                     message = Some("removing voice ...".into());
                                 }
-                                (Kind::AskRemove, Key::No) => mode = Mode::Voice(voice::Dlg::options()),
+                                (Kind::AskRemove, Key::No) => mode = Mode::Voice(voice::Dlg::options(agent_state.voice_auto_send)),
                                 _ => {}
                             }
                         }

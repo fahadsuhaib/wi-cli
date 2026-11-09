@@ -347,46 +347,54 @@ pub struct Dlg {
 
 impl Dlg {
     fn new(kind: Kind, title: &str, lines: Vec<String>, footer: &str) -> Dlg {
-        Dlg { kind, view: VoiceView { title: title.into(), lines, footer: footer.into() }, levels: VecDeque::new() }
+        Dlg { kind, view: VoiceView { title: title.into(), lines, footer: footer.into(), heading: false }, levels: VecDeque::new() }
     }
 
     pub fn ask(step: Step, model_bytes: u64) -> Dlg {
-        const FOOT: &str = "Enter or Y: yes  ·  N or Esc: not now";
-        match step {
+        const FOOT: &str = "Enter: yes  ·  Esc: not now";
+        let mut d = match step {
             Step::Install => Dlg::new(
                 Kind::Ask(step),
-                "Dictation needs a small helper",
+                "Voice setup: the helper",
                 vec![
-                    "Install the voice helper (about 2 MB) from github.com/fahadsuhaib/wi-cli?".into(),
-                    "File: wi-audio-macos-arm64.tar.gz, checked with SHA256. Audio stays on this computer.".into(),
+                    "Install the small voice helper (about 2 MB)".into(),
+                    "It is the part that listens and turns speech into text. It is downloaded from github.com/fahadsuhaib/wi-cli (wi-audio-macos-arm64.tar.gz) and checked with SHA256 before it is used.".into(),
+                    "Your audio never leaves this Mac.".into(),
                 ],
                 FOOT,
             ),
             Step::Model => Dlg::new(
                 Kind::Ask(step),
-                "Dictation needs a speech model",
+                "Voice setup: the speech model",
                 vec![
-                    format!("Download the speech model ({}) from huggingface.co?", mb(if model_bytes > 0 { model_bytes } else { MODEL_BYTES })),
-                    "File: moonshine-streaming-small-Q8_0.gguf, checked with SHA256. It runs on this computer.".into(),
+                    format!("Download the speech model ({})", mb(if model_bytes > 0 { model_bytes } else { MODEL_BYTES })),
+                    "It is downloaded once from huggingface.co (moonshine-streaming-small-Q8_0.gguf), checked with SHA256 and reused every time. It runs only on this Mac, so nothing you say is sent anywhere.".into(),
+                    "While dictation is on it uses roughly 400 MB of memory; when it is off it uses none.".into(),
                 ],
                 FOOT,
             ),
             Step::Mic => Dlg::new(
                 Kind::Ask(step),
-                "Test the microphone?",
-                vec!["Say a short sentence for 3 seconds; macOS may ask to allow your terminal to use the microphone.".into()],
-                "Enter or Y: test  ·  N or Esc: skip and turn dictation on",
+                "Voice setup: the microphone",
+                vec![
+                    "Test the microphone (3 seconds)".into(),
+                    "When the test starts, say a short sentence. You will see the level move as you speak, then what was heard.".into(),
+                    "The first time, macOS asks whether your terminal app may use the microphone. Choose Allow.".into(),
+                ],
+                "Enter: start the test  ·  Esc: skip and turn dictation on",
             ),
-        }
+        };
+        d.view.heading = true;
+        d
     }
 
     pub fn busy(step: Step) -> Dlg {
         let (title, line) = match step {
-            Step::Install => ("Installing the voice helper", "starting ..."),
-            Step::Model => ("Downloading the speech model", "starting ..."),
+            Step::Install => ("Installing the voice helper", "Starting the download ..."),
+            Step::Model => ("Downloading the speech model", "Starting the download ..."),
             Step::Mic => ("Microphone test", "Speak now ..."),
         };
-        Dlg::new(Kind::Busy(step), title, vec![line.into()], "Esc cancels")
+        Dlg::new(Kind::Busy(step), title, vec![line.into()], "Esc: cancel")
     }
 
     pub fn status_line(&mut self, text: &str) {
@@ -402,12 +410,12 @@ impl Dlg {
         while self.levels.len() > 24 {
             self.levels.pop_front();
         }
-        self.view.lines = vec![format!("Speak now ...   {:.0} s of 3", elapsed.as_secs_f32().min(3.0)), format!("  {}", meter(&self.levels))];
+        self.view.lines = vec![format!("Speak now ...   {:.0} s of 3", elapsed.as_secs_f32().min(3.0)), format!("  {}", meter(&self.levels)), "Say a short sentence, for example: write a short commit message.".into()];
     }
 
     pub fn heard(text: &str) -> Dlg {
         let line = if text.trim().is_empty() { "The microphone works, but no words were recognised. Try again closer to the microphone.".to_string() } else { format!("heard: {text}") };
-        Dlg::new(Kind::Heard, "Microphone works", vec![line, "Dictation will type each phrase you say into the focused pane.".into()], "Enter: turn dictation on  ·  Esc: close")
+        Dlg::new(Kind::Heard, "Microphone works", vec![line, "Looks good. Dictation will type each phrase you say into the focused pane, without pressing Enter.".into()], "Enter: turn dictation on  ·  Esc: close")
     }
 
     pub fn info(title: &str, lines: Vec<String>) -> Dlg {
@@ -415,15 +423,16 @@ impl Dlg {
     }
 
     pub fn on() -> Dlg {
-        Dlg::new(Kind::On, "Dictation is on", vec!["Each phrase you say is typed into the focused pane.".into()], "Enter: turn off  ·  O: options  ·  Esc: close")
+        Dlg::new(Kind::On, "Dictation is on", vec!["Just talk. Each phrase you say is typed into the focused pane, without pressing Enter.".into(), "Click the mic at the top right, or press Enter here, to turn it off.".into()], "Enter: turn off  ·  O: options  ·  Esc: close")
     }
 
-    pub fn options() -> Dlg {
-        Dlg::new(Kind::Options, "Dictation options", vec!["T  test the microphone".into(), "R  remove voice (frees 200 MB)".into()], "T or R  ·  Esc: back")
+    pub fn options(auto_send: bool) -> Dlg {
+        let a = if auto_send { "A: automatic Enter is ON: Enter is pressed after 3 seconds of quiet (press A to turn off)" } else { "A: automatic Enter is OFF (press A to press Enter by itself after 3 seconds of quiet)" };
+        Dlg::new(Kind::Options, "Dictation options", vec![a.into(), "T: test the microphone".into(), "R: remove voice (deletes the model and helper, frees 200 MB)".into()], "A: auto Enter  ·  T: test  ·  R: remove  ·  Esc: back")
     }
 
     pub fn ask_remove() -> Dlg {
-        Dlg::new(Kind::AskRemove, "Remove voice?", vec!["Deletes the speech model and the helper (frees 200 MB). Dictation sets itself up again if you use it later.".into()], "Enter or Y: remove  ·  N or Esc: keep")
+        Dlg::new(Kind::AskRemove, "Remove voice?", vec!["Deletes the speech model and the helper (frees 200 MB). Dictation sets itself up again if you use it later.".into()], "Enter: remove  ·  Esc: keep")
     }
 
     /// Read one chunk of keyboard input.
@@ -446,7 +455,7 @@ impl Dlg {
 /// Friendly one-liner for an error the helper reported while testing or downloading.
 pub fn friendly(kind: &str, msg: &str) -> String {
     match kind {
-        "mic_denied" | "mic_silent" => "No sound from the microphone.\nAllow your terminal app in System Settings > Privacy & Security > Microphone,\nthen restart the terminal and try again.".to_string(),
+        "mic_denied" | "mic_silent" => "No sound from the microphone. Allow your terminal app in System Settings > Privacy & Security > Microphone, then restart the terminal and try again.".to_string(),
         "no_mic" | "mic" => "No microphone found.".to_string(),
         _ if msg.is_empty() => "Something went wrong.".to_string(),
         _ => msg.to_string(),
@@ -748,14 +757,15 @@ mod tests {
         assert_eq!(m.key(b"N", 0), Key::No);
         assert_eq!(m.key(b"\x1b", 0), Key::No);
         assert_eq!(m.key(b"\x00", 0), Key::No);
-        let o = Dlg::options();
+        let o = Dlg::options(false);
+        assert_eq!(o.key(b"a", 0), Key::Char('a'));
         assert_eq!(o.key(b"t", 0), Key::Char('t'));
         assert_eq!(o.key(b"r", 0), Key::Char('r'));
         assert_eq!(o.key(b"\x1b", 0), Key::No);
         let on = Dlg::on();
         assert_eq!(on.key(b"o", 0), Key::Char('o'));
         assert_eq!(on.key(b"\r", 0), Key::Yes);
-        assert!(o.view.lines.len() == 2, "two actions plus Esc: Test mic, Remove voice");
+        assert!(o.view.lines.len() == 3, "three actions plus Esc: automatic Enter, Test mic, Remove voice");
         assert!(o.view.lines.join(" ").contains("200 MB"));
     }
 

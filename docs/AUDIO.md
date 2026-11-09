@@ -13,7 +13,7 @@ macOS asks once to let your terminal app use the microphone; if you said no, all
 Security > Microphone.
 
 The mic shows `● listening`, `● hearing` and `● ...` while on. Click it again to stop. Choosing Dictation while it is on
-shows a small screen: Enter turns it off, **O** opens the options: **T** test the microphone, **R** remove voice (deletes
+shows a small screen: Enter turns it off, **O** opens the options: **A** press Enter by itself after 3 seconds of quiet (off until you turn it on; typing or switching tabs cancels it), **T** test the microphone, **R** remove voice (deletes
 the model and the helper, frees 200 MB).
 
 ## Privacy

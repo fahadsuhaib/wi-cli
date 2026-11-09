@@ -110,6 +110,9 @@ pub struct State {
     /// The microphone test passed once.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub voice_mic_ok: bool,
+    /// Dictation presses Enter by itself after a few seconds of quiet (off until the user turns it on).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub voice_auto_send: bool,
 }
 
 /// What is remembered about a workspace's pinned pane.

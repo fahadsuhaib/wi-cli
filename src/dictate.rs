@@ -209,6 +209,45 @@ pub fn next_step(q: &mut VecDeque<Held>, now: Instant, last_key: Instant, can_pa
     Step::Paste(if leading_space { format!(" {}", h.text) } else { h.text })
 }
 
+/// How long the quiet must last before dictation presses Enter (when the user turned that on):
+/// 3 seconds; `WICLI_VOICE_AUTOSEND_S` overrides it for tests.
+pub fn auto_send_delay() -> Duration {
+    let ms = std::env::var("WICLI_VOICE_AUTOSEND_S").ok().and_then(|v| v.trim().parse::<f64>().ok()).map_or(3000, |s| (s * 1000.0) as u64);
+    Duration::from_millis(ms)
+}
+
+/// What the automatic Enter should do now.
+#[derive(Debug, PartialEq)]
+pub enum Send {
+    Nothing,
+    /// The user typed, or moved to another tab: forget the pending Enter.
+    Cancel,
+    Enter,
+    WaitUntil(Instant),
+}
+
+/// Press Enter once the quiet after the last dictated phrase has lasted `delay`. Only while the
+/// pane that got the text is still the active one, nothing was typed since, no phrase is waiting
+/// to be pasted and nobody is speaking.
+#[allow(clippy::too_many_arguments)]
+pub fn send_step(pending: Option<usize>, active_id: usize, can_paste: bool, waiting: bool, hearing: bool, now: Instant, last_paste: Option<Instant>, last_speech: Instant, last_key: Instant, delay: Duration) -> Send {
+    let (Some(tab), Some(pasted)) = (pending, last_paste) else { return Send::Nothing };
+    if tab != active_id || last_key > pasted {
+        return Send::Cancel;
+    }
+    if waiting || hearing {
+        return Send::Nothing;
+    }
+    let due = pasted.max(last_speech) + delay;
+    if now < due {
+        Send::WaitUntil(due)
+    } else if can_paste {
+        Send::Enter
+    } else {
+        Send::Nothing
+    }
+}
+
 /// Whether the cell left of the cursor is blank (or there is none): then no leading space is added.
 pub fn after_space(screen: &vt100::Screen) -> bool {
     let (row, col) = screen.cursor_position();
@@ -242,6 +281,8 @@ pub struct Dictation {
     pub held: VecDeque<Held>,
     /// When the last phrase went into a pane (the next one then starts with a space).
     pub last_paste: Option<Instant>,
+    /// The tab whose pasted phrases are waiting for the automatic Enter (auto-send is on).
+    pub pending_send: Option<usize>,
     /// A fatal error text already shown, so the exit does not overwrite it.
     pub shown_error: bool,
     /// Why the engine said it stopped (its `off` event).
@@ -295,6 +336,7 @@ impl Dictation {
             idle,
             held: VecDeque::new(),
             last_paste: None,
+            pending_send: None,
             shown_error: false,
             off_why: None,
             _child: child,
@@ -461,6 +503,30 @@ mod tests {
     fn bracketed_markers_only_when_the_pane_asked() {
         assert_eq!(paste_bytes("hi", true), b"\x1b[200~hi\x1b[201~");
         assert_eq!(paste_bytes("hi", false), b"hi");
+    }
+
+    #[test]
+    fn enter_follows_after_the_quiet_and_only_when_nothing_changed() {
+        let t0 = Instant::now();
+        let d = Duration::from_secs(3);
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let step = |pending, active, can, waiting, hearing, now, speech, key| send_step(pending, active, can, waiting, hearing, now, Some(t0), speech, key, d);
+        // Nothing pasted: nothing to send.
+        assert_eq!(send_step(None, 1, true, false, false, at(9), None, t0, t0, d), Send::Nothing);
+        // Waiting for the quiet.
+        assert_eq!(step(Some(1), 1, true, false, false, at(1), t0, t0), Send::WaitUntil(at(3)));
+        // Quiet long enough: Enter.
+        assert_eq!(step(Some(1), 1, true, false, false, at(3), t0, t0), Send::Enter);
+        // More speech restarts the wait.
+        assert_eq!(step(Some(1), 1, true, false, false, at(4), at(2), t0), Send::WaitUntil(at(5)));
+        // Someone is speaking or a phrase waits: hold.
+        assert_eq!(step(Some(1), 1, true, false, true, at(9), t0, t0), Send::Nothing);
+        assert_eq!(step(Some(1), 1, true, true, false, at(9), t0, t0), Send::Nothing);
+        // A pane that cannot take keys now: hold, never lose it.
+        assert_eq!(step(Some(1), 1, false, false, false, at(9), t0, t0), Send::Nothing);
+        // The user typed after the paste, or switched tab: cancelled.
+        assert_eq!(step(Some(1), 1, true, false, false, at(9), t0, at(1)), Send::Cancel);
+        assert_eq!(step(Some(1), 2, true, false, false, at(9), t0, t0), Send::Cancel);
     }
 
     #[test]
