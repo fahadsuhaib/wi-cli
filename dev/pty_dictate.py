@@ -115,7 +115,7 @@ class Run:
         if st: open(self.state, "w").write(st)
         env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_TMUX_SOCKET="dictatetest",
                    FAKE_SCENARIO=CFGDIR + "/scenario.json", FAKE_PIDFILE=self.pidfile, FAKE_ARGS=self.argsfile, FAKE_MODEL_FLAG=self.flag,
-                   WICLI_VOICE_BIN=self.vbin, PATH="/usr/bin:/bin")
+                   WICLI_VOICE_BIN=self.vbin, WICLI_DICTATION_LOG=CFGDIR + "/dictation_default.log", PATH="/usr/bin:/bin")
         if not missing: env["WICLI_VOICE_COMMAND"] = cmd
         if serve: env["WICLI_AUDIO_URL"] = "file://" + SERVE
         if extra_env: env.update(extra_env)
