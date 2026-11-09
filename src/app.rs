@@ -706,7 +706,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         }
                         VEv::Installed(Err(e)) => mode = Mode::Voice(voice::Dlg::info("Could not install the voice helper", vec![e])),
                         VEv::ModelDone(Ok(())) => {
-                            agent_state.voice_declined.retain(|d| d != "model");
+                            agent_state.voice_declined.retain(|d| d != "model" && !d.starts_with("upgrade:"));
                             let _ = agent_state.save();
                             message = Some("speech model downloaded".into());
                             if let Mode::Voice(d) = &mut mode { d.status_line("downloaded and checked. Continuing ..."); }
@@ -1765,7 +1765,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     vstarted = Instant::now();
                                     match (step, argv) {
                                         (Step::Install, _) => voice::spawn_install(&voice_tx, vgen),
-                                        (Step::Model, Some(a)) => voice::spawn_fetch(&voice_tx, vgen, a, vcancel.clone()),
+                                        (Step::Model | Step::Upgrade, Some(a)) => voice::spawn_fetch(&voice_tx, vgen, a, vcancel.clone(), false),
                                         (Step::Mic, Some(a)) => voice::spawn_probe(&voice_tx, vgen, a, vcancel.clone()),
                                         _ => {}
                                     }
@@ -1776,6 +1776,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     if step == Step::Mic {
                                         if !agent_state.voice_declined.iter().any(|d| d == "mic") { agent_state.voice_declined.push("mic".into()); let _ = agent_state.save(); }
                                         start_dictation(vargv.as_deref().unwrap_or(&[]), &tcfg, &mut dict_gen, &dict_tx, &mut dict, &mut message);
+                                    } else if step == Step::Upgrade {
+                                        // Keep working with the model we have; do not ask about this upgrade again.
+                                        let key = format!("upgrade:{}", voice::BEST_MODEL);
+                                        if !agent_state.voice_declined.contains(&key) { agent_state.voice_declined.push(key); let _ = agent_state.save(); }
+                                        start_dictation(vargv.as_deref().unwrap_or(&[]), &tcfg, &mut dict_gen, &dict_tx, &mut dict, &mut message);
+                                        message = Some(voice::not_now_text(step).into());
                                     } else {
                                         if !agent_state.voice_declined.iter().any(|d| d == step.key()) { agent_state.voice_declined.push(step.key().into()); let _ = agent_state.save(); }
                                         message = Some(voice::not_now_text(step).into());
@@ -1818,6 +1824,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     if let Some(d) = dict.as_mut() { d.pending_send = None; }
                                     message = Some(if agent_state.voice_auto_send { "dictation: Enter is pressed after 3 s of quiet".into() } else { "dictation: Enter is yours again".into() });
                                     mode = Mode::Voice(voice::Dlg::options(agent_state.voice_auto_send));
+                                }
+                                (Kind::Options, Key::Char('d')) => {
+                                    // Fetch the current speech model again (the old file is replaced only after the new one checks out).
+                                    dict = None;
+                                    vargv = voice::locate();
+                                    vgen += 1;
+                                    vcancel = Arc::new(AtomicBool::new(false));
+                                    vstarted = Instant::now();
+                                    if let Some(a) = vargv.clone() { voice::spawn_fetch(&voice_tx, vgen, a, vcancel.clone(), true); }
+                                    mode = Mode::Voice(voice::Dlg::busy(Step::Model));
                                 }
                                 (Kind::Options, Key::Char('r')) => mode = Mode::Voice(voice::Dlg::ask_remove()),
                                 (Kind::Options, Key::No) => mode = Mode::Voice(voice::Dlg::on()),

@@ -87,6 +87,8 @@ pub struct HelperStatus {
     pub speech_bytes: u64,
     pub speech_total: u64,
     pub vad: bool,
+    /// The best speech model has been downloaded (true when an older helper does not say).
+    pub best_present: bool,
 }
 
 pub fn parse_status(line: &str) -> Option<HelperStatus> {
@@ -102,6 +104,7 @@ pub fn parse_status(line: &str) -> Option<HelperStatus> {
         speech_bytes: n("speech_bytes"),
         speech_total: n("speech_total"),
         vad: b("vad"),
+        best_present: v.get("best_present").and_then(|x| x.as_bool()).unwrap_or(true),
     })
 }
 
@@ -248,14 +251,20 @@ pub fn remove_voice(argv: Option<&[String]>) -> Result<String, String> {
 pub enum Step {
     Install,
     Model,
+    /// A better speech model than the installed one exists.
+    Upgrade,
     Mic,
 }
+
+/// The model the helper downloads by default; a declined upgrade is remembered as `upgrade:<id>`.
+pub const BEST_MODEL: &str = "medium";
 
 impl Step {
     pub fn key(self) -> &'static str {
         match self {
             Step::Install => "helper",
             Step::Model => "model",
+            Step::Upgrade => "upgrade",
             Step::Mic => "mic",
         }
     }
@@ -283,6 +292,9 @@ pub fn next(helper: bool, status: Option<&HelperStatus>, declined: &[String], mi
     if !st.speech {
         return if no(Step::Model) { Next::NotNow(Step::Model) } else { Next::Ask(Step::Model) };
     }
+    if !st.best_present && !declined.iter().any(|d| *d == format!("upgrade:{BEST_MODEL}")) {
+        return Next::Ask(Step::Upgrade);
+    }
     if !mic_ok && !no(Step::Mic) {
         return Next::Ask(Step::Mic);
     }
@@ -293,6 +305,7 @@ pub fn not_now_text(step: Step) -> &'static str {
     match step {
         Step::Install => "Dictation needs a small helper; choose Dictation again to install it",
         Step::Model => "Dictation needs a speech model; choose Dictation again to download it",
+        Step::Upgrade => "keeping the current speech model; Dictation options, D downloads the better one later",
         Step::Mic => "",
     }
 }
@@ -373,6 +386,16 @@ impl Dlg {
                 ],
                 FOOT,
             ),
+            Step::Upgrade => Dlg::new(
+                Kind::Ask(step),
+                "Voice update: a better speech model",
+                vec![
+                    format!("Download the better speech model ({})", mb(if model_bytes > 0 { model_bytes } else { MODEL_BYTES })),
+                    "You are using a smaller speech model. The better one makes noticeably fewer mistakes, especially with technical words. It downloads once from huggingface.co (moonshine-streaming-medium-Q8_0.gguf) and is checked with SHA256. The current model stays until you remove voice.".into(),
+                    "Nothing you say leaves this Mac.".into(),
+                ],
+                "Enter: download  ·  Esc: not now, keep the current one",
+            ),
             Step::Mic => Dlg::new(
                 Kind::Ask(step),
                 "Voice setup: the microphone",
@@ -391,7 +414,7 @@ impl Dlg {
     pub fn busy(step: Step) -> Dlg {
         let (title, line) = match step {
             Step::Install => ("Installing the voice helper", "Starting the download ..."),
-            Step::Model => ("Downloading the speech model", "Starting the download ..."),
+            Step::Model | Step::Upgrade => ("Downloading the speech model", "Starting the download ..."),
             Step::Mic => ("Microphone test", "Speak now ..."),
         };
         Dlg::new(Kind::Busy(step), title, vec![line.into()], "Esc: cancel")
@@ -428,7 +451,7 @@ impl Dlg {
 
     pub fn options(auto_send: bool) -> Dlg {
         let a = if auto_send { "A: automatic Enter is ON: Enter is pressed after 3 seconds of quiet (press A to turn off)" } else { "A: automatic Enter is OFF (press A to press Enter by itself after 3 seconds of quiet)" };
-        Dlg::new(Kind::Options, "Dictation options", vec![a.into(), "T: test the microphone".into(), "R: remove voice (deletes the model and helper, frees 300 MB)".into()], "A: auto Enter  ·  T: test  ·  R: remove  ·  Esc: back")
+        Dlg::new(Kind::Options, "Dictation options", vec![a.into(), "T: test the microphone".into(), "D: download the speech model again (fixes a damaged file, or updates it)".into(), "R: remove voice (deletes the model and helper, frees 300 MB)".into()], "A: auto Enter  ·  T: test  ·  D: download again  ·  R: remove  ·  Esc: back")
     }
 
     pub fn ask_remove() -> Dlg {
@@ -565,12 +588,12 @@ fn s(v: &serde_json::Value, k: &str) -> String {
 }
 
 /// Download the missing model files through the helper (wi already asked the user).
-pub fn spawn_fetch(tx: &Tx, gen_id: u64, argv: Vec<String>, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+pub fn spawn_fetch(tx: &Tx, gen_id: u64, argv: Vec<String>, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>, force: bool) {
     run_events(
         tx.clone(),
         gen_id,
         argv,
-        &["fetch-models"],
+        if force { &["fetch-models", "--force"] } else { &["fetch-models"] },
         cancel,
         |v| match v.get("ev")?.as_str()? {
             "progress" => Some(VEv::Progress {
@@ -609,7 +632,7 @@ mod tests {
     use super::*;
 
     fn st(speech: bool) -> HelperStatus {
-        HelperStatus { version: "1".into(), speech, speech_bytes: 5, speech_total: MODEL_BYTES, vad: true }
+        HelperStatus { version: "1".into(), speech, speech_bytes: 5, speech_total: MODEL_BYTES, vad: true, best_present: true }
     }
 
     #[test]
@@ -619,6 +642,17 @@ mod tests {
         assert_eq!(next(true, Some(&st(true)), &[], false), Next::Ask(Step::Mic));
         assert_eq!(next(true, Some(&st(true)), &[], true), Next::Start);
         assert_eq!(next(true, None, &[], false), Next::Start, "an unreadable status does not block starting");
+    }
+
+    #[test]
+    fn a_better_model_is_offered_once() {
+        let d = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let old = HelperStatus { best_present: false, ..st(true) };
+        assert_eq!(next(true, Some(&old), &[], true), Next::Ask(Step::Upgrade));
+        assert_eq!(next(true, Some(&old), &d(&["upgrade:medium"]), true), Next::Start, "declined: use what we have, no nagging");
+        assert_eq!(next(true, Some(&old), &d(&["upgrade:older"]), true), Next::Ask(Step::Upgrade), "a decline is for that model only");
+        assert_eq!(next(true, Some(&st(true)), &[], true), Next::Start, "the best model is there: nothing to offer");
+        assert_eq!(next(true, Some(&HelperStatus { best_present: false, ..st(false) }), &[], true), Next::Ask(Step::Model), "no model at all asks for the model first");
     }
 
     #[test]
@@ -634,7 +668,7 @@ mod tests {
     #[test]
     fn status_line_parses() {
         let s = parse_status(r#"{"ev":"status","version":"0.1.0","speech":true,"speech_bytes":10,"speech_total":20,"vad":false}"#).unwrap();
-        assert_eq!(s, HelperStatus { version: "0.1.0".into(), speech: true, speech_bytes: 10, speech_total: 20, vad: false });
+        assert_eq!(s, HelperStatus { version: "0.1.0".into(), speech: true, speech_bytes: 10, speech_total: 20, vad: false, best_present: true });
         assert!(parse_status(r#"{"ev":"level","v":1}"#).is_none() && parse_status("hello").is_none());
     }
 
@@ -765,13 +799,13 @@ mod tests {
         let on = Dlg::on();
         assert_eq!(on.key(b"o", 0), Key::Char('o'));
         assert_eq!(on.key(b"\r", 0), Key::Yes);
-        assert!(o.view.lines.len() == 3, "three actions plus Esc: automatic Enter, Test mic, Remove voice");
+        assert!(o.view.lines.len() == 4, "four actions plus Esc: automatic Enter, Test mic, Download again, Remove voice");
         assert!(o.view.lines.join(" ").contains("300 MB"));
     }
 
     #[test]
     fn user_facing_text_never_tells_the_user_to_run_the_helper() {
-        for s in [Step::Install, Step::Model, Step::Mic] {
+        for s in [Step::Install, Step::Model, Step::Upgrade, Step::Mic] {
             assert!(!not_now_text(s).contains("wi-audio"));
             assert!(!Dlg::ask(s, 0).view.lines.join(" ").contains("run wi-audio"));
         }

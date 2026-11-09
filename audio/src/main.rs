@@ -247,6 +247,8 @@ fn cmd_status() {
             "speech": speech.is_some(),
             "speech_bytes": size,
             "speech_total": models::MEDIUM.bytes,
+            "best": models::MEDIUM.id,
+            "best_present": models::MEDIUM.present(),
             "vad": models::vad_model().is_some(),
             "models_dir": models::dir().display().to_string(),
         })
@@ -259,7 +261,7 @@ fn cmd_fetch_models(a: &Args) {
     let mut out = listen::Stdout;
     let speech = if a.has("tiny") { &models::TINY } else if a.has("small") { &models::SMALL } else { &models::MEDIUM };
     for m in [speech, &models::VAD] {
-        if m.present() {
+        if m.present() && !a.has("force") {
             continue;
         }
         let mut last = 0u64;

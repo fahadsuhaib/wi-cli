@@ -23,14 +23,16 @@ flag = os.environ.get("FAKE_MODEL_FLAG", "")
 def out(**kw): print(json.dumps(kw), flush=True)
 if sub == "status":
     sp = os.path.exists(flag)
-    out(ev="status", protocol=1, version="0.0.0", speech=sp, speech_bytes=295793568 if sp else 0, speech_total=295793568, vad=True, models_dir="x")
+    best = os.path.exists(flag + ".best") or not os.environ.get("FAKE_OLD_MODEL")
+    out(ev="status", protocol=1, version="0.0.0", speech=sp, speech_bytes=295793568 if sp else 0, speech_total=295793568, vad=True, models_dir="x", best="medium", best_present=bool(sp and best))
     sys.exit(0)
 if sub == "fetch-models":
     for pct in (10, 40, 70):
         out(ev="progress", what="small", done=295793568 * pct // 100, total=295793568); time.sleep(0.7)
     if os.environ.get("FAKE_FETCH_FAIL"):
         out(ev="error", kind="download", msg="the download failed: check your connection"); sys.exit(2)
-    open(flag, "w").write("x")
+    open(flag, "w").write("x"); open(flag + ".best", "w").write("x")
+    open(os.environ.get("FAKE_FETCH_LOG", "/dev/null"), "a").write(" ".join(sys.argv[1:]) + "\n")
     out(ev="done"); sys.exit(0)
 if sub == "probe":
     for i in range(12):
@@ -94,6 +96,7 @@ class Run:
         cmd = command or f"{sys.executable} -I {FAKE}"
         self.flag = CFGDIR + "/model_" + tag
         if os.path.exists(self.flag): os.remove(self.flag)
+        if os.path.exists(self.flag + ".best"): os.remove(self.flag + ".best")
         if model: open(self.flag, "w").write("x")
         wi = WI
         self.wibin = CFGDIR + "/wibin_" + tag
@@ -450,6 +453,36 @@ r.send(b"a", 0.5)
 check("options: A turns it on and remembers it", "automatic Enter is ON" in r.text() and "voice_auto_send = true" in r.state_text())
 r.send(b"a", 0.5)
 check("options: A again turns it off", "automatic Enter is OFF" in r.text() and "voice_auto_send" not in r.state_text())
+r.quit()
+
+# 15. A better speech model: offered once when only an older one is installed; D downloads it again.
+FETCHLOG = CFGDIR + "/fetch_log"
+if os.path.exists(FETCHLOG): os.remove(FETCHLOG)
+r = Run([state("listening")], tag="up1", extra_env={"FAKE_OLD_MODEL": "1", "FAKE_FETCH_LOG": FETCHLOG})
+r.dictation()
+txt = r.text()
+check("older model: a better one is offered with its size and host", "Voice update: a better speech model" in txt and "295.8 MB" in txt and "huggingface.co" in txt and "fewer mistakes" in txt)
+check("the offer shows the key hints", " Enter " in txt and "download" in txt and " Esc " in txt and "keep the current one" in txt)
+r.send(b"\x1b", 0.8)
+check("declined: dictation still starts with the current model", r.wait_until(r.child_alive, 5))
+check("declined: remembered for that model only", '"upgrade:medium"' in r.state_text())
+r.quit()
+r = Run([state("listening")], tag="up3", declined=["upgrade:medium"], extra_env={"FAKE_OLD_MODEL": "1", "FAKE_FETCH_LOG": FETCHLOG})
+r.dictation()
+check("a declined upgrade is not offered again: dictation just starts", r.wait_until(r.child_alive, 5) and "Voice update" not in r.text())
+r.quit()
+r = Run([state("listening")], tag="up4", extra_env={"FAKE_OLD_MODEL": "1", "FAKE_FETCH_LOG": FETCHLOG})
+r.dictation(); r.send(b"\r", 0.5)
+check("accepting downloads with a progress bar", r.wait_until(lambda: "[#" in r.text() and "MB of 295.8 MB" in r.text(), 6))
+check("after the download dictation turns on", r.wait_until(r.child_alive, 12) and "● listening" in r.top())
+check("an accepted upgrade is a normal download (no force)", open(FETCHLOG).read().strip() == "fetch-models")
+r.quit()
+r = Run([state("listening")], tag="up5", extra_env={"FAKE_FETCH_LOG": FETCHLOG})
+r.dictation(); r.dictation(); r.send(b"o", 0.5)
+check("options list the download-again action", "D: download the speech model again" in r.text() and "D: download again" in r.text())
+r.send(b"d", 0.5)
+check("D downloads the speech model again with a progress bar", r.wait_until(lambda: "[#" in r.text() and "MB of 295.8 MB" in r.text(), 6) and not r.child_alive())
+check("D asks the helper to force it", r.wait_until(lambda: "fetch-models --force" in open(FETCHLOG).read(), 12))
 r.quit()
 
 print("\n%d failed" % len(fails) if fails else "\nall passed")
