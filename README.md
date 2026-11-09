@@ -74,6 +74,7 @@ wi supports macOS and Linux.
 - Previews refresh by themselves when the file changes on disk (see Configuration)
 - Search in files, find file, find in output
 - Themes: `dark`, `light` and fourteen more modelled on VS Code's (see Themes below); Y opens a picker that previews each one live. The chosen theme paints the whole window, shell included, so a light theme looks light on a dark terminal; auto follows your terminal's colours on each start
+- Voice dictation (menu: search "dictate"): turn it on once and each phrase you say is typed into the focused pane without Enter; audio stays on your machine (see Voice below)
 - Update wi from the menu (search "update"): asks before contacting github.com, checks the SHA256, replaces the binary, then offers to restart wi with the same tabs ("Restart wi" does the restart alone)
 
 ## Keys
@@ -154,7 +155,19 @@ forgets the saved ones; `restore_tabs = false` in `[defaults]` turns the whole t
 
 A few items have no letter because they are all taken. Press Ctrl-Space, then Space, and type a few letters:
 `pin` (Pin tab right / left, Swap pane sides, Unsplit), `recent` (Recent files), `update` (Update wi),
-`restart` (Restart wi), `rename` (Rename tab; also `title`, `name`, `label`).
+`restart` (Restart wi), `dictate` (Dictation on/off; also `voice`, `mic`), `rename` (Rename tab; also `title`, `name`, `label`).
+
+## Voice
+
+Talk to your agent: menu (Ctrl-Space, Space, `dictate`) turns dictation on, and every phrase you say is typed into the
+focused pane, with no Enter, so you can fix it first. The status bar shows `● listening`, `● hearing` and `● ...`; the
+same menu entry or a click on the red indicator turns it off, and it switches itself off after 10 minutes of silence.
+
+**Audio stays on this machine.** A separate program, `wi-audio`, reads the microphone and runs a small English speech
+model (Moonshine, MIT, 199 MB) on your own CPU. No cloud, no telemetry, no recordings saved; `wi` itself contains no
+audio code. The only download is the model, after a confirmation that names the file, size and host, checked with
+SHA256. It works in remote tabs too (the text goes down the ssh pty; nothing is installed on the box). Setup, tuning
+and troubleshooting: [docs/AUDIO.md](docs/AUDIO.md).
 
 ## Updating
 
@@ -178,6 +191,10 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
     restore_tabs = true     # reopen last session's tabs at start (wi --fresh skips it once)
     preview_autorefresh = true          # reload a visible file preview when the file changes
     preview_refresh_debounce_ms = 5000  # wait this long after the last change before reloading
+
+    [transcribe]                 # voice dictation, see docs/AUDIO.md
+    listen_idle_minutes = 10     # switches itself off after this long without speech
+    end_silence_ms = 700         # silence that ends a phrase
 
     [agents.claude]
     command = "claude --continue"                  # your usual command, listed first

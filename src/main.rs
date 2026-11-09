@@ -5,6 +5,7 @@ mod clip;
 mod compat;
 mod config;
 mod cwd;
+mod dictate;
 mod exec;
 mod explorer;
 mod explorer_data;

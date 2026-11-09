@@ -37,6 +37,8 @@ pub enum Action {
     RenameTab,
     /// Restart wi in place (the same tabs come back).
     Restart,
+    /// Hands-free dictation on or off: each spoken phrase is typed into the focused pane.
+    Dictation,
     Agent,
     CloseTab,
     Reconnect,
@@ -180,6 +182,7 @@ pub const MENU: &[MenuItem] = &[
     mi("Info", 'i', Action::Info, false, "SESSION", &["status", "folder", "box", "about"]),
     mi("Reconnect", 'r', Action::Reconnect, true, "SESSION", &["connection", "ssh", "retry"]),
     mi("Download", 'd', Action::Download, true, "SESSION", &["fetch", "copy", "save", "file"]),
+    mi("Dictation (voice) on/off", NO_KEY, Action::Dictation, false, "AGENT", &["dictate", "voice", "speak", "talk", "microphone", "mic", "listen", "speech"]),
     mi("Update wi", NO_KEY, Action::Update, false, "SESSION", &["upgrade", "new", "version", "release", "download", "latest"]),
     mi("Restart wi", NO_KEY, Action::Restart, false, "SESSION", &["reload", "relaunch", "again", "new version"]),
     mi("Quit", 'q', Action::Quit, false, "SESSION", &["exit", "detach", "disconnect", "leave"]),
@@ -565,6 +568,14 @@ pub struct View<'a> {
     pub status: Option<&'a str>,
     /// The file explorer, drawn over the whole screen (no header, tab strip or status bar).
     pub explorer: Option<&'a crate::explorer::ExplorerState>,
+    /// The dictation indicator for the right end of the status bar, while the mode is on.
+    pub mic: Option<&'a str>,
+}
+
+/// Where the dictation indicator sits on the status row: (first column, width), right-aligned.
+pub fn mic_span(text: &str, width: u16) -> (u16, u16) {
+    let w = (text.chars().count() as u16 + 2).min(width);
+    (width - w, w)
 }
 
 /// A vt100 colour as a wi colour. `default` is what the terminal's default colour becomes: the
@@ -820,6 +831,12 @@ fn draw_frame(f: &mut Frame, v: &View) {
         (None, None) => format!(" {}  menu", v.menu_label),
     };
     f.render_widget(Paragraph::new(hint).style(status_bar), status);
+    if let Some(m) = v.mic {
+        let (x, w) = mic_span(m, status.width);
+        let r = Rect::new(status.x + x, status.y, w, 1);
+        let hot = !m.starts_with("● loading");
+        f.render_widget(Paragraph::new(format!(" {m} ")).style(Style::default().bg(t.status_bg).fg(if hot { Color::Red } else { t.status_fg }).add_modifier(Modifier::BOLD)), r);
+    }
 
     if let Some(c) = v.confirm {
         draw_confirm(f, main, c);

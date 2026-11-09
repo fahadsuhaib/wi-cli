@@ -76,6 +76,48 @@ jobs:
             dist/wi-${{ matrix.name }}.tar.gz.sha256
           if-no-files-found: error
 
+  # The separate voice program (audio/). Built natively on each runner (it links the system audio
+  # library, so it is not the static musl build `wi` uses). Intel Macs are not built.
+  build-audio:
+    needs: verify
+    name: build wi-audio ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-latest
+          - name: linux-x86_64
+            os: ubuntu-22.04 # old glibc, so the binary runs on older distributions
+          - name: linux-aarch64
+            os: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4 # fetch the repository
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2 # cache cargo registry and target of the audio crate
+        with:
+          workspaces: audio
+          key: audio-${{ matrix.name }}
+      - name: Install build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ libasound2-dev
+      - name: Install cmake
+        if: runner.os == 'macOS'
+        run: command -v cmake || brew install cmake
+      - name: Package
+        run: scripts/package-audio.sh "${{ matrix.name }}" dist
+      - uses: actions/upload-artifact@v4 # hand the archive to the publish job
+        with:
+          name: wi-audio-${{ matrix.name }}
+          path: |
+            dist/wi-audio-${{ matrix.name }}.tar.gz
+            dist/wi-audio-${{ matrix.name }}.tar.gz.sha256
+          if-no-files-found: error
+
   smoke:
     needs: build
     name: smoke ${{ matrix.name }}
@@ -124,14 +166,14 @@ jobs:
         run: arch -x86_64 dist/wi-${{ matrix.name }}/wi --version
 
   publish:
-    needs: [build, smoke]
+    needs: [build, build-audio, smoke]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write # create the GitHub Release and attach the files
     steps:
-      - uses: actions/download-artifact@v4 # fetch all three archives
+      - uses: actions/download-artifact@v4 # fetch all the archives (wi and wi-audio)
         with:
           path: dist
           merge-multiple: true
@@ -150,5 +192,8 @@ jobs:
             dist/wi-linux-x86_64.tar.gz
             dist/wi-linux-aarch64.tar.gz
             dist/wi-macos-universal.tar.gz
+            dist/wi-audio-macos-arm64.tar.gz
+            dist/wi-audio-linux-x86_64.tar.gz
+            dist/wi-audio-linux-aarch64.tar.gz
             dist/SHA256SUMS
 
