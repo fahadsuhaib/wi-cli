@@ -113,6 +113,10 @@ pub struct State {
     /// Dictation presses Enter by itself after a few seconds of quiet (off until the user turns it on).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub voice_auto_send: bool,
+    /// This running wi changed a voice setting, so its copy wins when it saves. A wi that did not
+    /// touch them keeps what is on disk (another wi may have set them since this one started).
+    #[serde(skip)]
+    pub voice_touched: bool,
 }
 
 /// What is remembered about a workspace's pinned pane.
@@ -142,17 +146,31 @@ pub fn state_path() -> PathBuf {
 
 impl State {
     pub fn load() -> State {
-        std::fs::read_to_string(state_path()).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default()
+        State::load_from(&state_path())
+    }
+
+    fn load_from(path: &std::path::Path) -> State {
+        std::fs::read_to_string(path).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default()
     }
 
     /// Write atomically so a crash never leaves a half-written file.
     pub fn save(&self) -> std::io::Result<()> {
-        let path = state_path();
+        self.save_to(&state_path())
+    }
+
+    fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, toml::to_string_pretty(self).map_err(std::io::Error::other)?)?;
+        let mut out = self.clone();
+        if !self.voice_touched {
+            let disk = State::load_from(path);
+            out.voice_declined = disk.voice_declined;
+            out.voice_mic_ok = disk.voice_mic_ok;
+            out.voice_auto_send = disk.voice_auto_send;
+        }
+        std::fs::write(&tmp, toml::to_string_pretty(&out).map_err(std::io::Error::other)?)?;
         std::fs::rename(tmp, path)
     }
 
@@ -298,6 +316,27 @@ pub fn decide(policy: &str, detected: &[Agent], remembered: Option<&Remembered>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wi_that_did_not_touch_the_voice_settings_keeps_what_another_one_saved() {
+        let dir = std::env::temp_dir().join(format!("wicli-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state.toml");
+        // The older wi started before the setting existed and saves its own layout later.
+        let stale = State::default();
+        let newer = State { voice_auto_send: true, voice_mic_ok: true, voice_declined: vec!["mic".into()], voice_touched: true, ..State::default() };
+        newer.save_to(&path).unwrap();
+        stale.save_to(&path).unwrap();
+        let now = State::load_from(&path);
+        assert!(now.voice_auto_send && now.voice_mic_ok && now.voice_declined == ["mic"], "the stale wi must not erase the voice settings");
+        // The wi that changed them wins, including turning one off.
+        let mut off = now;
+        off.voice_auto_send = false;
+        off.voice_touched = true;
+        off.save_to(&path).unwrap();
+        assert!(!State::load_from(&path).voice_auto_send);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn rem(agent: &str, cmd: &str) -> Remembered {
         Remembered { agent: agent.into(), command: cmd.into() }

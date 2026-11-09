@@ -754,7 +754,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                             if let Mode::Voice(d) = &mut mode { d.level(v, vstarted.elapsed()); }
                         }
                         VEv::Installed(Ok(path)) => {
-                            agent_state.voice_declined.retain(|d| d != "helper");
+                            agent_state.voice_touched = true; agent_state.voice_declined.retain(|d| d != "helper");
                             let _ = agent_state.save();
                             message = Some(format!("voice helper installed: {}", path.display()));
                             if let Mode::Voice(d) = &mut mode { d.status_line("installed. Checking ..."); }
@@ -762,7 +762,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         }
                         VEv::Installed(Err(e)) => mode = Mode::Voice(voice::Dlg::info("Could not install the voice helper", vec![e])),
                         VEv::ModelDone(Ok(())) => {
-                            agent_state.voice_declined.retain(|d| d != "model" && !d.starts_with("upgrade:"));
+                            agent_state.voice_touched = true; agent_state.voice_declined.retain(|d| d != "model" && !d.starts_with("upgrade:"));
                             let _ = agent_state.save();
                             message = Some("speech model downloaded".into());
                             if let Mode::Voice(d) = &mut mode { d.status_line("downloaded and checked. Continuing ..."); }
@@ -1832,16 +1832,16 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                 (Kind::Ask(step), Key::No) => {
                                     mode = Mode::Shell;
                                     if step == Step::Mic {
-                                        if !agent_state.voice_declined.iter().any(|d| d == "mic") { agent_state.voice_declined.push("mic".into()); let _ = agent_state.save(); }
+                                        if !agent_state.voice_declined.iter().any(|d| d == "mic") { agent_state.voice_touched = true; agent_state.voice_declined.push("mic".into()); let _ = agent_state.save(); }
                                         start_dictation(vargv.as_deref().unwrap_or(&[]), &tcfg, &mut dict_gen, &dict_tx, &mut dict, &mut message);
                                     } else if step == Step::Upgrade {
                                         // Keep working with the model we have; do not ask about this upgrade again.
                                         let key = format!("upgrade:{}", voice::BEST_MODEL);
-                                        if !agent_state.voice_declined.contains(&key) { agent_state.voice_declined.push(key); let _ = agent_state.save(); }
+                                        if !agent_state.voice_declined.contains(&key) { agent_state.voice_touched = true; agent_state.voice_declined.push(key); let _ = agent_state.save(); }
                                         start_dictation(vargv.as_deref().unwrap_or(&[]), &tcfg, &mut dict_gen, &dict_tx, &mut dict, &mut message);
                                         message = Some(voice::not_now_text(step).into());
                                     } else {
-                                        if !agent_state.voice_declined.iter().any(|d| d == step.key()) { agent_state.voice_declined.push(step.key().into()); let _ = agent_state.save(); }
+                                        if !agent_state.voice_declined.iter().any(|d| d == step.key()) { agent_state.voice_touched = true; agent_state.voice_declined.push(step.key().into()); let _ = agent_state.save(); }
                                         message = Some(voice::not_now_text(step).into());
                                     }
                                 }
@@ -1852,8 +1852,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     message = Some("cancelled".into());
                                 }
                                 (Kind::Heard, Key::Yes) => {
-                                    agent_state.voice_mic_ok = true;
-                                    agent_state.voice_declined.retain(|d| d != "mic");
+                                    agent_state.voice_touched = true; agent_state.voice_mic_ok = true;
+                                    agent_state.voice_touched = true; agent_state.voice_declined.retain(|d| d != "mic");
                                     let _ = agent_state.save();
                                     mode = Mode::Shell;
                                     start_dictation(vargv.as_deref().unwrap_or(&[]), &tcfg, &mut dict_gen, &dict_tx, &mut dict, &mut message);
@@ -1877,7 +1877,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     mode = Mode::Voice(voice::Dlg::busy(Step::Mic));
                                 }
                                 (Kind::Options, Key::Char('a')) => {
-                                    agent_state.voice_auto_send = !agent_state.voice_auto_send;
+                                    agent_state.voice_touched = true; agent_state.voice_auto_send = !agent_state.voice_auto_send;
                                     let _ = agent_state.save();
                                     if let Some(d) = dict.as_mut() { d.pending_send = None; }
                                     message = Some(if agent_state.voice_auto_send { "dictation: Enter is pressed after 3 s of quiet".into() } else { "dictation: Enter is yours again".into() });
