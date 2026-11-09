@@ -139,7 +139,7 @@ fn main() {
 
 fn load_engine() -> engine::Moonshine {
     let Some(path) = models::speech_model() else {
-        fail(&format!("no speech model installed. Install it with: wi-audio models install ({} download from {})", models::mb(models::SMALL.bytes), models::SMALL.host()));
+        fail(&format!("no speech model installed. Install it with: wi-audio models install ({} download from {})", models::mb(models::MEDIUM.bytes), models::MEDIUM.host()));
     };
     engine::Moonshine::load(&path).unwrap_or_else(|e| fail(&e))
 }
@@ -246,7 +246,7 @@ fn cmd_status() {
             "version": env!("CARGO_PKG_VERSION"),
             "speech": speech.is_some(),
             "speech_bytes": size,
-            "speech_total": models::SMALL.bytes,
+            "speech_total": models::MEDIUM.bytes,
             "vad": models::vad_model().is_some(),
             "models_dir": models::dir().display().to_string(),
         })
@@ -257,7 +257,7 @@ fn cmd_status() {
 fn cmd_fetch_models(a: &Args) {
     use listen::Emit;
     let mut out = listen::Stdout;
-    let speech = if a.has("tiny") { &models::TINY } else { &models::SMALL };
+    let speech = if a.has("tiny") { &models::TINY } else if a.has("small") { &models::SMALL } else { &models::MEDIUM };
     for m in [speech, &models::VAD] {
         if m.present() {
             continue;
@@ -310,7 +310,7 @@ fn cmd_probe(a: &Args) {
 fn cmd_models(a: &Args) {
     match a.pos.first().map(String::as_str) {
         Some("install") => {
-            let speech = if a.has("tiny") { &models::TINY } else { &models::SMALL };
+            let speech = if a.has("tiny") { &models::TINY } else if a.has("small") { &models::SMALL } else { &models::MEDIUM };
             for m in [speech, &models::VAD] {
                 match models::install(m, a.has("yes")) {
                     Ok(true) => {}

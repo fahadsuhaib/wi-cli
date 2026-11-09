@@ -24,7 +24,7 @@ pub fn run(verify: bool) {
     }
     let speech = models::speech_model();
     if speech.is_none() {
-        problems.push(format!("no speech model: run  wi-audio models install  ({} from {})", models::mb(models::SMALL.bytes), models::SMALL.host()));
+        problems.push(format!("no speech model: run  wi-audio models install  ({} from {})", models::mb(models::MEDIUM.bytes), models::MEDIUM.host()));
     }
     if models::vad_model().is_none() {
         println!("  (no VAD file: phrase detection falls back to a simple loudness gate; wi-audio models install adds it)");

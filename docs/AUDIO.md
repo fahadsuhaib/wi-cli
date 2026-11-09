@@ -7,14 +7,14 @@ pane, without Enter, so you can edit it first.
 
 Click the `○ mic` at the right end of the top bar, or choose **Dictation** in the menu (Ctrl-Space, Space, `dictate`).
 The first time, wi asks (one short question per step) to install a small voice helper (about 2 MB, from this
-repository's releases) and to download the speech model (199 MB, from huggingface.co), then tests your microphone for
+repository's releases) and to download the speech model (296 MB, from huggingface.co), then tests your microphone for
 3 seconds. Each answer can be "not now"; it is remembered and not asked again until you choose Dictation again.
 macOS asks once to let your terminal app use the microphone; if you said no, allow it in System Settings > Privacy &
 Security > Microphone.
 
 The mic shows `● listening`, `● hearing` and `● ...` while on. Click it again to stop. Choosing Dictation while it is on
 shows a small screen: Enter turns it off, **O** opens the options: **A** press Enter by itself after 3 seconds of quiet (off until you turn it on; typing or switching tabs cancels it), **T** test the microphone, **R** remove voice (deletes
-the model and the helper, frees 200 MB).
+the model and the helper, frees 300 MB).
 
 ## Privacy
 

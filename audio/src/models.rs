@@ -16,6 +16,15 @@ pub struct ModelFile {
     pub what: &'static str,
 }
 
+pub const MEDIUM: ModelFile = ModelFile {
+    id: "medium",
+    file: "moonshine-streaming-medium-Q8_0.gguf",
+    url: "https://huggingface.co/handy-computer/moonshine-streaming-medium-gguf/resolve/main/moonshine-streaming-medium-Q8_0.gguf",
+    bytes: 295_793_568,
+    sha256: "f7c9564249b508f6012927ec4f9e536087da53a7047f858ca9975bea5f75299e",
+    what: "Moonshine Streaming medium, English speech to text (MIT licence)",
+};
+
 pub const SMALL: ModelFile = ModelFile {
     id: "small",
     file: "moonshine-streaming-small-Q8_0.gguf",
@@ -43,7 +52,7 @@ pub const VAD: ModelFile = ModelFile {
     what: "Silero voice activity detection, finds where phrases start and end (MIT licence)",
 };
 
-pub const ALL: [&ModelFile; 3] = [&SMALL, &TINY, &VAD];
+pub const ALL: [&ModelFile; 4] = [&MEDIUM, &SMALL, &TINY, &VAD];
 
 /// `WICLI_AUDIO_MODELS` (tests, custom places), else the per-user data folder.
 pub fn dir() -> PathBuf {
@@ -66,12 +75,12 @@ impl ModelFile {
     }
 }
 
-/// The speech model to use: `WICLI_AUDIO_MODEL` (a path), else small, else tiny.
+/// The speech model to use: `WICLI_AUDIO_MODEL` (a path), else medium, else small, else tiny.
 pub fn speech_model() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("WICLI_AUDIO_MODEL") {
         return Some(PathBuf::from(p));
     }
-    [&SMALL, &TINY].into_iter().find(|m| m.present()).map(|m| m.path())
+    [&MEDIUM, &SMALL, &TINY].into_iter().find(|m| m.present()).map(|m| m.path())
 }
 
 pub fn vad_model() -> Option<PathBuf> {

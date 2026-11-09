@@ -24,7 +24,7 @@ pub const ASSET: &str = "wi-audio-macos-arm64.tar.gz";
 const RELEASES: &str = "https://github.com/fahadsuhaib/wi-cli/releases/latest/download";
 /// Largest helper archive accepted.
 const MAX_ARCHIVE: u64 = 40 * 1024 * 1024;
-pub const MODEL_BYTES: u64 = 198_506_848;
+pub const MODEL_BYTES: u64 = 295_793_568;
 
 pub fn override_url() -> Option<String> {
     std::env::var("WICLI_AUDIO_URL").ok().filter(|s| !s.trim().is_empty()).map(|s| s.trim_end_matches('/').to_string())
@@ -368,8 +368,8 @@ impl Dlg {
                 "Voice setup: the speech model",
                 vec![
                     format!("Download the speech model ({})", mb(if model_bytes > 0 { model_bytes } else { MODEL_BYTES })),
-                    "It is downloaded once from huggingface.co (moonshine-streaming-small-Q8_0.gguf), checked with SHA256 and reused every time. It runs only on this Mac, so nothing you say is sent anywhere.".into(),
-                    "While dictation is on it uses roughly 400 MB of memory; when it is off it uses none.".into(),
+                    "It is downloaded once from huggingface.co (moonshine-streaming-medium-Q8_0.gguf), checked with SHA256 and reused every time. It runs only on this Mac, so nothing you say is sent anywhere.".into(),
+                    "While dictation is on it uses roughly 600 MB of memory; when it is off it uses none.".into(),
                 ],
                 FOOT,
             ),
@@ -428,11 +428,11 @@ impl Dlg {
 
     pub fn options(auto_send: bool) -> Dlg {
         let a = if auto_send { "A: automatic Enter is ON: Enter is pressed after 3 seconds of quiet (press A to turn off)" } else { "A: automatic Enter is OFF (press A to press Enter by itself after 3 seconds of quiet)" };
-        Dlg::new(Kind::Options, "Dictation options", vec![a.into(), "T: test the microphone".into(), "R: remove voice (deletes the model and helper, frees 200 MB)".into()], "A: auto Enter  ·  T: test  ·  R: remove  ·  Esc: back")
+        Dlg::new(Kind::Options, "Dictation options", vec![a.into(), "T: test the microphone".into(), "R: remove voice (deletes the model and helper, frees 300 MB)".into()], "A: auto Enter  ·  T: test  ·  R: remove  ·  Esc: back")
     }
 
     pub fn ask_remove() -> Dlg {
-        Dlg::new(Kind::AskRemove, "Remove voice?", vec!["Deletes the speech model and the helper (frees 200 MB). Dictation sets itself up again if you use it later.".into()], "Enter: remove  ·  Esc: keep")
+        Dlg::new(Kind::AskRemove, "Remove voice?", vec!["Deletes the speech model and the helper (frees 300 MB). Dictation sets itself up again if you use it later.".into()], "Enter: remove  ·  Esc: keep")
     }
 
     /// Read one chunk of keyboard input.
@@ -747,9 +747,9 @@ mod tests {
 
     #[test]
     fn dialogs_name_file_size_and_host_and_read_keys() {
-        let m = Dlg::ask(Step::Model, 198_506_848);
+        let m = Dlg::ask(Step::Model, 295_793_568);
         let text = m.view.lines.join("\n");
-        assert!(text.contains("198.5 MB") && text.contains("moonshine-streaming-small-Q8_0.gguf") && text.contains("huggingface.co"));
+        assert!(text.contains("295.8 MB") && text.contains("moonshine-streaming-medium-Q8_0.gguf") && text.contains("huggingface.co"));
         let h = Dlg::ask(Step::Install, 0).view.lines.join("\n");
         assert!(h.contains("wi-audio-macos-arm64.tar.gz") && h.contains("github.com/fahadsuhaib/wi-cli") && h.contains("2 MB"));
         assert_eq!(m.key(b"y", 0), Key::Yes);
@@ -766,7 +766,7 @@ mod tests {
         assert_eq!(on.key(b"o", 0), Key::Char('o'));
         assert_eq!(on.key(b"\r", 0), Key::Yes);
         assert!(o.view.lines.len() == 3, "three actions plus Esc: automatic Enter, Test mic, Remove voice");
-        assert!(o.view.lines.join(" ").contains("200 MB"));
+        assert!(o.view.lines.join(" ").contains("300 MB"));
     }
 
     #[test]
