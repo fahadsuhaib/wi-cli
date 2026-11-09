@@ -592,10 +592,15 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         dictate::Send::Enter => {
                             t.write(b"\r".to_vec());
                             d.pending_send = None;
+                            message = Some("dictation pressed Enter".into());
                             snap_live(&mut app);
                             dirty = true;
                         }
-                        dictate::Send::Cancel => d.pending_send = None,
+                        dictate::Send::Cancel(why) => {
+                            d.pending_send = None;
+                            message = Some(format!("auto Enter cancelled: {why}"));
+                            dirty = true;
+                        }
                         dictate::Send::WaitUntil(w) => dict_wake = Some(dict_wake.map_or(w, |x| x.min(w))),
                         dictate::Send::Nothing => {}
                     }

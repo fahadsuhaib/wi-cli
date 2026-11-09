@@ -220,8 +220,8 @@ pub fn auto_send_delay() -> Duration {
 #[derive(Debug, PartialEq)]
 pub enum Send {
     Nothing,
-    /// The user typed, or moved to another tab: forget the pending Enter.
-    Cancel,
+    /// The user typed, or moved to another tab: forget the pending Enter (the reason is shown).
+    Cancel(&'static str),
     Enter,
     WaitUntil(Instant),
 }
@@ -232,8 +232,11 @@ pub enum Send {
 #[allow(clippy::too_many_arguments)]
 pub fn send_step(pending: Option<usize>, active_id: usize, can_paste: bool, waiting: bool, hearing: bool, now: Instant, last_paste: Option<Instant>, last_speech: Instant, last_key: Instant, delay: Duration) -> Send {
     let (Some(tab), Some(pasted)) = (pending, last_paste) else { return Send::Nothing };
-    if tab != active_id || last_key > pasted {
-        return Send::Cancel;
+    if tab != active_id {
+        return Send::Cancel("you switched tab");
+    }
+    if last_key > pasted {
+        return Send::Cancel("you typed or clicked");
     }
     if waiting || hearing {
         return Send::Nothing;
@@ -525,8 +528,8 @@ mod tests {
         // A pane that cannot take keys now: hold, never lose it.
         assert_eq!(step(Some(1), 1, false, false, false, at(9), t0, t0), Send::Nothing);
         // The user typed after the paste, or switched tab: cancelled.
-        assert_eq!(step(Some(1), 1, true, false, false, at(9), t0, at(1)), Send::Cancel);
-        assert_eq!(step(Some(1), 2, true, false, false, at(9), t0, t0), Send::Cancel);
+        assert_eq!(step(Some(1), 1, true, false, false, at(9), t0, at(1)), Send::Cancel("you typed or clicked"));
+        assert_eq!(step(Some(1), 2, true, false, false, at(9), t0, t0), Send::Cancel("you switched tab"));
     }
 
     #[test]
