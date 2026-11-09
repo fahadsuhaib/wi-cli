@@ -565,12 +565,49 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                 let t = &app.tabs[app.active];
                 let can = matches!(mode, Mode::Shell) && pasting.is_none() && !t.is_preview() && !t.side_focused();
                 let recent = d.last_paste.is_some_and(|p| now.duration_since(p) < Duration::from_millis(1500));
-                let lead = tuning.leading_space && (recent || !dictate::after_space(t.parser.screen()));
+                let lead = tuning.leading_space && !d.skip_space && (recent || !dictate::after_space(t.parser.screen()));
                 match dictate::next_step(&mut d.held, now, last_input, can, Duration::from_secs(tuning.held_timeout_s), lead) {
+                    dictate::Step::Control(c) => {
+                        use dictate::Control;
+                        match c {
+                            Control::Scratch => match d.last_phrase {
+                                Some((tab, n)) if tab == t.id && n > 0 && d.last_paste.is_some_and(|p| last_input <= p) => {
+                                    t.write(vec![0x7f; n]);
+                                    d.last_phrase = None;
+                                    d.pending_send = None;
+                                    message = Some("scratched the last phrase: say it again".into());
+                                    crate::dictlog::log(&format!("scratch chars={n}"));
+                                }
+                                _ => {
+                                    message = Some("nothing to scratch: only the last phrase, and only before you type".into());
+                                    crate::dictlog::log("scratch refused (nothing to remove, or you typed since)");
+                                }
+                            },
+                            Control::NewLine | Control::NewParagraph => {
+                                if t.is_agent() {
+                                    let n = if c == Control::NewParagraph { 2 } else { 1 };
+                                    for _ in 0..n { t.write(b"\x1b\r".to_vec()); }
+                                    d.skip_space = true;
+                                    d.last_phrase = None;
+                                    crate::dictlog::log(&format!("newline x{n}"));
+                                } else {
+                                    message = Some("new line works in an agent prompt (a plain shell would run the command)".into());
+                                }
+                            }
+                        }
+                        snap_live(&mut app);
+                        dict_wake = Some(now + Duration::from_millis(150));
+                        dirty = true;
+                    }
                     dictate::Step::Paste(s) => {
                         let wrap = t.parser.screen().bracketed_paste();
+                        let chars = s.chars().count();
                         t.write(dictate::paste_bytes(&s, wrap));
                         d.last_paste = Some(now);
+                        d.last_phrase = Some((t.id, chars));
+                        d.skip_space = false;
+                        d.send_note = "";
+                        crate::dictlog::log(&format!("paste tab={} chars={chars} bracketed={wrap} auto_send={}", t.id, agent_state.voice_auto_send));
                         if agent_state.voice_auto_send {
                             d.pending_send = Some(app.tabs[app.active].id);
                         }
@@ -590,6 +627,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                     let can = matches!(mode, Mode::Shell) && pasting.is_none() && !t.is_preview() && !t.side_focused();
                     match dictate::send_step(d.pending_send, t.id, can, !d.held.is_empty(), matches!(d.state, dictate::Listen::Hearing), now, d.last_paste, d.last_speech, last_input, dictate::auto_send_delay()) {
                         dictate::Send::Enter => {
+                            crate::dictlog::log("auto Enter: sent");
                             t.write(b"\r".to_vec());
                             d.pending_send = None;
                             message = Some("dictation pressed Enter".into());
@@ -598,11 +636,24 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         }
                         dictate::Send::Cancel(why) => {
                             d.pending_send = None;
+                            crate::dictlog::log(&format!("auto Enter: cancelled ({why})"));
                             message = Some(format!("auto Enter cancelled: {why}"));
                             dirty = true;
                         }
-                        dictate::Send::WaitUntil(w) => dict_wake = Some(dict_wake.map_or(w, |x| x.min(w))),
-                        dictate::Send::Nothing => {}
+                        dictate::Send::WaitUntil(w) => {
+                            if d.send_note != "armed" {
+                                d.send_note = "armed";
+                                crate::dictlog::log(&format!("auto Enter: armed, due in {} ms", w.saturating_duration_since(now).as_millis()));
+                            }
+                            dict_wake = Some(dict_wake.map_or(w, |x| x.min(w)));
+                        }
+                        dictate::Send::Nothing => {
+                            let why = if !d.held.is_empty() { "a phrase is waiting to be typed" } else if matches!(d.state, dictate::Listen::Hearing) { "speech is being heard" } else if !can { "this pane cannot take keys now (a dialog is open, or a preview or side pane has focus)" } else { "waiting" };
+                            if d.send_note != why {
+                                d.send_note = why;
+                                crate::dictlog::log(&format!("auto Enter: holding ({why})"));
+                            }
+                        }
                     }
                 }
                 if !d.idle.is_zero() && matches!(d.state, dictate::Listen::Listening | dictate::Listen::Loading) {
@@ -744,7 +795,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                             Ev::Level(v) => d.push_level(v),
                             Ev::Final(text) => {
                                 d.last_speech = now;
-                                d.held.push_back(Held { text, at: now });
+                                let ctl = dictate::control(&text);
+                                crate::dictlog::log(&format!("final chars={} control={ctl:?}", text.chars().count()));
+                                d.held.push_back(Held { text, at: now, ctl });
                             }
                             Ev::Error { kind, msg } => {
                                 message = Some(dictate::friendly_error(&kind, &msg));

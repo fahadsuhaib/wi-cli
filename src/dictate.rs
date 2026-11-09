@@ -175,6 +175,36 @@ pub fn is_fatal(kind: &str) -> bool {
 pub struct Held {
     pub text: String,
     pub at: Instant,
+    /// A spoken control ("scratch that", "new line") instead of text to type.
+    pub ctl: Option<Control>,
+}
+
+/// A whole phrase that is an instruction about the text, not text itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    /// Remove the last dictated phrase so it can be said again.
+    Scratch,
+    /// Start a new line in the prompt.
+    NewLine,
+    /// A blank line, then a new line.
+    NewParagraph,
+}
+
+/// Is this whole phrase a control? Only when it is nothing else ("scratch that", "new line"), so a
+/// sentence that merely contains those words stays text. Case and punctuation are ignored.
+pub fn control(phrase: &str) -> Option<Control> {
+    let words: Vec<String> = phrase
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let w: Vec<&str> = words.iter().map(String::as_str).collect();
+    match w.as_slice() {
+        ["scratch", "that"] | ["scratch", "this"] | ["scratch", "it"] | ["clear", "that"] | ["undo", "that"] | ["delete", "that"] | ["never", "mind"] | ["nevermind"] => Some(Control::Scratch),
+        ["new", "line"] | ["newline"] | ["next", "line"] | ["neo", "line"] | ["nyu", "line"] => Some(Control::NewLine),
+        ["new", "paragraph"] | ["next", "paragraph"] | ["new", "para"] => Some(Control::NewParagraph),
+        _ => None,
+    }
 }
 
 /// What to do with the oldest waiting phrase now.
@@ -182,6 +212,8 @@ pub struct Held {
 pub enum Step {
     /// Type this (already joined with its leading space) now.
     Paste(String),
+    /// Carry out a spoken control now.
+    Control(Control),
     /// Nothing to do before this moment (None: nothing waiting).
     Wait(Option<Instant>),
     /// This many phrases waited too long and were dropped.
@@ -206,6 +238,9 @@ pub fn next_step(q: &mut VecDeque<Held>, now: Instant, last_key: Instant, can_pa
         return Step::Wait(Some(quiet_at.min(expires)));
     }
     let h = q.pop_front().expect("front exists");
+    if let Some(c) = h.ctl {
+        return Step::Control(c);
+    }
     Step::Paste(if leading_space { format!(" {}", h.text) } else { h.text })
 }
 
@@ -286,6 +321,12 @@ pub struct Dictation {
     pub last_paste: Option<Instant>,
     /// The tab whose pasted phrases are waiting for the automatic Enter (auto-send is on).
     pub pending_send: Option<usize>,
+    /// The last dictated phrase: the tab it went to and how many characters it typed (for "scratch that").
+    pub last_phrase: Option<(usize, usize)>,
+    /// The next phrase starts a fresh line: no leading space.
+    pub skip_space: bool,
+    /// Why the automatic Enter is holding (logged when it changes).
+    pub send_note: &'static str,
     /// A fatal error text already shown, so the exit does not overwrite it.
     pub shown_error: bool,
     /// Why the engine said it stopped (its `off` event).
@@ -340,6 +381,9 @@ impl Dictation {
             held: VecDeque::new(),
             last_paste: None,
             pending_send: None,
+            last_phrase: None,
+            skip_space: false,
+            send_note: "",
             shown_error: false,
             off_why: None,
             _child: child,
@@ -411,7 +455,7 @@ mod tests {
     use super::*;
 
     fn held(text: &str, at: Instant) -> Held {
-        Held { text: text.into(), at }
+        Held { text: text.into(), at, ctl: None }
     }
 
     #[test]
@@ -506,6 +550,29 @@ mod tests {
     fn bracketed_markers_only_when_the_pane_asked() {
         assert_eq!(paste_bytes("hi", true), b"\x1b[200~hi\x1b[201~");
         assert_eq!(paste_bytes("hi", false), b"hi");
+    }
+
+    #[test]
+    fn controls_are_whole_phrases_only() {
+        assert_eq!(control("Scratch that."), Some(Control::Scratch));
+        assert_eq!(control("never mind"), Some(Control::Scratch));
+        assert_eq!(control("New line"), Some(Control::NewLine));
+        assert_eq!(control("new line."), Some(Control::NewLine));
+        assert_eq!(control("New paragraph!"), Some(Control::NewParagraph));
+        assert_eq!(control("please add a new line at the end of the file"), None, "a sentence that mentions it stays text");
+        assert_eq!(control("scratch that idea and start over"), None);
+        assert_eq!(control(""), None);
+    }
+
+    #[test]
+    fn a_control_reaches_the_front_of_the_queue_in_order() {
+        let now = Instant::now();
+        let quiet = now - Duration::from_secs(5);
+        let mut q = VecDeque::from([held("one", now), Held { text: "new line".into(), at: now, ctl: Some(Control::NewLine) }, held("two", now)]);
+        let t = Duration::from_secs(30);
+        assert_eq!(next_step(&mut q, now, quiet, true, t, false), Step::Paste("one".into()));
+        assert_eq!(next_step(&mut q, now, quiet, true, t, false), Step::Control(Control::NewLine));
+        assert_eq!(next_step(&mut q, now, quiet, true, t, false), Step::Paste("two".into()));
     }
 
     #[test]

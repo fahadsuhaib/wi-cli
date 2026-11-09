@@ -485,5 +485,26 @@ check("D downloads the speech model again with a progress bar", r.wait_until(lam
 check("D asks the helper to force it", r.wait_until(lambda: "fetch-models --force" in open(FETCHLOG).read(), 12))
 r.quit()
 
+# 16. Spoken controls: "scratch that" removes the last phrase; "new line" needs an agent prompt; a log is kept.
+LOG = CFGDIR + "/dictation.log"
+if os.path.exists(LOG): os.remove(LOG)
+r = Run([state("listening"), ["wait", go("p1")], final("fix the login bug"), ["wait", go("p2")], final("Scratch that.")], tag="sc1", extra_env={"WICLI_DICTATION_LOG": LOG})
+r.send(f"perl {CFGDIR}/bp.pl\n", 0.8)
+r.dictation()
+r.release("p1"); r.pump(0.3)
+r.release("p2"); r.pump(0.8)
+check("scratch that: the last phrase is removed with one backspace per character, nothing else sent", keys(r) == paste + "7f" * len("fix the login bug"))
+check("scratch that: the status line says so", "scratched the last phrase" in r.status())
+r.quit()
+r = Run([state("listening"), ["wait", go("p1")], final("fix the login bug"), ["wait", go("p2")], final("new line")], tag="sc2", extra_env={"WICLI_DICTATION_LOG": LOG})
+r.send(f"perl {CFGDIR}/bp.pl\n", 0.8)
+r.dictation()
+r.release("p1"); r.pump(0.3)
+r.release("p2"); r.pump(0.8)
+check("new line in a plain shell is refused (it would run the command)", keys(r) == paste and "new line works in an agent prompt" in r.status())
+r.quit()
+logtxt = open(LOG).read() if os.path.exists(LOG) else ""
+check("the log records the phrases by length only, never the words", "final chars=17" in logtxt and "scratch chars=17" in logtxt and "login" not in logtxt)
+
 print("\n%d failed" % len(fails) if fails else "\nall passed")
 sys.exit(1 if fails else 0)

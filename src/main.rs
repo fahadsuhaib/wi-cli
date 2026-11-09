@@ -6,6 +6,7 @@ mod compat;
 mod config;
 mod cwd;
 mod dictate;
+mod dictlog;
 mod exec;
 mod explorer;
 mod explorer_data;

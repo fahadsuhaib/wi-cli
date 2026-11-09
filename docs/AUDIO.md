@@ -13,7 +13,7 @@ macOS asks once to let your terminal app use the microphone; if you said no, all
 Security > Microphone.
 
 The mic shows `● listening`, `● hearing` and `● ...` while on. Click it again to stop. Choosing Dictation while it is on
-shows a small screen: Enter turns it off, **O** opens the options: **A** press Enter by itself after 3 seconds of quiet (off until you turn it on; typing or switching tabs cancels it), **T** test the microphone, **D** download the speech model again (fixes a damaged file or updates it), **R** remove voice (deletes
+shows a small screen: Enter turns it off, **O** opens the options: **A** press Enter by itself after 3 seconds of quiet (off until you turn it on; typing or switching tabs cancels it), **T** test the microphone, **D** download the speech model again (fixes a damaged file or updates it), **R** remove voice. Saying just "scratch that" removes the last phrase so you can say it again, and "new line" or "new paragraph" starts a new line in an agent prompt. A small log of what dictation did (timings and reasons, never your words) is kept in `~/Library/Caches/wicli/dictation.log` (deletes
 the model and the helper, frees 300 MB).
 
 ## Privacy
