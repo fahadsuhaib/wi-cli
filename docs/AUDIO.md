@@ -1,5 +1,7 @@
 # Voice dictation (`wi-audio`)
 
+**macOS on Apple Silicon only for now.** Linux comes later (inference there is CPU-only and has not been judged good enough yet). On Linux wi shows no Dictation menu entry, and a `[transcribe]` section in the config is accepted and ignored.
+
 Talk to your agent instead of typing. Turn dictation on once; wi keeps listening, and each phrase you say is typed into
 the focused pane, without pressing Enter, so you can edit it first.
 
@@ -12,9 +14,8 @@ installed on the remote box.
 ## Set up (once)
 
 1. Get `wi-audio` from the [releases page](https://github.com/fahadsuhaib/wi-cli/releases):
-   `wi-audio-macos-arm64.tar.gz`, `wi-audio-linux-x86_64.tar.gz` or `wi-audio-linux-aarch64.tar.gz`. Check it against
-   `SHA256SUMS`, unpack it and put `wi-audio` on your `PATH` (for example `/usr/local/bin`).
-   Or build it: `cd audio && cargo build --release` (needs cmake and a C++ compiler; on Linux `libasound2-dev`).
+   `wi-audio-macos-arm64.tar.gz`. Check it against `SHA256SUMS`, unpack it and put `wi-audio` on your `PATH`
+   (for example `/usr/local/bin`). Or build it: `cd audio && cargo build --release` (needs cmake and a C++ compiler).
 2. Download the speech model (asks first, shows the file, size and host, checks SHA256):
 
        wi-audio models install            # Moonshine Streaming small, 198.5 MB, plus Silero VAD, 1.2 MB
@@ -87,8 +88,7 @@ The `listen` events (the contract wi reads; any program that prints these lines 
 
 wi closes the engine's stdin to stop it; it also stops on SIGTERM and SIGINT.
 
-Models live in `~/Library/Application Support/wicli/models` (macOS) or `~/.local/share/wicli/models` (Linux);
-`wi-audio models remove` deletes them. `WICLI_AUDIO_MODELS=<dir>` uses another folder.
+Models live in `~/Library/Application Support/wicli/models`; `wi-audio models remove` deletes them. `WICLI_AUDIO_MODELS=<dir>` uses another folder.
 
 ## Troubleshooting
 
@@ -104,7 +104,7 @@ Models live in `~/Library/Application Support/wicli/models` (macOS) or `~/.local
 
 ## Limits of this first version
 
-English only. Linux microphone capture is built but untested. No live partial text, no voice commands ("send it"),
+English only. macOS (Apple Silicon) only: the Linux build of the audio crate compiles but is not shipped, not tested with a microphone, and wi hides the menu entry there. No live partial text, no voice commands ("send it"),
 no echo guard (speakers playing sound into the microphone), no handling of a microphone that changes in the middle of
 a session, no file transcription in wi (the `transcribe` command works on its own), no install of `wi-audio` from
 inside wi. Do not use it while sound from your speakers reaches the microphone: the speakers' words get typed.

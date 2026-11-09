@@ -44,7 +44,7 @@ A file with git changes opens to its diff by itself in the detail pane (read-onl
 
 ## Dictation (voice)
 
-No key of its own: Ctrl-Space, Space, type `dictate`, Enter turns it on and off (also a click on the red `● listening`
+macOS (Apple Silicon) only for now. No key of its own: Ctrl-Space, Space, type `dictate`, Enter turns it on and off (also a click on the red `● listening`
 indicator at the right end of the status bar). While it is on nothing changes for the keyboard: every key works as
 before, and a spoken phrase that ends while you are typing waits until you pause. Phrases are typed without Enter.
 See [AUDIO.md](AUDIO.md).

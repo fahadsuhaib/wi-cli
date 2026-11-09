@@ -7,6 +7,9 @@
 //! its command line, the status indicator, and the queue that holds phrases while the user types
 //! or the pane cannot take text. The event loop in `app.rs` does the I/O.
 
+// Voice dictation is macOS only for now: elsewhere nothing reaches this code.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use crate::config::Transcribe;
 use std::collections::VecDeque;
 use std::process::Stdio;

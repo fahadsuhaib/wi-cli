@@ -38,6 +38,7 @@ pub enum Action {
     /// Restart wi in place (the same tabs come back).
     Restart,
     /// Hands-free dictation on or off: each spoken phrase is typed into the focused pane.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Dictation,
     Agent,
     CloseTab,
@@ -182,6 +183,7 @@ pub const MENU: &[MenuItem] = &[
     mi("Info", 'i', Action::Info, false, "SESSION", &["status", "folder", "box", "about"]),
     mi("Reconnect", 'r', Action::Reconnect, true, "SESSION", &["connection", "ssh", "retry"]),
     mi("Download", 'd', Action::Download, true, "SESSION", &["fetch", "copy", "save", "file"]),
+    #[cfg(target_os = "macos")]
     mi("Dictation (voice) on/off", NO_KEY, Action::Dictation, false, "AGENT", &["dictate", "voice", "speak", "talk", "microphone", "mic", "listen", "speech"]),
     mi("Update wi", NO_KEY, Action::Update, false, "SESSION", &["upgrade", "new", "version", "release", "download", "latest"]),
     mi("Restart wi", NO_KEY, Action::Restart, false, "SESSION", &["reload", "relaunch", "again", "new version"]),

@@ -74,7 +74,7 @@ wi supports macOS and Linux.
 - Previews refresh by themselves when the file changes on disk (see Configuration)
 - Search in files, find file, find in output
 - Themes: `dark`, `light` and fourteen more modelled on VS Code's (see Themes below); Y opens a picker that previews each one live. The chosen theme paints the whole window, shell included, so a light theme looks light on a dark terminal; auto follows your terminal's colours on each start
-- Voice dictation (menu: search "dictate"): turn it on once and each phrase you say is typed into the focused pane without Enter; audio stays on your machine (see Voice below)
+- Voice dictation, macOS only for now (menu: search "dictate"): turn it on once and each phrase you say is typed into the focused pane without Enter; audio stays on your machine (see Voice below)
 - Update wi from the menu (search "update"): asks before contacting github.com, checks the SHA256, replaces the binary, then offers to restart wi with the same tabs ("Restart wi" does the restart alone)
 
 ## Keys
@@ -159,7 +159,7 @@ A few items have no letter because they are all taken. Press Ctrl-Space, then Sp
 
 ## Voice
 
-Talk to your agent: menu (Ctrl-Space, Space, `dictate`) turns dictation on, and every phrase you say is typed into the
+Talk to your agent (**macOS on Apple Silicon only for now**, Linux later; on Linux the menu entry is not shown and a `[transcribe]` config section is ignored): menu (Ctrl-Space, Space, `dictate`) turns dictation on, and every phrase you say is typed into the
 focused pane, with no Enter, so you can fix it first. The status bar shows `● listening`, `● hearing` and `● ...`; the
 same menu entry or a click on the red indicator turns it off, and it switches itself off after 10 minutes of silence.
 

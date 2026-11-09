@@ -2059,6 +2059,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                         mode = Mode::Rename(crate::rename::Rename::new(t.id, t.custom.as_deref().unwrap_or(&t.title)));
                                     }
                                     Action::Theme => mode = Mode::ThemePick(ui::themepick::ThemePick::new(theme_mode)),
+                                    #[cfg(target_os = "macos")]
                                     Action::Dictation => {
                                         if dict.take().is_some() {
                                             message = Some("dictation off".into());
@@ -2072,6 +2073,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                                 Err(e) => message = Some(e),
                                             }
                                         }
+                                    }
+                                    // Voice dictation is macOS only for now (the menu entry is hidden elsewhere).
+                                    #[cfg(not(target_os = "macos"))]
+                                    Action::Dictation => {
+                                        let _ = (&tcfg, &dict_tx, &mut dict_gen, &mut dict);
+                                        message = Some("Dictation is macOS only for now".into());
                                     }
                                     Action::Restart => {
                                         mode = restart_dialog(&app, remote, backend.has_tmux(), None);
