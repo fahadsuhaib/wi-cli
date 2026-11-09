@@ -160,7 +160,7 @@ A few items have no letter because they are all taken. Press Ctrl-Space, then Sp
 ## Voice
 
 macOS (Apple Silicon) only for now. Click the `○ mic` at the right end of the top bar, or choose Dictation in the menu (search "dictate"): the first time, wi offers to install a small helper and download a 296 MB speech model, then tests your microphone.
-After that every phrase you say is typed into the focused pane without Enter (turn on "automatic Enter" in the options and it presses Enter itself after 3 seconds of quiet); click the mic again to stop, or press `O` in the Dictation menu screen for options (test the microphone, remove voice).
+After that every phrase you say is typed into the focused pane without Enter (it presses Enter itself after 3 seconds of quiet; switch that off with the menu entry "Auto-Enter for dictation"); click the mic again to stop, or press `O` in the Dictation menu screen for options (test the microphone, remove voice).
 Audio never leaves your computer: no cloud, nothing is recorded to disk, and it turns itself off after 10 minutes of silence. More in [docs/AUDIO.md](docs/AUDIO.md).
 
 ## Updating

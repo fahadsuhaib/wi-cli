@@ -110,9 +110,10 @@ pub struct State {
     /// The microphone test passed once.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub voice_mic_ok: bool,
-    /// Dictation presses Enter by itself after a few seconds of quiet (off until the user turns it on).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub voice_auto_send: bool,
+    /// Dictation presses Enter by itself after a few seconds of quiet. Not set means on (the
+    /// default); the menu entry "Dictation auto-Enter" switches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_auto_send: Option<bool>,
     /// This running wi changed a voice setting, so its copy wins when it saves. A wi that did not
     /// touch them keeps what is on disk (another wi may have set them since this one started).
     #[serde(skip)]
@@ -145,6 +146,11 @@ pub fn state_path() -> PathBuf {
 }
 
 impl State {
+    /// Whether dictation presses Enter itself after the quiet (on unless the user turned it off).
+    pub fn auto_enter(&self) -> bool {
+        self.voice_auto_send.unwrap_or(true)
+    }
+
     pub fn load() -> State {
         State::load_from(&state_path())
     }
@@ -324,17 +330,17 @@ mod tests {
         let path = dir.join("state.toml");
         // The older wi started before the setting existed and saves its own layout later.
         let stale = State::default();
-        let newer = State { voice_auto_send: true, voice_mic_ok: true, voice_declined: vec!["mic".into()], voice_touched: true, ..State::default() };
+        let newer = State { voice_auto_send: Some(true), voice_mic_ok: true, voice_declined: vec!["mic".into()], voice_touched: true, ..State::default() };
         newer.save_to(&path).unwrap();
         stale.save_to(&path).unwrap();
         let now = State::load_from(&path);
-        assert!(now.voice_auto_send && now.voice_mic_ok && now.voice_declined == ["mic"], "the stale wi must not erase the voice settings");
+        assert!(now.voice_auto_send == Some(true) && now.voice_mic_ok && now.voice_declined == ["mic"], "the stale wi must not erase the voice settings");
         // The wi that changed them wins, including turning one off.
         let mut off = now;
-        off.voice_auto_send = false;
+        off.voice_auto_send = Some(false);
         off.voice_touched = true;
         off.save_to(&path).unwrap();
-        assert!(!State::load_from(&path).voice_auto_send);
+        assert!(!State::load_from(&path).auto_enter());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

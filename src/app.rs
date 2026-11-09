@@ -607,8 +607,8 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         d.last_phrase = Some((t.id, chars));
                         d.skip_space = false;
                         d.send_note = "";
-                        crate::dictlog::log(&format!("paste tab={} chars={chars} bracketed={wrap} auto_send={}", t.id, agent_state.voice_auto_send));
-                        if agent_state.voice_auto_send {
+                        crate::dictlog::log(&format!("paste tab={} chars={chars} bracketed={wrap} auto_send={}", t.id, agent_state.auto_enter()));
+                        if agent_state.auto_enter() {
                             d.pending_send = Some(app.tabs[app.active].id);
                         }
                         snap_live(&mut app);
@@ -1864,7 +1864,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     mode = Mode::Shell;
                                     message = Some("dictation off".into());
                                 }
-                                (Kind::On, Key::Char('o')) => mode = Mode::Voice(voice::Dlg::options(agent_state.voice_auto_send)),
+                                (Kind::On, Key::Char('o')) => mode = Mode::Voice(voice::Dlg::options(agent_state.auto_enter())),
                                 (Kind::On, Key::No) => mode = Mode::Shell,
                                 (Kind::Options, Key::Char('t')) => {
                                     // The test needs the microphone: dictation stops, and starts again after it.
@@ -1877,11 +1877,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     mode = Mode::Voice(voice::Dlg::busy(Step::Mic));
                                 }
                                 (Kind::Options, Key::Char('a')) => {
-                                    agent_state.voice_touched = true; agent_state.voice_auto_send = !agent_state.voice_auto_send;
+                                    agent_state.voice_touched = true; agent_state.voice_auto_send = Some(!agent_state.auto_enter());
                                     let _ = agent_state.save();
                                     if let Some(d) = dict.as_mut() { d.pending_send = None; }
-                                    message = Some(if agent_state.voice_auto_send { "dictation: Enter is pressed after 3 s of quiet".into() } else { "dictation: Enter is yours again".into() });
-                                    mode = Mode::Voice(voice::Dlg::options(agent_state.voice_auto_send));
+                                    message = Some(if agent_state.auto_enter() { "dictation: Enter is pressed after 3 s of quiet".into() } else { "dictation: Enter is yours again".into() });
+                                    mode = Mode::Voice(voice::Dlg::options(agent_state.auto_enter()));
                                 }
                                 (Kind::Options, Key::Char('d')) => {
                                     // Fetch the current speech model again (the old file is replaced only after the new one checks out).
@@ -1902,7 +1902,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     mode = Mode::Shell;
                                     message = Some("removing voice ...".into());
                                 }
-                                (Kind::AskRemove, Key::No) => mode = Mode::Voice(voice::Dlg::options(agent_state.voice_auto_send)),
+                                (Kind::AskRemove, Key::No) => mode = Mode::Voice(voice::Dlg::options(agent_state.auto_enter())),
                                 _ => {}
                             }
                         }
@@ -2313,6 +2313,13 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     Action::RenameTab => {
                                         let t = &app.tabs[app.active];
                                         mode = Mode::Rename(crate::rename::Rename::new(t.id, t.custom.as_deref().unwrap_or(&t.title)));
+                                    }
+                                    Action::DictationEnter => {
+                                        agent_state.voice_touched = true;
+                                        agent_state.voice_auto_send = Some(!agent_state.auto_enter());
+                                        let _ = agent_state.save();
+                                        if let Some(d) = dict.as_mut() { d.pending_send = None; }
+                                        message = Some(if agent_state.auto_enter() { "dictation auto-Enter ON: Enter is pressed after 3 s of quiet (typing cancels it)".into() } else { "dictation auto-Enter OFF: Enter is yours".into() });
                                     }
                                     Action::Theme => mode = Mode::ThemePick(ui::themepick::ThemePick::new(theme_mode)),
                                     #[cfg(target_os = "macos")]

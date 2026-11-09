@@ -44,7 +44,7 @@ A file with git changes opens to its diff by itself in the detail pane (read-onl
 
 ## Dictation (voice)
 
-macOS only for now. Click the mic at the right end of the top bar, or Ctrl-Space, Space, `dictate`, Enter. While it is on, `O` in the Dictation screen (then `A` toggles pressing Enter after 3 seconds of quiet, `D` downloads the speech model again) opens the options; all other keys work as usual. See [AUDIO.md](AUDIO.md).
+macOS only for now. Click the mic at the right end of the top bar, or Ctrl-Space, Space, `dictate`, Enter. While it is on, `O` in the Dictation screen (then `A` toggles pressing Enter after 3 seconds of quiet, `D` downloads the speech model again); the menu entry "Auto-Enter for dictation" toggles it directly (on by default) opens the options; all other keys work as usual. See [AUDIO.md](AUDIO.md).
 
 ## Markdown preview
 

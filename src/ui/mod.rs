@@ -40,6 +40,8 @@ pub enum Action {
     /// Dictation: set it up, turn it on or off, and (while on) its options.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Dictation,
+    /// Switch dictation's automatic Enter (after a few seconds of quiet) on or off.
+    DictationEnter,
     Agent,
     CloseTab,
     Reconnect,
@@ -185,6 +187,7 @@ pub const MENU: &[MenuItem] = &[
     mi("Download", 'd', Action::Download, true, "SESSION", &["fetch", "copy", "save", "file"]),
     #[cfg(target_os = "macos")]
     mi("Dictation", NO_KEY, Action::Dictation, false, "AGENT", &["dictate", "voice", "speak", "talk", "listen", "microphone", "options"]),
+    mi("Auto-Enter for dictation", NO_KEY, Action::DictationEnter, false, "AGENT", &["auto", "enter", "send", "submit", "mic"]),
     mi("Update wi", NO_KEY, Action::Update, false, "SESSION", &["upgrade", "new", "version", "release", "download", "latest"]),
     mi("Restart wi", NO_KEY, Action::Restart, false, "SESSION", &["reload", "relaunch", "again", "new version"]),
     mi("Quit", 'q', Action::Quit, false, "SESSION", &["exit", "detach", "disconnect", "leave"]),

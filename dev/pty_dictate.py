@@ -111,7 +111,9 @@ class Run:
         self.state = CFGDIR + "/state.toml"
         if os.path.exists(self.state): os.remove(self.state)
         st = ("voice_mic_ok = true\n" if mic_ok else "") + ("voice_declined = [%s]\n" % ", ".join('"%s"' % d for d in declined) if declined else "")
-        if auto_send: st += "voice_auto_send = true\n"
+        if auto_send == "default": pass
+        elif auto_send: st += "voice_auto_send = true\n"
+        else: st += "voice_auto_send = false\n"
         if st: open(self.state, "w").write(st)
         env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_TMUX_SOCKET="dictatetest",
                    FAKE_SCENARIO=CFGDIR + "/scenario.json", FAKE_PIDFILE=self.pidfile, FAKE_ARGS=self.argsfile, FAKE_MODEL_FLAG=self.flag,
@@ -452,7 +454,7 @@ check("options: auto Enter is listed as off", "automatic Enter is OFF" in r.text
 r.send(b"a", 0.5)
 check("options: A turns it on and remembers it", "automatic Enter is ON" in r.text() and "voice_auto_send = true" in r.state_text())
 r.send(b"a", 0.5)
-check("options: A again turns it off", "automatic Enter is OFF" in r.text() and "voice_auto_send" not in r.state_text())
+check("options: A again turns it off", "automatic Enter is OFF" in r.text() and "voice_auto_send = false" in r.state_text())
 r.quit()
 
 # 15. A better speech model: offered once when only an older one is installed; D downloads it again.
@@ -505,6 +507,20 @@ check("new line in a plain shell is refused (it would run the command)", keys(r)
 r.quit()
 logtxt = open(LOG).read() if os.path.exists(LOG) else ""
 check("the log records the phrases by length only, never the words", "final chars=17" in logtxt and "scratch chars=17" in logtxt and "login" not in logtxt)
+
+# 17. Auto-Enter is on by default, and the menu entry "Dictation auto-Enter" switches it.
+r = Run([state("listening"), ["wait", go("p1")], final("fix the login bug")], tag="as5", auto_send="default", extra_env={"WICLI_VOICE_AUTOSEND_S": "3"})
+r.send(f"perl {CFGDIR}/bp.pl\n", 0.8)
+r.dictation()
+r.release("p1"); r.pump(3.4)
+check("auto Enter is on by default: pressed after the quiet", keys(r) == paste + "0d")
+r.send(MENU, 0.4); r.send(b" ", 0.3); r.send(b"autoenter", 0.4)
+check("the menu finds the entry by searching for 'auto-enter'", "Auto-Enter for dictation" in r.text())
+r.send(b"\r", 0.6)
+check("the entry turns it off and says so", "auto-Enter OFF" in r.status() and "voice_auto_send = false" in r.state_text())
+r.send(MENU, 0.4); r.send(b" ", 0.3); r.send(b"autoenter", 0.4); r.send(b"\r", 0.6)
+check("and on again", "auto-Enter ON" in r.status() and "voice_auto_send = true" in r.state_text())
+r.quit()
 
 print("\n%d failed" % len(fails) if fails else "\nall passed")
 sys.exit(1 if fails else 0)
