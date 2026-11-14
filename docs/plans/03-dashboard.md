@@ -1,5 +1,7 @@
 # wicli: live dashboard view (plan, from the reference screenshot)
 
+> Historical plan. Since 1.0.0 wi is local-only; the remote parts below no longer apply.
+
 > **PARKED (2026-11-03).** The user wants the screenshot only as a style reference for building TUIs,
 > not monitoring. The file explorer in 04-explorer.md uses its look. Kept for later.
 

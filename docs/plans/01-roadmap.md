@@ -1,5 +1,7 @@
 # wicli roadmap
 
+> Historical plan. Since 1.0.0 wi is local-only; the remote, download and detach items below no longer apply.
+
 Status as of 2026-11-02: local + remote shell tab, header/status bar, Ctrl-G menu, vt100 emulator, 30 fps coalesced redraw. Verified with vim, htop, resize, quit. Not yet: tabs, previews, downloads, scrollback, detach.
 
 ## Vision (updated 2026-11-02)
@@ -48,7 +50,7 @@ Shared: one results/list widget (also used by prompts), every search is a menu A
 1. Paths in terminal output are clickable: Cmd/Ctrl (or Alt, or plain, per `link_click` config) + click on `src/main.rs:12:5`, `./x.py`, `~/a/b`, `File "x.py", line 3`, `--> src/lib.rs:5:9`, git `a/` `b/` prefixes, etc. opens a preview tab (scrolled to the line). URLs open in the local browser.
 2. Keyboard route that always works: menu "Open from screen" labels every path/URL visible in the tab with a letter; press the letter. Needed because many terminals do not pass Cmd+click (or Ctrl+click on macOS, which is a right click) to the program.
 3. Relative paths resolve against the tab's working directory (OSC 7 if the shell sends it; the tmux pane path for remote tabs; /proc or lsof for local tabs), then the workspace root. Candidates are checked with a bounded stat before opening.
-4. Complex files (images, PDF, Office, archives, audio/video, HTML, other binaries) open in the native app: `open` on macOS, `xdg-open` on Linux. Remote files are fetched over SFTP into `~/.cache/wicli/<box>/` (streamed in 64 KB chunks, `.part` then rename, size+mtime reuse, confirm above 100 MB, Esc cancels, total cache capped) and then opened locally. This is the M3 download engine, built first for this purpose.
+4. Complex files (images, PDF, Office, archives, audio/video, HTML, other binaries) open in the native app: `open` on macOS, `xdg-open` on Linux. (Remote fetching was part of this phase before 1.0.0.)
 5. Config: `link_click = ctrl | alt | cmd | any | none`, `[open] native_ext` / `preview_ext` overrides.
 Privacy and safety rules (user requirement, 2026-11-02): nothing leaves wi without an explicit yes.
 - A confirmation dialog (Y/N or click) comes before any native open, any URL open, and any download from a remote box. It shows the full sanitised path or URL, the size, and where the file comes from. Setting `confirm_open = always` (default) | `never`.
@@ -100,7 +102,7 @@ Any tab can be pinned to a left or right pane, so e.g. Claude Code stays in one 
 7. Reopen last tabs per workspace (explicit small state file, no watchers).
 
 ## Phase D: Downloads (M3, remote only)
-SFTP streaming to `.part` then rename, size/mtime reuse, confirm above 100 MB, progress in status bar, Esc cancels, folder download via tar exec channel, Open local copy. Local mode: Open uses the file directly.
+Dropped in 1.0.0 with remote mode. Open uses the file directly.
 
 ## Phase E: Menu and workflow polish (M4)
 Menu search-as-you-type, recent files, per-box config (sensitive patterns, caps), config editing from the menu, themes (light/dark detection).

@@ -1,5 +1,7 @@
 # wicli: overview-level developer features
 
+> Historical plan. Since 1.0.0 wi is local-only; the remote parts below no longer apply.
+
 Separate from `01-roadmap.md` (core terminal, previews, remote, search, themes). These are small, glanceable features that make day-to-day work with AI agents (Claude Code, Codex) smoother. Written 2026-11-02 from the user's request ("progress tabs, copy/paste bins, stuff like that").
 
 ## Principles

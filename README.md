@@ -4,18 +4,17 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-lightgrey)
 
-Run Claude Code and Codex in tabs, preview and diff what they write, browse your files, and do all of it on your own
-machine or on a remote box over SSH, from one fast, lightweight terminal app. Nothing is installed on the server beyond
-sshd. It replaces the "VS Code window next to a terminal" workflow for agent work: no debugger, no LSP and no built-in
-editor, just the parts you actually use while an agent writes the code.
+Run Claude Code and Codex in tabs, preview and diff what they write, and browse your files, all from one fast,
+lightweight terminal app on your own machine. It replaces the "VS Code window next to a terminal" workflow for agent
+work: no debugger, no LSP and no built-in editor, just the parts you actually use while an agent writes the code.
+
+Remote boxes over SSH moved to [wibox](https://wibox.dev); wi is now local-only.
 
 ## Why wi
 
 - **Built for the agent workflow.** Tabs show which agent is printing (`*`) or has gone quiet (`!`). Pin an agent tab
   beside your shell. Previews refresh by themselves when the agent edits a file. The explorer can type `@path`
   mentions straight into the agent's prompt.
-- **Remote without installing anything.** `wi my-box` connects over SSH (your `~/.ssh/config` works); tabs survive
-  disconnects through tmux if the box has it. Nothing runs on the server except sshd.
 - **Small and fast.** One Rust binary (static on Linux, universal on macOS), about 12 MB of memory when idle,
   redraws only when something changes. No Electron, no background services.
 - **Simple keys.** One menu key (`Ctrl-Space`) opens a menu with underlined letters; everything else is letters,
@@ -29,7 +28,7 @@ editor, just the parts you actually use while an agent writes the code.
     wi
 
 Press `Ctrl-Space` for the menu. Try `P` to preview a file, `X` for the file explorer, `A` to start Claude Code or
-Codex in a tab, and `Y` to pick a theme. For a remote box: `wi my-box`.
+Codex in a tab, and `Y` to pick a theme.
 
 ## Install
 
@@ -52,21 +51,20 @@ wi supports macOS and Linux.
 
 ## Use
 
-    wi                 # local workspace in the current folder
-    wi <folder>        # local workspace in a folder
-    wi <box>           # remote box from the config, or a Host from ~/.ssh/config
+    wi                 # workspace in the current folder
+    wi <folder>        # workspace in a folder
     wi --help
 
 ## All features
 
-- Local and remote shells, tabs with activity markers (`*` printing, `!` went quiet)
+- Shell tabs with activity markers (`*` printing, `!` went quiet)
 - Previews: text, markdown (mermaid blocks drawn as text diagrams: flowchart, sequence, class, state, ER, pie, gantt and more; `D` shows the source), CSV/TSV, JSON, binary stub; git changes and diffs; in the explorer a changed file opens to its own read-only diff (staged and unstaged, hunk jumps, auto-refresh)
 - Recent files: every file you preview is remembered per workspace (also across restarts). Press H in a preview, or menu then Space and type "recent", to pick one again; the full path of the shown file is always on the first row of the preview
 - Mouse (clicks, wheel, selection with copy on release), scrollback, bracketed paste; the "Preview a file" and folder prompts are real line editors (a visible cursor, Left/Right/Home/End, Backspace/Delete, Ctrl-U, paste inserts at the cursor, Tab completes)
 - Clickable paths and links: Cmd+click on a Mac, Ctrl+click on Linux (also Alt+click or right-click);
   `file:line` opens a preview at that line, URLs and complex files go to the OS after a confirmation;
   relative paths resolve against the shell's real folder (OSC 7 if it sends it, else asked from the OS when you click), then the workspace root and the tab's start folder; if none has it, one bounded search (depth 6, 5,000 entries, 4 s) finds a unique match by trailing path, and several matches raise a small picker (Enter chooses, Esc cancels), never a silent guess;
-  a folder path (`src/`, `./out`, `~/work/app`, `/srv/app/`, local or on the box) opens the file explorer rooted there, and leaving returns to your tab
+  a folder path (`src/`, `./out`, `~/work/app`, `/srv/app/`) opens the file explorer rooted there, and leaving returns to your tab
 - Agent workspaces: detects `CLAUDE.md`/`.claude` and `AGENTS.md`/`.codex`, asks once and remembers the command per workspace
 - File explorer (Ctrl-Space then X): full-screen tree with sizes, dates, git marks and a detail pane. Enter shows a file in the detail pane and stays (Enter again, or O, opens it in the preview pane); E opens it in `$EDITOR` in a new tab. Just type to find: any letter that is not a command (and digits) starts the filter, Esc clears it. Space marks files (kept across folds and when you leave), M types the marks, or the selected path, as `@path ` mentions into your agent tab without pressing Enter. S cycles the sort (name, size, modified, newest first); files that changed or appeared since you opened it or last pressed R get a dot. The explorer keeps its folds, selection, sort and marks while wi runs. A file with git changes opens to its diff by itself in the detail pane (read-only, unified, line numbers, added and removed lines tinted in the theme's colours; the header shows the path, staged or unstaged, +added -removed and hunk n/m). With the diff focused (Enter): Up/Down/J/K scroll, N/P next and previous hunk, Tab switches staged and unstaged when a file has both, E opens the editor, M sends `@path`, Esc goes back. D shows the file content instead (D again, the diff). The mark column shows two letters when the staged and unstaged halves differ (`AM`). An open diff refreshes by itself shortly after the file changes on disk (stat poll, no git polling; R reloads after a `git add`).
 - Rename a tab (menu: search "rename", click the active tab, or double-click any tab); the name survives "Restart wi"
@@ -88,14 +86,13 @@ New line in an agent tab: Alt+Enter works in every terminal (Shift+Enter only wh
 | P | Preview a file | N | New shell tab |
 | G | Git changes | F | New tab in folder |
 | O | Open path on screen | H | Change folder of this tab |
-| D | Download (remote) | T / B | Next / previous tab |
-| L | Search in files | C | Close tab |
-| K | Find file | S | Scroll |
-| U | Find in output | W | Switch pane |
-| A | Start / change agent | V | Close preview |
-| X | Explorer | | |
+| L | Search in files | T / B | Next / previous tab |
+| K | Find file | C | Close tab |
+| U | Find in output | S | Scroll |
+| A | Start / change agent | W | Switch pane |
+| X | Explorer | V | Close preview |
 | M | Mouse on/off | Y | Theme picker |
-| R | Reconnect (remote) | I / Q | Info / quit |
+| | | I / Q | Info / quit |
 
 Scrolled back (wheel up, or S): arrows, PgUp/PgDn, Home/End scroll, Esc leaves; typing or pasting anything else jumps to the live bottom and goes to the tab.
 
@@ -113,7 +110,7 @@ Pin any tab beside the one you are working in, for example a Claude tab on the r
 4. ⇄ in the pinned pane's corner (or "Swap pane sides") switches left and right. ✕, Ctrl-Space then V, or "Unsplit" unpins; the tab stays as a normal tab.
 
 The terminal must be at least 101 columns wide, otherwise wi shows one pane. The layout is remembered per workspace.
-While a tab is pinned, links and previews open as ordinary tabs. The explorer cannot be pinned, and a pinned local shell
+While a tab is pinned, links and previews open as ordinary tabs. The explorer cannot be pinned, and a pinned shell
 starts fresh after a restart.
 
 ## Themes
@@ -142,12 +139,11 @@ Custom names survive "Restart wi" (and the restart after an update); they are al
 
 ## Reopening your tabs
 
-Quit wi from the menu (or close the terminal) and the next `wi`, `wi <folder>` or `wi <box>` in the same workspace
+Quit wi from the menu (or close the terminal) and the next `wi` or `wi <folder>` in the same workspace
 reopens the same tabs: folders, custom names, the active tab, previews and pinned layout. A status note says so
 ("reopened 3 tabs from last session"). As with "Restart wi", running programs do not survive: shells start fresh
-in their folders, agent tabs start their remembered agent command again, remote tmux tabs reattach. Only folders,
-names, agent names and session names are saved (in `state.toml`, one entry per workspace; the last quit wins), never
-screen content. A snapshot older than 30 days is ignored, a tab whose folder is gone is skipped, and a workspace with
+in their folders, agent tabs start their remembered agent command again. Only folders, names and agent names are
+saved (in `state.toml`, one entry per workspace; the last quit wins), never screen content. A snapshot older than 30 days is ignored, a tab whose folder is gone is skipped, and a workspace with
 only one plain shell saves nothing; closing the last tab forgets the session. `wi --fresh` starts with one tab and
 forgets the saved ones; `restore_tabs = false` in `[defaults]` turns the whole thing off.
 
@@ -168,7 +164,7 @@ Audio never leaves your computer: no cloud, nothing is recorded to disk, and it 
 Ctrl-Space, Space, `update`. wi asks before it contacts github.com, tells you whether a newer release exists, asks again
 before downloading, checks the SHA256, and replaces the binary. If the folder is not writable (for example
 `/usr/local/bin`) it shows the `sudo install` command instead of running it. Afterwards it offers "Restart wi now?":
-your tabs reopen in the same folders; running programs (shells, agents) start fresh, remote tabs reattach.
+your tabs reopen in the same folders; running programs (shells, agents) start fresh.
 "Restart wi" does the same without updating.
 
 Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOARD.md).
@@ -194,12 +190,6 @@ Multi-line input (Shift+Enter) in agent tabs: see [docs/KEYBOARD.md](docs/KEYBOA
     command = "claude --continue"                  # your usual command, listed first
     commands = ["claude", "cc", "claude-work"]     # more entry points (optional); same for [agents.codex]
 
-    [[box]]
-    name = "dev"
-    host = "dev.example.com"
-    user = "me"
-    identity = "~/.ssh/id_ed25519"
-
 ### Starting an agent
 
 In a folder with `CLAUDE.md`, `.claude`, `AGENTS.md` or `.codex`, wi asks once how to start the agent (menu, then A,
@@ -212,17 +202,18 @@ selected row's command as a starting point. `N` or Esc is "Not now", `X` is "Nev
 remembered for the folder and skips the question next time.
 
 A file preview that is on screen (side pane, preview tab or pinned pane) refreshes by itself when the file
-changes on disk: wi checks the modification time and size of the visible file once a second (every two on a
-box), waits until it stops changing, then reloads it, keeping your scroll position, markdown view, wrap and
-find. A deleted file keeps its last content and shows "file removed". No file watchers, nothing runs on the box,
-and nothing is checked while no file preview is visible. `preview_autorefresh = false` turns it off.
+changes on disk: wi checks the modification time and size of the visible file once a second, waits until it
+stops changing, then reloads it, keeping your scroll position, markdown view, wrap and find. A deleted file
+keeps its last content and shows "file removed". No file watchers, and nothing is checked while no file
+preview is visible. `preview_autorefresh = false` turns it off.
 
 Every option is documented in `src/config.rs`.
 
 ## Develop and test
 
-`cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. The full suite, including terminal-driving
-scripts and a Docker test box for remote mode, is `dev/run_tests.sh`; see [dev/README.md](dev/README.md).
+`cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. The full suite, including the
+terminal-driving scripts, is `dev/run_tests.sh`; see [dev/README.md](dev/README.md). Changes per release are in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

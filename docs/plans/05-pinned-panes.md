@@ -1,5 +1,7 @@
 # 05 Pinned panes (roadmap A8)
 
+> Historical plan. Since 1.0.0 wi is local-only; the remote parts below no longer apply.
+
 Any tab can be pinned to a left or right pane that stays on screen beside the other tabs.
 
 ## Model

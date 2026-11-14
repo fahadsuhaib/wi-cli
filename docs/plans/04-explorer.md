@@ -1,5 +1,7 @@
 # wicli: file explorer view, built in the reference screenshot's style
 
+> Historical plan. Since 1.0.0 wi is local-only; the remote parts below no longer apply.
+
 Written 2026-11-03. The reference screenshot (a dense, aligned, two-pane monitor with a title bar,
 key hints, a foldable tree with a right-hand column and a detail pane) is the model for how wi
 screens should look and behave. This plan builds the **file explorer** that way, and the reusable
@@ -80,7 +82,7 @@ preview pane; the tree uses the full width.
   pane is under the pointer, drag the divider to resize, Cmd/Ctrl+click a path in the detail pane
   works like everywhere else.
 - **Local and remote identical:** everything goes through `Backend` (directory listings with size
-  and mtime from `std::fs` locally and SFTP attributes remotely, git status through the existing
+  and mtime from `std::fs`, git status through the existing
   exec helper in the tab's folder). Nothing resident, no watchers: `R` refreshes, and the tree
   refreshes a folder when it is opened.
 
@@ -102,7 +104,7 @@ the kit so the whole app looks like the reference.
 | Step | Scope | Done when |
 | --- | --- | --- |
 | E1 | `src/tui/` kit: TitleBar, HintBar, StatusLine, Panel, ColumnList, Tree model, SplitView, theme roles | Unit tests for tree flatten/fold/filter/jumps, column alignment and truncation of wide characters, wrap selection, hit-testing; both themes pass contrast tests |
-| E2 | Data layer: listing with size and mtime (local + SFTP), git status parser, relative-time and size formatters | Unit tests with fixtures; remote test against the Docker box |
+| E2 | Data layer: listing with size and mtime, git status parser, relative-time and size formatters | Unit tests with fixtures |
 | E3 | The explorer view: tab view, keys, detail pane using existing previews, folder summary, binary cards | pty test: tree, fold, select, detail text, hidden toggle, changed-only, sort |
 | E4 | Actions and mouse: Enter/open, new tab here, agent here, copy path, find in tree, drag divider | pty tests for each action, local and remote |
 | E5 | Polish: narrow layout, light theme, wide-character names, huge folder notice, README section | Screenshots-by-text check in both themes; full suite green |

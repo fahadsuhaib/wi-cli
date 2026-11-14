@@ -35,7 +35,7 @@ report Shift+Enter; `wi` asks for it on start and translates it per tab.
 - macOS Terminal.app: Settings > Profiles > Keyboard, add a key: Shift+Return sending text `\012` (LF).
   It has no enhanced reporting, so this mapping applies in every tab, not only agent tabs.
 - GNOME Terminal, Konsole, others without support: use Alt+Enter (or Ctrl+J) for a newline.
-- tmux/ssh: wi sits in front of tmux, so nothing to set on the remote box.
+- Inside tmux or over ssh: wi sits in front of them, so nothing extra to set up.
 
 ## Explorer and diff keys (Ctrl-Space then X)
 
