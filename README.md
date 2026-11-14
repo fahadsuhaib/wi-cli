@@ -8,7 +8,7 @@ Run Claude Code and Codex in tabs, preview and diff what they write, and browse 
 lightweight terminal app on your own machine. It replaces the "VS Code window next to a terminal" workflow for agent
 work: no debugger, no LSP and no built-in editor, just the parts you actually use while an agent writes the code.
 
-Remote boxes over SSH moved to [wibox](https://wibox.dev); wi is now local-only.
+Remote boxes over SSH moved to wibox, a separate product; wi is now local-only.
 
 ## Why wi
 

@@ -2,7 +2,7 @@
 
 ## 1.0.0
 
-- Remote boxes over SSH moved to wibox (wibox.dev); wi is now local-only.
+- Remote boxes over SSH moved to wibox, a separate product; wi is now local-only.
 - Removed: `wi <box>` and `wi <ssh-alias>`, the `box` entries of the config, `wi fetch`, and the menu entries
   Reconnect, Download, Detach (keep sessions) and End sessions and quit. `wi` takes a local folder (or none).
 - Removed the `download_dir` and `download_confirm_mb` settings (they only applied to remote files).
