@@ -127,8 +127,18 @@ fn have(cmd: &str) -> bool {
 }
 
 /// Run to completion or kill after `limit`. Output is discarded (callers use files).
-fn run_limited(cmd: &mut Command, limit: Duration, mut tick: impl FnMut()) -> Result<std::process::ExitStatus, String> {
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+fn run_limited(cmd: &mut Command, limit: Duration, tick: impl FnMut()) -> Result<std::process::ExitStatus, String> {
+    run_limited_stderr(cmd, limit, tick, Stdio::null())
+}
+
+/// Like `run_limited`, with stderr written to `errfile` so a failure can say why.
+fn run_limited_err(cmd: &mut Command, limit: Duration, tick: impl FnMut(), errfile: &Path) -> Result<std::process::ExitStatus, String> {
+    let err = std::fs::File::create(errfile).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
+    run_limited_stderr(cmd, limit, tick, err)
+}
+
+fn run_limited_stderr(cmd: &mut Command, limit: Duration, mut tick: impl FnMut(), err: Stdio) -> Result<std::process::ExitStatus, String> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(err).spawn().map_err(|e| e.to_string())?;
     let end = Instant::now() + limit;
     loop {
         match child.try_wait() {
@@ -151,17 +161,22 @@ fn download(url: &str, dest: &Path, limit: Duration, max_bytes: u64, tick: impl 
     let mut cmd;
     if have("curl") {
         cmd = Command::new("curl");
-        cmd.args(["-fsSL", "--connect-timeout", "15", "--max-filesize", &max_bytes.to_string(), "-o"]).arg(dest).arg(url);
+        cmd.args(["-fsSL", "--retry", "2", "--retry-delay", "1", "--connect-timeout", "15", "--max-filesize", &max_bytes.to_string(), "-o"]).arg(dest).arg(url);
     } else if have("wget") {
         cmd = Command::new("wget");
         cmd.args(["-q", "-T", "15", "-O"]).arg(dest).arg(url);
     } else {
         return Err(NEEDS_FETCHER.into());
     }
-    let st = run_limited(&mut cmd, limit, tick).map_err(|e| format!("download of {url}: {e}"))?;
+    let errfile = dest.with_extension("err");
+    let st = run_limited_err(&mut cmd, limit, tick, &errfile).map_err(|e| format!("download of {url}: {e}"))?;
     if !st.success() {
-        return Err(format!("could not download {url}"));
+        let why = read_small(&errfile).unwrap_or_default();
+        let _ = std::fs::remove_file(&errfile);
+        let why = why.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+        return Err(if why.is_empty() { format!("could not download {url}") } else { format!("could not download {url}: {why}") });
     }
+    let _ = std::fs::remove_file(&errfile);
     match std::fs::metadata(dest) {
         Ok(m) if m.len() <= max_bytes => Ok(()),
         Ok(_) => Err(format!("{url} is larger than {} MB", max_bytes / 1024 / 1024)),
