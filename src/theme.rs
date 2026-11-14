@@ -117,7 +117,7 @@ pub struct Theme {
     pub title_fg: Color,
     /// Label text of the one-line key hints (`hint_fg` is the link-label colour, a different thing).
     pub hintline_fg: Color,
-    /// Coloured badge in the status line (`LOCAL`, a box name) and the header row of a panel.
+    /// Coloured badge in the status line (`LOCAL`) and the header row of a panel.
     pub badge_bg: Color,
     pub badge_fg: Color,
     /// Header row of a column list (`FILES  SIZE  MODIFIED`).

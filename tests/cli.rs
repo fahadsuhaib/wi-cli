@@ -27,15 +27,14 @@ fn check(out: &Output) {
 }
 
 #[test]
-fn unknown_box_name_fails() {
-    let cfg = "[[box]]\nname = \"a\"\nhost = \"127.0.0.1\"\nport = 1\nuser = \"u\"\nidentity = \"/nonexistent\"\n";
-    check(&run(cfg, &["no-such-box"]));
+fn unknown_folder_fails() {
+    check(&run("", &["/no/such/folder"]));
 }
 
 #[test]
 fn invalid_config_toml_fails() {
     check(&run("this is = [not valid toml", &[]));
-    check(&run("this is = [not valid toml", &["somebox"]));
+    check(&run("this is = [not valid toml", &["."]));
 }
 
 #[test]
@@ -53,7 +52,7 @@ fn help_flag_prints_usage() {
         let out = run("", &[flag]);
         assert_eq!(out.status.code(), Some(0));
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.contains("usage:") && text.contains("wi <folder>") && text.contains("wi fetch"), "{text}");
+        assert!(text.contains("usage:") && text.contains("wi <folder>") && !text.contains("fetch"), "{text}");
     }
 }
 

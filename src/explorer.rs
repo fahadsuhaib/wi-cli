@@ -1,7 +1,7 @@
 //! The file explorer: state, key and mouse handling, lazy loading. No drawing here (see
 //! `ui/explorer.rs`) and no direct I/O: loads are described as `Req`, run by `start` (the main
 //! loop polls the future) and handed back as `Done`, so everything below is testable without a
-//! terminal or a box.
+//! terminal.
 
 use crate::explorer_data::{DetailedListing, DirEntry, GitMark, GitMarks, SortKey, child_path, format_size, relative_time, sort_entries, summarize};
 use crate::diffview::DiffView;
@@ -266,9 +266,8 @@ pub struct Settings {
 
 pub struct ExplorerState {
     pub root: String,
-    /// `LOCAL` or the box name.
+    /// Badge shown in the status line.
     pub badge: String,
-    pub remote: bool,
     pub tree: Tree<DirEntry>,
     root_loaded: bool,
     root_err: Option<String>,
@@ -363,13 +362,12 @@ fn now_secs() -> i64 {
 
 impl ExplorerState {
     /// A fresh explorer rooted at `root` (absolute). The root listing and git marks are queued.
-    pub fn new(root: String, remote: Option<String>, st: Settings) -> Self {
+    pub fn new(root: String, st: Settings) -> Self {
         let mut tree: Tree<DirEntry> = Tree::new(Vec::new());
         tree.sort_with(keep_order);
         let mut s = ExplorerState {
             root,
-            badge: remote.clone().unwrap_or_else(|| "LOCAL".into()),
-            remote: remote.is_some(),
+            badge: "LOCAL".into(),
             tree,
             root_loaded: false,
             root_err: None,
@@ -504,7 +502,7 @@ impl ExplorerState {
         self.marks = None;
         let Some(m) = marks else { return };
         let mut root = self.root.trim_end_matches('/').to_string();
-        if !root.starts_with(m.repo_root.trim_end_matches('/')) && !self.remote {
+        if !root.starts_with(m.repo_root.trim_end_matches('/')) {
             // The repo root is the resolved path; the folder may have been reached through a link.
             if let Ok(c) = std::fs::canonicalize(&root) {
                 root = c.to_string_lossy().into_owned();
@@ -1481,7 +1479,7 @@ pub fn path_link(abs: &str) -> crate::links::Link {
     crate::links::Link { kind: crate::links::LinkKind::Path { path: abs.to_string(), line: None, col: None }, row: 0, start_col: 0, end_col: 0, wrap_rows: 0 }
 }
 
-/// What is typed into the new tab's shell to edit `file` (also works through a remote shell).
+/// What is typed into the new tab's shell to edit `file`.
 pub fn editor_command(file: &str) -> String {
     format!("${{EDITOR:-vi}} -- {}\n", crate::exec::sq(file))
 }
@@ -1500,7 +1498,7 @@ mod tests {
     }
 
     fn st() -> ExplorerState {
-        let mut s = ExplorerState::new("/p".into(), None, Settings { csv_rows: 100, read_cap: 1 << 20, open_cfg: OpenCfg::default(), pct: 40 });
+        let mut s = ExplorerState::new("/p".into(), Settings { csv_rows: 100, read_cap: 1 << 20, open_cfg: OpenCfg::default(), pct: 40 });
         s.now = 1_000_000;
         s.prepare(120, 36);
         s
@@ -1699,7 +1697,7 @@ mod tests {
 
     #[test]
     fn marks_for_a_subfolder_root_use_the_prefix() {
-        let mut s = ExplorerState::new("/repo/app".into(), None, Settings { csv_rows: 10, read_cap: 1024, open_cfg: OpenCfg::default(), pct: 40 });
+        let mut s = ExplorerState::new("/repo/app".into(), Settings { csv_rows: 10, read_cap: 1024, open_cfg: OpenCfg::default(), pct: 40 });
         s.apply(Done::Dir { epoch: 0, id: String::new(), res: Ok(listing(vec![ent("a.rs", false, 1, 1), ent("b.rs", false, 1, 1)])) });
         let mut m = marks(&[("app/a.rs", GitMark::Added), ("other/c.rs", GitMark::Modified)]);
         m.repo_root = "/repo".into();

@@ -1,4 +1,4 @@
-//! Read-only file previews rendered on the client. The box (or disk) only serves bytes.
+//! Read-only file previews. The disk only serves bytes; everything is rendered here.
 
 pub mod diff;
 pub mod keys;

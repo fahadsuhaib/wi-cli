@@ -2,11 +2,11 @@
 name = "wicli"
 version = "0.9.0"
 edition = "2024"
-description = "A terminal workspace for AI coding agents (Claude Code, Codex): tabs, previews, file explorer, local or over SSH"
+description = "A terminal workspace for AI coding agents (Claude Code, Codex): tabs, previews, file explorer, local-only"
 license = "MIT"
 repository = "https://github.com/fahadsuhaib/wi-cli"
 readme = "README.md"
-keywords = ["terminal", "tui", "ssh", "ai", "claude-code"]
+keywords = ["terminal", "tui", "ai", "claude-code", "codex"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
@@ -20,8 +20,6 @@ portable-pty = "0.9.0"
 pulldown-cmark = "0.13.6"
 ratatui = "0.30.2"
 regex = "1.12.0"
-russh = "0.65.0"
-russh-sftp = "3.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal", "io-std", "net", "process"] }

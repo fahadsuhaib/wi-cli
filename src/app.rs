@@ -13,13 +13,13 @@ use crate::files::complete;
 use crate::preview::{Opts, Preview, keys::{self as pvkeys, PvKey}};
 use crate::mouse::{self, Button, Kind, MouseEvent, Piece};
 use crate::links::{self, Link, LinkKind};
-use crate::opener::{self, FetchOpts, FetchResult, Handling, OpenCfg};
+use crate::opener::{self, Handling, OpenCfg};
 use crate::select::{self, Pos};
 use crate::search::{self, K, FindPrompt, FindTarget, Finder, GrepPrompt, grep::{self, Results}, output::OutFind};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::agents::{self, Agent, Decision};
 use crate::ui::{self, Action, Ask, Confirm, Hint, MenuItem, Prompt, PromptKind, View, MenuState, hint_labels, menu_items_for, sanitize};
 use crate::cwd::Activity;
@@ -44,12 +44,10 @@ enum Mode {
     Ask(Ask),
     /// The theme picker (arrows preview, Enter saves, Esc reverts).
     ThemePick(ui::themepick::ThemePick),
-    /// A yes/no question before anything is opened or downloaded.
+    /// A yes/no question before anything is opened.
     Confirm(Confirm),
     /// Dictation set-up or settings (see `voice.rs`).
     Voice(voice::Dlg),
-    /// A download is running; Esc cancels it.
-    Fetch,
     /// Every path and link on screen is labelled with a letter.
     Hints(HintState),
     Menu(MenuState),
@@ -237,8 +235,6 @@ struct App {
     shell_count: usize,
     scrollback: usize,
     quiet: Duration,
-    /// tmux session behind each shell tab (by tab id), on remote boxes with tmux.
-    sessions: std::collections::HashMap<usize, String>,
     /// The workspace's own folder (absolute): where the first tab starts.
     root: String,
     /// Where side previews go and how wide they are (changed by dragging the divider).
@@ -276,13 +272,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
 
     let (events_tx, mut events) = mpsc::channel::<Event>(8);
     let (cols, rows) = shell_size(1)?;
-    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)), sessions: Default::default(), side: Side::parse(&cfg.defaults.preview_side), pct: cfg.defaults.preview_width_pct, div_drag: false, pinned: None, pin_side: Side::Right, last_main: 0, history: Vec::new(), hist_dirty: false, root: backend.resolve("").await.unwrap_or_else(|_| "/".into()), };
-    // Reattach to sessions left running on the box; otherwise start one fresh shell.
-    let restored = backend.restored_sessions();
-    let (cols, rows) = if restored.len() > 1 { shell_size(restored.len())? } else { (cols, rows) };
-    for name in &restored {
-        open_tab_in(&mut app, backend, &events_tx, cols, rows, Some(name), None).await?;
-    }
+    let mut app = App { tabs: Vec::new(), active: 0, next_id: 0, shell_count: 0, scrollback: cfg.defaults.scrollback_lines, quiet: Duration::from_secs(cfg.defaults.quiet_secs.max(1)), side: Side::parse(&cfg.defaults.preview_side), pct: cfg.defaults.preview_width_pct, div_drag: false, pinned: None, pin_side: Side::Right, last_main: 0, history: Vec::new(), hist_dirty: false, root: backend.resolve("").await.unwrap_or_else(|_| "/".into()), };
     // A restart (menu "Restart wi", or after an update) left the layout in state.toml: reopen it.
     let mut restore: Option<crate::restart::Snapshot> = None;
     let mut restore_ids: Vec<Option<usize>> = Vec::new();
@@ -311,9 +301,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
         } else if let Some(mut sn) = st.sessions.get(&key).cloned()
             && sn.is_fresh(crate::restart::now_secs())
         {
-            if !ws.is_remote() {
-                sn.prune(crate::restart::local_tab_exists);
-            }
+            sn.prune(crate::restart::local_tab_exists);
             if !sn.tabs.is_empty() {
                 sn.clamp();
                 restore = Some(sn);
@@ -339,11 +327,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                     app.tabs.push(Tab::new_preview(nid, p));
                     id = Some(nid);
                 }
-            } else if restored.is_empty() {
-                // Local shells (and remote ones without tmux) start fresh where they were.
+            } else {
+                // Shells start fresh where they were.
                 let dir = if t.cwd.is_empty() { None } else { Some(t.cwd.as_str()) };
                 let nid = app.next_id;
-                if open_tab_in(&mut app, backend, &events_tx, c, r, None, dir).await.is_ok() {
+                if open_tab_in(&mut app, backend, &events_tx, c, r, dir).await.is_ok() {
                     id = Some(nid);
                     if t.kind == "agent" && let Some(ag) = Agent::from_key(&t.agent) {
                         let key = agents::workspace_key(ws, &t.cwd);
@@ -357,13 +345,6 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                 app.tabs[i].set_custom(Some(&t.name));
             }
             restore_ids.push(id);
-        }
-        // Reattached remote tabs were opened above, before the snapshot was read: names go by order.
-        if !restored.is_empty() {
-            let named = sn.tabs.iter().filter(|t| t.kind != "preview");
-            for (tab, t) in app.tabs.iter_mut().filter(|x| !x.is_preview()).zip(named) {
-                if !t.name.is_empty() { tab.set_custom(Some(&t.name)); }
-            }
         }
         if let Some(Some(id)) = restore_ids.get(sn.active) && let Some(i) = app.tabs.iter().position(|t| t.id == *id) {
             app.active = i;
@@ -408,7 +389,6 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
     let confirm_needed = cfg.defaults.confirm_open != "never";
     let mut sel_reset = false;
     let mut pending: Option<Pending> = None;
-    let mut fetching: Option<Fetching<'_>> = None;
     let mut job: Option<Job<'_>> = None;
     // The explorer's reads, one at a time, and its pane split kept for the session.
     let mut ex_job: Option<ExJob<'_>> = None;
@@ -438,10 +418,6 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
         message = Some(format!("reopened {} tab{} from last session (config: restore_tabs = false to turn off)", app.tabs.len(), if app.tabs.len() == 1 { "" } else { "s" }));
     } else if restore.is_some() {
         message = Some(format!("wi restarted: {} tab(s) back", app.tabs.len()));
-    } else if ws.is_remote() && !backend.has_tmux() {
-        message = Some("no tmux on this box (or use_tmux = false): plain shells, quitting ends them".into());
-    } else if !restored.is_empty() {
-        message = Some(format!("reattached {} running session(s)", restored.len()));
     }
     if let Some(note) = crate::theme::unknown_theme_note(&cfg.defaults.theme, agent_state.theme.as_deref()) {
         message = Some(note);
@@ -450,16 +426,14 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
     // Header detail: the active tab's folder and its git branch. The branch of a folder is asked
     // once (and again when the Git view opens or reloads); no timers.
     let mut detail = base_detail.clone();
-    let remote = ws.is_remote();
     ui::set_theme_mode(theme_mode);
-    let mut items = menu_items_for(remote, backend.has_tmux());
-    ui::set_tmux_menu(backend.has_tmux());
+    let mut items = menu_items_for();
     let opts = Opts { csv_rows: cfg.defaults.csv_rows };
     let read_cap = cfg.defaults.preview_read_kb as usize * 1024;
     // Auto-refresh of visible file previews: poll state (see refresh.rs).
     let refresh_on = cfg.defaults.preview_autorefresh;
     let refresh_debounce = Duration::from_millis(cfg.defaults.preview_refresh_debounce_ms);
-    let refresh_poll = crate::refresh::poll_interval(remote);
+    let refresh_poll = crate::refresh::poll_interval();
     let mut watches: std::collections::HashMap<String, crate::refresh::Watch> = Default::default();
     let mut rjob: Option<RJob<'_>> = None;
     let mut next_poll = Instant::now();
@@ -510,7 +484,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
             "agent" => app.tabs.iter().find(|t| t.agent.as_deref() == Some(l.target.as_str())).map(|t| t.id),
             "shell" if !l.target.is_empty() => {
                 let (c, r) = shell_size(app.tabs.len() + 1)?;
-                match open_tab_in(&mut app, backend, &events_tx, c, r, None, Some(&l.target)).await {
+                match open_tab_in(&mut app, backend, &events_tx, c, r, Some(&l.target)).await {
                     Ok(()) => app.tabs.last().map(|t| t.id),
                     Err(_) => None,
                 }
@@ -547,7 +521,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
         }
         // An update answer that arrived while another screen was open waits for the shell.
         if matches!(mode, Mode::Shell) && let Some(ev) = upd_held.take() {
-            on_update_event(ev, &mut mode, &mut pending, &mut message, &mut app, &mut updating, &opts, remote, backend.has_tmux());
+            on_update_event(ev, &mut mode, &mut pending, &mut message, &mut app, &mut updating, &opts);
             dirty = true;
         }
         // Dictation: switch off after the idle time, and paste waiting phrases when the focused
@@ -675,7 +649,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         b
                     }
                 };
-                detail = folder_detail(ws, &base_detail, &dir, branch.as_deref());
+                detail = folder_detail(ws, &dir, branch.as_deref());
                 detail_key = Some((fid, dir));
                 dirty = true;
             }
@@ -945,7 +919,6 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                     _ => (None, None),
                 };
                 let selection = sel.as_ref().filter(|s| s.tab == app.tabs[app.active].id).map(|s| (s.pane, select::normalize(s.anchor, s.end)));
-                let progress_dlg = fetching.as_ref().map(|f| f.dialog());
                 if let Ok(mr) = main_rect(&app) {
                     match &mut mode {
                         Mode::Results(r) => r.list.reveal(ui::search::results_list_rect(mr).height as usize),
@@ -978,7 +951,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                     Mode::FindPrompt(p) => Some(ui::search::SearchView::Find(p)),
                     _ => None,
                 };
-                let confirm_ref = match &mode { Mode::Confirm(c) => Some(c), Mode::Fetch => progress_dlg.as_ref(), _ => None };
+                let confirm_ref = match &mode { Mode::Confirm(c) => Some(c), _ => None };
                 let hints_ref = match &mode { Mode::Hints(h) => Some((&h.hints[..], h.typed.as_str())), _ => None };
                 let term_w = crossterm::terminal::size().map(|s| s.0).unwrap_or(80);
                 let mic_btn = dictate::button(dict.as_ref(), term_w, tcfg.enabled);
@@ -1001,7 +974,6 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                     screen: app.tabs[app.active].parser.screen(),
                     name: &name,
                     detail: &detail,
-                    remote,
                     menu_label: &menu_label,
                     tabs: &strip,
                     message: message.as_deref(),
@@ -1055,7 +1027,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                     }
                     Some(r) => {
                         let n = r?;
-                        if n == 0 { save_session(&app, backend, ws, restore_on, true).await; return finish(&app, backend).await; }
+                        if n == 0 { save_session(&app, backend, ws, restore_on, true).await; return finish(&app).await; }
                         let now = Instant::now();
                         if now.duration_since(last_input) > IDLE_REPAINT {
                             repaint = true;
@@ -1180,11 +1152,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                 Intent::OpenLink(l, pane) => {
                                     sel = None;
                                     if matches!(mode, Mode::Scroll) { mode = Mode::Shell; }
-                                    let o = resolve_link(&app, backend, ws, &l, pane, &open_cfg, confirm_needed).await;
+                                    let o = resolve_link(&app, backend, &l, pane, &open_cfg, confirm_needed).await;
                                     if let LinkOutcome::Explorer(dir) = o {
-                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, &opts, read_cap, &open_cfg, ex_pct)?);
                                     } else {
-                                        apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                        apply_outcome(o, &mut app, backend, &mut mode, &mut pending, &mut message, read_cap, &opts).await;
                                     }
                                     dirty = true;
                                 }
@@ -1421,7 +1393,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                         let id = app.tabs[app.active].id;
                                         if remove_tab(&mut app, id)? {
                     save_session(&app, backend, ws, restore_on, false).await;
-                    return finish(&app, backend).await;
+                    return finish(&app).await;
                 }
                                     }
                                 }
@@ -1719,12 +1691,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                 Some(ExAct::OpenFile(abs)) => {
                                     // Resolved exactly like a clicked path: text opens in the preview,
                                     // complex files and downloads ask first, programs are refused.
-                                    let o = resolve_link(&app, backend, ws, &explorer::path_link(&abs), Pane::Shell, &open_cfg, confirm_needed).await;
+                                    let o = resolve_link(&app, backend, &explorer::path_link(&abs), Pane::Shell, &open_cfg, confirm_needed).await;
                                     if let LinkOutcome::Message(m) = &o {
                                         ex.message = Some((sanitize(m), true));
                                     } else {
                                         stash_explorer(&mut saved_ex, &mut mode);
-                                        apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                        apply_outcome(o, &mut app, backend, &mut mode, &mut pending, &mut message, read_cap, &opts).await;
                                     }
                                 }
                                 Some(act @ (ExAct::Editor { .. } | ExAct::NewTab(_))) => {
@@ -1735,7 +1707,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     };
                                     let (c, r) = shell_size(app.tabs.len() + 1)?;
                                     let had_strip = app.tabs.len() > 1;
-                                    match open_tab_in(&mut app, backend, &events_tx, c, r, None, Some(&dir)).await {
+                                    match open_tab_in(&mut app, backend, &events_tx, c, r, Some(&dir)).await {
                                         Ok(()) => {
                                             app.active = app.tabs.len() - 1;
                                             if let Some(f) = file {
@@ -1787,7 +1759,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                 theme_mode = m;
                                 crate::theme::set_theme(m.theme());
                                 ui::set_theme_mode(m);
-                                items = menu_items_for(remote, backend.has_tmux());
+                                items = menu_items_for();
                                 mode = Mode::Shell;
                                 if m != orig {
                                     agent_state.theme = m.saved();
@@ -1942,7 +1914,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                         if keys_on { crate::term::enable_key_protocol(); }
                                         repaint = true;
                                     }
-                                    Some(p) => run_pending(p, backend, ws, &mut mode, &mut fetching, &mut message),
+                                    Some(p) => run_pending(p, &mut message),
                                     None => {}
                                 }
                             } else if no {
@@ -1954,13 +1926,6 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     _ => "cancelled".to_string(),
                                 });
                                 pending = None;
-                            }
-                            dirty = true;
-                            chunk = &[];
-                        }
-                        Mode::Fetch => {
-                            if (chunk == [0x1b] || chunk.contains(&menu_key)) && let Some(f) = &fetching {
-                                f.cancel.store(true, Ordering::Relaxed);
                             }
                             dirty = true;
                             chunk = &[];
@@ -2000,11 +1965,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                 mode = Mode::Shell;
                             } else if let Some((l, pane)) = chosen {
                                 mode = Mode::Shell;
-                                let o = resolve_link(&app, backend, ws, &l, pane, &open_cfg, confirm_needed).await;
+                                let o = resolve_link(&app, backend, &l, pane, &open_cfg, confirm_needed).await;
                                 if let LinkOutcome::Explorer(dir) = o {
-                                    mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                    mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, &opts, read_cap, &open_cfg, ex_pct)?);
                                 } else {
-                                    apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                    apply_outcome(o, &mut app, backend, &mut mode, &mut pending, &mut message, read_cap, &opts).await;
                                 }
                             }
                             dirty = true;
@@ -2021,11 +1986,11 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                 if let crate::pick::PickOutcome::Choose(abs) = o {
                                     let mut l = explorer::path_link(&abs);
                                     if let links::LinkKind::Path { line: ln, .. } = &mut l.kind { *ln = line; }
-                                    let o = resolve_link(&app, backend, ws, &l, Pane::Shell, &open_cfg, confirm_needed).await;
+                                    let o = resolve_link(&app, backend, &l, Pane::Shell, &open_cfg, confirm_needed).await;
                                     if let LinkOutcome::Explorer(dir) = o {
-                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, &opts, read_cap, &open_cfg, ex_pct)?);
                                     } else {
-                                        apply_outcome(o, &mut app, backend, ws, &mut mode, &mut pending, &mut message, &mut fetching, read_cap, &opts).await;
+                                        apply_outcome(o, &mut app, backend, &mut mode, &mut pending, &mut message, read_cap, &opts).await;
                                     }
                                 }
                             }
@@ -2259,21 +2224,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                 match a {
                                     Action::Quit => {
                                         save_session(&app, backend, ws, restore_on, true).await;
-                                        return finish(&app, backend).await;
-                                    }
-                                    Action::EndAndQuit => {
-                                        backend.end_all_sessions().await;
-                                        save_session(&app, backend, ws, restore_on, false).await;
-                                        return finish(&app, backend).await;
+                                        return finish(&app).await;
                                     }
                                     Action::Info => {
                                         let keys = if decoder.enhanced { "keys: enhanced keyboard active · New line: Shift+Enter or Alt+Enter" } else { "keys: standard · New line: Alt+Enter (Shift+Enter looks like Enter in this terminal)" };
                                         let tab = app.tabs[app.active].custom.as_ref().map(|n| format!("tab: {n} · ")).unwrap_or_default();
-                                        message = Some(if remote {
-                                            format!("{tab}{keys} · {name} · {detail} · connected · {} tab(s)", app.tabs.len())
-                                        } else {
-                                            format!("{tab}{keys} · local workspace · {detail} · {} tab(s)", app.tabs.len())
-                                        });
+                                        message = Some(format!("{tab}{keys} · local workspace · {detail} · {} tab(s)", app.tabs.len()));
                                     }
                                     Action::OpenLink => {
                                         let main = main_rect(&app)?;
@@ -2340,7 +2296,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                         message = Some("Dictation is macOS only for now".into());
                                     }
                                     Action::Restart => {
-                                        mode = restart_dialog(&app, remote, backend.has_tmux(), None);
+                                        mode = restart_dialog(&app, None);
                                         pending = Some(Pending::Restart { updated: None });
                                     }
                                     Action::Update => {
@@ -2350,7 +2306,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                             let mut lines = vec![
                                                 "This contacts github.com to check the latest release of".to_string(),
                                                 format!("{} and nothing else. Nothing is sent until you confirm.", crate::update::REPO),
-                                                "It updates this computer's wi (and the voice helper, if you installed it), never a remote box. Your tabs stay open.".to_string(),
+                                                "It updates this computer's wi (and the voice helper, if you installed it). Your tabs stay open.".to_string(),
                                             ];
                                             if let Some(u) = crate::update::override_url() { lines.push(format!("(test source: {u})")); }
                                             mode = Mode::Confirm(Confirm { title: "Update wi: check for a new version?".into(), lines, yes: "Check".into() });
@@ -2423,7 +2379,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     },
                                     Action::Explorer => {
                                         let dir = active_dir(&app);
-                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, remote.then(|| name.clone()), &opts, read_cap, &open_cfg, ex_pct)?);
+                                        mode = Mode::Explorer(explorer_for(dir, &mut saved_ex, &opts, read_cap, &open_cfg, ex_pct)?);
                                     }
                                     Action::FindOutput if app.tabs[app.active].is_preview() => message = Some("find in output works on a shell tab; press F inside a preview to find in it".into()),
                                     Action::FindOutput => mode = Mode::FindPrompt(FindPrompt { target: FindTarget::Output, text: String::new() }),
@@ -2442,7 +2398,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                         let (c, r) = shell_size(app.tabs.len() + 1)?;
                                         let had_strip = app.tabs.len() > 1;
                                         let here = active_dir(&app);
-                                        match open_tab_in(&mut app, backend, &events_tx, c, r, None, Some(&here)).await {
+                                        match open_tab_in(&mut app, backend, &events_tx, c, r, Some(&here)).await {
                                             Ok(()) => {
                                                 app.active = app.tabs.len() - 1;
                                                 if !had_strip { resize_all(&mut app)?; }
@@ -2459,7 +2415,7 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                         if t.is_preview() {
                                             message = Some("change folder works on a shell tab; switch to one first".into());
                                         } else {
-                                            let idle = crate::cwd::tab_idle(backend, t.handle.as_ref(), app.sessions.get(&t.id).map(String::as_str)).await;
+                                            let idle = crate::cwd::tab_idle(backend, t.handle.as_ref()).await;
                                             match idle {
                                                 Activity::Ready => mode = Mode::Prompt(Prompt::folder(PromptKind::ChangeFolder, &t.dir, agent_state.recents(&rkey))),
                                                 other => message = Some(busy_message(&other, &menu_label)),
@@ -2470,14 +2426,12 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                                     Action::PrevTab => { let n = (app.active + app.tabs.len() - 1) % app.tabs.len(); switch_to(&mut app, n); }
                                     Action::CloseTab => {
                                         let id = app.tabs[app.active].id;
-                                        if let Some(name) = app.sessions.get(&id) { backend.end_session(name).await; }
                                         app.tabs[app.active].close();
                                         if remove_tab(&mut app, id)? {
                     save_session(&app, backend, ws, restore_on, false).await;
-                    return finish(&app, backend).await;
+                    return finish(&app).await;
                 }
                                     }
-                                    other => message = Some(format!("{other:?} arrives in a later milestone")),
                                 }
                             } else if close {
                                 mode = Mode::Shell;
@@ -2488,29 +2442,6 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                     }
                 }
                 }
-            }
-            res = async {
-                match fetching.as_mut() {
-                    Some(f) => f.fut.as_mut().await,
-                    None => std::future::pending().await,
-                }
-            }, if fetching.is_some() => {
-                fetching = None;
-                if matches!(mode, Mode::Fetch) { mode = Mode::Shell; }
-                message = Some(match res {
-                    Ok(FetchResult::Ready(p)) => {
-                        opener::mark_quarantine(&p);
-                        let name = p.file_name().map(|n| sanitize(&n.to_string_lossy())).unwrap_or_default();
-                        match native_open_hooked(&p) {
-                            Ok(()) => format!("opened {name}"),
-                            Err(e) => e,
-                        }
-                    }
-                    Ok(FetchResult::NeedsConfirm { size }) => format!("file is {}; open it again to confirm", crate::preview::human(size)),
-                    Err(e) if e == "cancelled" => "download cancelled".to_string(),
-                    Err(e) => format!("download failed: {e}"),
-                });
-                dirty = true;
             }
             done = async {
                 match ex_job.as_mut() {
@@ -2541,10 +2472,9 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                 }
                 dirty = true;
             }
-            _ = tokio::time::sleep(Duration::from_millis(250)), if fetching.is_some() => { dirty = true; }
             Some(ev) = upd_rx.recv() => {
                 if matches!(ev, UpdEv::Status(_)) || matches!(mode, Mode::Shell) {
-                    on_update_event(ev, &mut mode, &mut pending, &mut message, &mut app, &mut updating, &opts, remote, backend.has_tmux());
+                    on_update_event(ev, &mut mode, &mut pending, &mut message, &mut app, &mut updating, &opts);
                 } else {
                     upd_held = Some(ev);
                 }
@@ -2552,15 +2482,15 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
             }
             _ = sigterm.recv() => {
                 save_session(&app, backend, ws, restore_on, true).await;
-                return finish(&app, backend).await;
+                return finish(&app).await;
             }
             _ = sighup.recv() => {
                 save_session(&app, backend, ws, restore_on, true).await;
-                return finish(&app, backend).await;
+                return finish(&app).await;
             }
             _ = sigint.recv() => {
                 save_session(&app, backend, ws, restore_on, true).await;
-                return finish(&app, backend).await;
+                return finish(&app).await;
             }
             _ = winch.recv() => {
                 resize_all(&mut app)?;
@@ -2586,40 +2516,29 @@ pub async fn run(ws: &Workspace, backend: &Backend, cfg: &Config, fresh: bool) -
                         dirty = true;
                     }
                 }
-                Some(Event::Exited(_)) if backend.is_lost() => {
-                    message = Some("connection lost - open the menu and quit".into());
-                    dirty = true;
-                }
                 Some(Event::Exited(id)) => {
                     if app.tabs.get(app.active).is_some_and(|t| t.id == id) && matches!(mode, Mode::Scroll | Mode::OutFind(_)) { mode = Mode::Shell; }
                     if remove_tab(&mut app, id)? {
                     save_session(&app, backend, ws, restore_on, false).await;
-                    return finish(&app, backend).await;
+                    return finish(&app).await;
                 }
                     dirty = true;
                 }
-                None => return finish(&app, backend).await,
+                None => return finish(&app).await,
             }
         }
     }
 }
 
 async fn open_tab(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, cols: u16, rows: u16) -> Result<()> {
-    open_tab_in(app, backend, tx, cols, rows, None, None).await
+    open_tab_in(app, backend, tx, cols, rows, None).await
 }
 
-/// Open a shell tab; `attach` names an existing tmux session to reattach, `dir` is the folder a
-/// new shell starts in (the workspace folder when None).
-async fn open_tab_in(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, cols: u16, rows: u16, attach: Option<&str>, dir: Option<&str>) -> Result<()> {
-    let (shell, session) = backend.open_session_shell(cols, rows, attach, dir).await?;
+/// Open a shell tab; `dir` is the folder the shell starts in (the workspace folder when None).
+async fn open_tab_in(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, cols: u16, rows: u16, dir: Option<&str>) -> Result<()> {
+    let shell = backend.open_shell(cols, rows, dir)?;
     let id = app.next_id;
-    // A reattached session keeps whatever folder it is in now.
-    let tab_dir = match (dir, attach) {
-        (Some(d), _) => d.to_string(),
-        (None, Some(name)) => crate::cwd::tab_cwd(backend, None, None, Some(name)).await.unwrap_or_else(|| app.root.clone()),
-        (None, None) => app.root.clone(),
-    };
-    if let Some(s) = session { app.sessions.insert(id, s); }
+    let tab_dir = dir.map(str::to_string).unwrap_or_else(|| app.root.clone());
     app.next_id += 1;
     app.shell_count += 1;
     let handle = spawn_shell(id, shell, tx.clone());
@@ -2661,8 +2580,8 @@ fn active_dir(app: &App) -> String {
     folder_tab(app).map(|i| app.tabs[i].dir.clone()).unwrap_or_else(|| app.root.clone())
 }
 
-/// Header text: where the active tab is (and for a remote box, which box), plus the branch.
-fn folder_detail(ws: &Workspace, base: &str, dir: &str, branch: Option<&str>) -> String {
+/// Header text: where the active tab is, plus the branch.
+fn folder_detail(ws: &Workspace, dir: &str, branch: Option<&str>) -> String {
     let shown = match ws {
         Workspace::Local(_) => {
             let home = dirs::home_dir().unwrap_or_default().to_string_lossy().into_owned();
@@ -2671,7 +2590,6 @@ fn folder_detail(ws: &Workspace, base: &str, dir: &str, branch: Option<&str>) ->
                 _ => dir.to_string(),
             }
         }
-        Workspace::Remote(_) => format!("{base}  {dir}"),
     };
     match branch {
         Some(b) => header_detail(&shown, b),
@@ -2711,7 +2629,7 @@ async fn commit_folder(
                 return Err("change folder works on a shell tab".into());
             }
             // Re-check: a program may have started since the prompt opened.
-            match crate::cwd::tab_idle(backend, t.handle.as_ref(), app.sessions.get(&t.id).map(String::as_str)).await {
+            match crate::cwd::tab_idle(backend, t.handle.as_ref()).await {
                 Activity::Ready => {}
                 other => return Err(busy_message(&other, "menu")),
             }
@@ -2724,7 +2642,7 @@ async fn commit_folder(
         }
         _ => {
             let (c, r) = shell_size(app.tabs.len() + 1).map_err(|e| e.to_string())?;
-            open_tab_in(app, backend, tx, c, r, None, Some(&dir)).await.map_err(|e| format!("could not open shell: {e}"))?;
+            open_tab_in(app, backend, tx, c, r, Some(&dir)).await.map_err(|e| format!("could not open shell: {e}"))?;
             let last = app.tabs.len() - 1;
             app.active = last;
             resize_all(app).map_err(|e| e.to_string())?;
@@ -2750,14 +2668,14 @@ async fn commit_folder(
 }
 
 /// The explorer for `dir`: the kept one from an earlier visit (refreshed), or a new one.
-fn explorer_for(dir: String, saved: &mut HashMap<String, Box<ExplorerState>>, remote: Option<String>, opts: &Opts, read_cap: usize, open_cfg: &OpenCfg, pct: u16) -> Result<Box<ExplorerState>> {
+fn explorer_for(dir: String, saved: &mut HashMap<String, Box<ExplorerState>>, opts: &Opts, read_cap: usize, open_cfg: &OpenCfg, pct: u16) -> Result<Box<ExplorerState>> {
     let (ec, er) = crossterm::terminal::size()?;
     let mut ex = match saved.remove(&dir) {
         Some(mut e) => {
             e.refresh();
             e
         }
-        None => Box::new(ExplorerState::new(dir, remote, explorer::Settings { csv_rows: opts.csv_rows, read_cap, open_cfg: open_cfg.clone(), pct })),
+        None => Box::new(ExplorerState::new(dir, explorer::Settings { csv_rows: opts.csv_rows, read_cap, open_cfg: open_cfg.clone(), pct })),
     };
     ex.prepare(ec, er);
     Ok(ex)
@@ -2834,7 +2752,7 @@ async fn pin_tab(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, id:
     let Some(pi) = app.tabs.iter().position(|t| t.id == id) else { return Err("that tab is gone".into()) };
     if app.pinned != Some(id) && !app.tabs.iter().any(|t| t.id != id) {
         let dir = if app.tabs[pi].dir.is_empty() { None } else { Some(app.tabs[pi].dir.clone()) };
-        open_tab_in(app, backend, tx, c, r, None, dir.as_deref()).await.map_err(|e| format!("could not open shell: {e}"))?;
+        open_tab_in(app, backend, tx, c, r, dir.as_deref()).await.map_err(|e| format!("could not open shell: {e}"))?;
     }
     for t in &mut app.tabs {
         t.side = None;
@@ -2962,7 +2880,7 @@ fn remove_tab(app: &mut App, id: usize) -> Result<bool> {
 }
 
 /// At a normal quit: remember the tabs for this workspace (`keep`), or forget them (the last tab
-/// was closed, or the sessions were ended). Only this workspace's entry changes; entries older
+/// was closed). Only this workspace's entry changes; entries older
 /// than 30 days go. A lone plain shell saves nothing.
 async fn save_session(app: &App, backend: &Backend, ws: &Workspace, enabled: bool, keep: bool) {
     if !enabled {
@@ -2980,11 +2898,10 @@ async fn save_session(app: &App, backend: &Backend, ws: &Workspace, enabled: boo
     let _ = st.save();
 }
 
-async fn finish(app: &App, backend: &Backend) -> Result<()> {
+async fn finish(app: &App) -> Result<()> {
     for t in &app.tabs {
         t.close();
     }
-    backend.close().await;
     // Give the shell tasks a moment to kill their children before we exit.
     tokio::time::sleep(Duration::from_millis(150)).await;
     Ok(())
@@ -3250,8 +3167,6 @@ fn go_back(app: &mut App) {
 enum Pending {
     Url(String),
     OpenLocal(std::path::PathBuf),
-    /// Download from the box into the cache, then open.
-    Fetch { remote: String },
     /// Update wi: contact GitHub to look for a newer release.
     UpdateCheck,
     /// Update wi: download, verify and install this release.
@@ -3279,13 +3194,13 @@ fn start_dictation(prefix: &[String], tcfg: &crate::config::Transcribe, gen_id: 
     }
 }
 
-fn restart_dialog(app: &App, remote: bool, tmux: bool, updated: Option<&str>) -> Mode {
+fn restart_dialog(app: &App, updated: Option<&str>) -> Mode {
     Mode::Confirm(Confirm {
         title: match updated {
             Some(v) => format!("Updated to {v}. Restart wi now?"),
             None => "Restart wi now?".into(),
         },
-        lines: vec![crate::restart::summary(app.tabs.len(), remote, tmux), "No: keep running; restart wi when convenient.".into()],
+        lines: vec![crate::restart::summary(app.tabs.len()), "No: keep running; restart wi when convenient.".into()],
         yes: "Restart".into(),
     })
 }
@@ -3293,7 +3208,7 @@ fn restart_dialog(app: &App, remote: bool, tmux: bool, updated: Option<&str>) ->
 /// The session as it is now, for the restarted wi.
 async fn build_snapshot(app: &App, backend: &Backend, ws: &Workspace) -> crate::restart::Snapshot {
     use crate::restart::{SnapTab, Snapshot};
-    let where_ = if ws.is_remote() { "remote" } else { "local" };
+    let where_ = "local";
     let mut tabs = Vec::new();
     for t in &app.tabs {
         if let Some(p) = &t.preview {
@@ -3304,7 +3219,7 @@ async fn build_snapshot(app: &App, backend: &Backend, ws: &Workspace) -> crate::
             }
             continue;
         }
-        let cwd = crate::cwd::tab_cwd(backend, t.compat.cwd.as_deref(), t.handle.as_ref().and_then(|h| h.pid()), app.sessions.get(&t.id).map(String::as_str)).await.unwrap_or_else(|| t.dir.clone());
+        let cwd = crate::cwd::tab_cwd(backend, t.compat.cwd.as_deref(), t.handle.as_ref().and_then(|h| h.pid())).await.unwrap_or_else(|| t.dir.clone());
         tabs.push(SnapTab {
             kind: if t.agent.is_some() { "agent" } else { "shell" }.into(),
             backend: where_.into(),
@@ -3353,7 +3268,7 @@ async fn do_restart(app: &App, backend: &Backend, ws: &Workspace, state: &mut ag
 
 /// Act on a worker's report: ask the second question, or tell the result.
 #[allow(clippy::too_many_arguments)]
-fn on_update_event(ev: UpdEv, mode: &mut Mode, pending: &mut Option<Pending>, message: &mut Option<String>, app: &mut App, updating: &mut bool, opts: &Opts, remote: bool, tmux: bool) {
+fn on_update_event(ev: UpdEv, mode: &mut Mode, pending: &mut Option<Pending>, message: &mut Option<String>, app: &mut App, updating: &mut bool, opts: &Opts) {
     use crate::update::{Checked, Installed};
     match ev {
         UpdEv::Status(s) => *message = Some(s),
@@ -3382,7 +3297,7 @@ fn on_update_event(ev: UpdEv, mode: &mut Mode, pending: &mut Option<Pending>, me
         UpdEv::Installed(Ok(Installed::Done(v))) => {
             *updating = false;
             *message = Some(format!("Updated to {v} — restart wi to use it"));
-            *mode = restart_dialog(app, remote, tmux, Some(&v));
+            *mode = restart_dialog(app, Some(&v));
             *pending = Some(Pending::Restart { updated: Some(v) });
         }
         UpdEv::Installed(Ok(Installed::NeedsSudo { tmp, target, version })) => {
@@ -3408,33 +3323,6 @@ struct HintState {
     links: Vec<(Link, Pane)>,
     hints: Vec<Hint>,
     typed: String,
-}
-
-/// A running download. The future is polled by the main loop so the screen stays responsive.
-struct Fetching<'a> {
-    name: String,
-    done: Arc<AtomicU64>,
-    total: Arc<AtomicU64>,
-    cancel: Arc<AtomicBool>,
-    fut: Pin<Box<dyn Future<Output = Result<FetchResult, String>> + 'a>>,
-}
-
-impl Fetching<'_> {
-    fn dialog(&self) -> Confirm {
-        let (d, t) = (self.done.load(Ordering::Relaxed), self.total.load(Ordering::Relaxed));
-        let pct = (d * 100).checked_div(t).unwrap_or(0);
-        let filled = (pct as usize * 30) / 100;
-        Confirm {
-            title: "Downloading from the box".into(),
-            lines: vec![
-                self.name.clone(),
-                String::new(),
-                format!("{} of {}  ({pct}%)", crate::preview::human(d), crate::preview::human(t)),
-                format!("[{}{}]", "#".repeat(filled), "-".repeat(30 - filled)),
-            ],
-            yes: String::new(),
-        }
-    }
 }
 
 /// The result of looking at a clicked or labelled link.
@@ -3543,7 +3431,7 @@ fn mouse_intent(m: &MouseEvent, mode: &Mode, app: &App, items: &[&MenuItem], mai
                 _ => Intent::None,
             }
         }
-        Mode::Rename(_) | Mode::Pick(_) | Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Voice(_) | Mode::Fetch | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
+        Mode::Rename(_) | Mode::Pick(_) | Mode::Ask(_) | Mode::ThemePick(_) | Mode::Confirm(_) | Mode::Voice(_) | Mode::Hints(_) | Mode::FindPrompt(_) | Mode::Working(_) | Mode::Explorer(_) => Intent::None,
         Mode::GrepPrompt(p) => match m.kind {
             Kind::Down(mouse::Button::Left) => ui::search::grep_chip_at(main, p, m.col, m.row).map_or(Intent::None, |k| Intent::Synth(k.to_vec())),
             _ => Intent::None,
@@ -3694,7 +3582,7 @@ fn area_rows(app: &App, area: Rect, pane: Pane) -> (Vec<Vec<String>>, Vec<bool>)
 /// stays a normal shell, so when the agent exits you are left at a prompt.
 async fn start_agent(app: &mut App, backend: &Backend, tx: &mpsc::Sender<Event>, agent: Agent, command: &str, dir: &str) -> Result<()> {
     let (c, r) = shell_size(app.tabs.len() + 1)?;
-    open_tab_in(app, backend, tx, c, r, None, Some(dir)).await?;
+    open_tab_in(app, backend, tx, c, r, Some(dir)).await?;
     let last = app.tabs.len() - 1;
     run_agent_in(app, last, agent, command);
     app.active = last;
@@ -3753,7 +3641,7 @@ async fn link_cwd(app: &App, backend: &Backend, pane: Pane) -> Option<String> {
         _ => None,
     };
     let pid = fg.or_else(|| tab.handle.as_ref().and_then(|h| h.pid()));
-    crate::cwd::tab_cwd(backend, tab.compat.cwd.as_deref(), pid, app.sessions.get(&tab.id).map(String::as_str)).await
+    crate::cwd::tab_cwd(backend, tab.compat.cwd.as_deref(), pid).await
 }
 
 /// The first candidate that reads as a file (with its head and size), and the first that is a folder.
@@ -3773,7 +3661,7 @@ async fn probe_candidates(backend: &Backend, cands: &[String]) -> (Option<(Strin
 }
 
 /// Work out what a link means and what to ask the user, without doing anything yet.
-async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link, pane: Pane, open_cfg: &OpenCfg, confirm: bool) -> LinkOutcome {
+async fn resolve_link(app: &App, backend: &Backend, link: &Link, pane: Pane, open_cfg: &OpenCfg, confirm: bool) -> LinkOutcome {
     match &link.kind {
         LinkKind::Url(u) => {
             let lower = u.to_ascii_lowercase();
@@ -3794,10 +3682,9 @@ async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link,
             )
         }
         LinkKind::Path { path, line, .. } => {
-            let remote = matches!(backend, Backend::Remote(_));
             let cwd = link_cwd(app, backend, pane).await;
             let root = backend.resolve("").await.unwrap_or_default();
-            let home = if remote { root.clone() } else { dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default() };
+            let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
             let tab_dir = pane_tab(app, pane).dir.clone();
             // Bases, in order: the shell's own folder (OSC 7 or the OS), the workspace root, the
             // folder the tab was started in.
@@ -3835,40 +3722,16 @@ async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link,
                     if let Err(e) = opener::native_safe(&abs) {
                         return LinkOutcome::Message(sanitize(&e));
                     }
-                    let (p, dialog) = if remote {
-                        let from = match ws {
-                            Workspace::Remote(b) => b.name.clone(),
-                            Workspace::Local(_) => String::new(),
-                        };
-                        (
-                            Pending::Fetch { remote: abs.clone() },
-                            Confirm {
-                                title: "Download and open".into(),
-                                lines: vec![
-                                    format!("File: {abs}"),
-                                    format!("Size: {}", crate::preview::human(size)),
-                                    format!("From: {from}"),
-                                    String::new(),
-                                    "It is copied to your computer's cache, then opened by the".into(),
-                                    "operating system's default app for this type.".into(),
-                                ],
-                                yes: "Download and open".into(),
-                            },
-                        )
-                    } else {
-                        (
-                            Pending::OpenLocal(std::path::PathBuf::from(&abs)),
-                            Confirm {
-                                title: "Open in the default app".into(),
-                                lines: vec![
-                                    format!("File: {abs}"),
-                                    format!("Size: {}", crate::preview::human(size)),
-                                    String::new(),
-                                    "Opened by the operating system's default app for this type.".into(),
-                                ],
-                                yes: "Open".into(),
-                            },
-                        )
+                    let p = Pending::OpenLocal(std::path::PathBuf::from(&abs));
+                    let dialog = Confirm {
+                        title: "Open in the default app".into(),
+                        lines: vec![
+                            format!("File: {abs}"),
+                            format!("Size: {}", crate::preview::human(size)),
+                            String::new(),
+                            "Opened by the operating system's default app for this type.".into(),
+                        ],
+                        yes: "Open".into(),
                     };
                     if confirm { LinkOutcome::Confirm(dialog, p) } else { LinkOutcome::Now(p) }
                 }
@@ -3878,15 +3741,13 @@ async fn resolve_link(app: &App, backend: &Backend, ws: &Workspace, link: &Link,
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn apply_outcome<'a>(
+async fn apply_outcome(
     o: LinkOutcome,
     app: &mut App,
-    backend: &'a Backend,
-    ws: &Workspace,
+    backend: &Backend,
     mode: &mut Mode,
     pending: &mut Option<Pending>,
     message: &mut Option<String>,
-    fetching: &mut Option<Fetching<'a>>,
     read_cap: usize,
     opts: &Opts,
 ) {
@@ -3905,12 +3766,12 @@ async fn apply_outcome<'a>(
             *mode = Mode::Confirm(c);
             *pending = Some(p);
         }
-        LinkOutcome::Now(p) => run_pending(p, backend, ws, mode, fetching, message),
+        LinkOutcome::Now(p) => run_pending(p, message),
     }
 }
 
 /// Do what the user just agreed to.
-fn run_pending<'a>(p: Pending, backend: &'a Backend, ws: &Workspace, mode: &mut Mode, fetching: &mut Option<Fetching<'a>>, message: &mut Option<String>) {
+fn run_pending(p: Pending, message: &mut Option<String>) {
     match p {
         Pending::Url(u) => {
             *message = Some(match open_url_hooked(&u) {
@@ -3926,31 +3787,7 @@ fn run_pending<'a>(p: Pending, backend: &'a Backend, ws: &Workspace, mode: &mut 
             });
         }
         Pending::UpdateCheck | Pending::UpdateApply(_) | Pending::Restart { .. } => {} // started by the Confirm handler
-        Pending::Fetch { remote } => {
-            let box_name = match ws {
-                Workspace::Remote(b) => b.name.clone(),
-                Workspace::Local(_) => String::new(),
-            };
-            *fetching = Some(start_fetch(backend, remote, box_name));
-            *mode = Mode::Fetch;
-        }
     }
-}
-
-fn start_fetch(backend: &Backend, remote: String, box_name: String) -> Fetching<'_> {
-    let (done, total, cancel) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)));
-    let (d, t, c) = (done.clone(), total.clone(), cancel.clone());
-    let name = sanitize(remote.rsplit('/').next().unwrap_or(&remote));
-    let mut opts = FetchOpts::new(&box_name);
-    opts.confirmed = true; // the user already agreed in the dialog, which showed the size
-    let fut = Box::pin(async move {
-        let mut progress = |dn: u64, tt: u64| {
-            d.store(dn, Ordering::Relaxed);
-            t.store(tt, Ordering::Relaxed);
-        };
-        backend.fetch_to_cache(&remote, &opts, &mut progress, &c).await
-    });
-    Fetching { name, done, total, cancel, fut }
 }
 
 fn append_log(log: &str, line: String) -> Result<(), String> {
@@ -3980,7 +3817,7 @@ mod pin_tests {
 
     fn app(n: usize) -> App {
         let tabs = (0..n).map(|i| Tab::new(i, format!("shell {i}"), crate::workspace::ShellHandle::dummy(), 80, 24, 10)).collect();
-        App { tabs, active: 0, next_id: n, shell_count: n, scrollback: 10, quiet: Duration::from_secs(5), sessions: Default::default(), root: "/".into(), side: Side::Right, pct: 50, div_drag: false, pinned: None, pin_side: Side::Right, last_main: 0, history: Vec::new(), hist_dirty: false }
+        App { tabs, active: 0, next_id: n, shell_count: n, scrollback: 10, quiet: Duration::from_secs(5), root: "/".into(), side: Side::Right, pct: 50, div_drag: false, pinned: None, pin_side: Side::Right, last_main: 0, history: Vec::new(), hist_dirty: false }
     }
 
     #[test]

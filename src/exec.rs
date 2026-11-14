@@ -1,10 +1,9 @@
-//! Run a short command on the workspace (locally or over the existing SSH connection) with a
-//! hard output cap and a timeout. Used for git; nothing is installed or left running.
+//! Run a short command in the workspace with a hard output cap and a timeout. Used for git;
+//! nothing is left running.
 
 use crate::preview::diff::Snapshot;
 use crate::workspace::Backend;
 use anyhow::{Context, Result, bail};
-use russh::ChannelMsg;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -22,14 +21,6 @@ pub struct Output {
     pub timed_out: bool,
 }
 
-/// Quote one argument for a POSIX shell (single quotes; embedded quotes become `'\''`).
-pub fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,@+%".contains(c)) {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// Quote one argument so a POSIX shell sees exactly `s`: always single quotes, with every
 /// embedded `'` written as `'\''`. Nothing inside single quotes is special, so spaces, `$`,
 /// backticks, newlines and a leading dash all stay literal (put `--` before it for programs).
@@ -41,10 +32,6 @@ pub fn sq(s: &str) -> String {
 /// (a newline or escape typed into a terminal could run commands).
 pub fn folder_name_ok(s: &str) -> bool {
     !s.is_empty() && !s.chars().any(|c| c.is_control())
-}
-
-pub fn shell_join(args: &[&str]) -> String {
-    args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
 }
 
 /// Read up to `cap` bytes; reports whether more data was waiting.
@@ -100,45 +87,18 @@ impl Backend {
                 let e = tokio::time::timeout(Duration::from_millis(200), err_task).await.ok().and_then(|r| r.ok()).unwrap_or_default();
                 Ok(Output { stdout: bytes, stderr: String::from_utf8_lossy(&e).trim().to_string(), code: status.code().unwrap_or(-1), truncated, timed_out: false })
             }
-            Backend::Remote(s) => {
-                let mut ch = s.handle.channel_open_session().await?;
-                ch.exec(true, format!("GIT_OPTIONAL_LOCKS=0 {}", shell_join(args))).await?;
-                let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-                let (mut code, mut truncated) = (-1, false);
-                while let Some(msg) = ch.wait().await {
-                    match msg {
-                        ChannelMsg::Data { data } => {
-                            if push_capped(&mut stdout, &data, OUT_CAP) {
-                                truncated = true;
-                                break;
-                            }
-                        }
-                        ChannelMsg::ExtendedData { data, .. } => {
-                            push_capped(&mut stderr, &data, ERR_CAP);
-                        }
-                        ChannelMsg::ExitStatus { exit_status } => code = exit_status as i32,
-                        ChannelMsg::Close => break,
-                        _ => {}
-                    }
-                }
-                if truncated {
-                    let _ = ch.close().await;
-                    code = 0;
-                }
-                Ok(Output { stdout, stderr: String::from_utf8_lossy(&stderr).trim().to_string(), code, truncated, timed_out: false })
-            }
         }
     }
 
-    /// Run a shell script in folder `dir` (on the box, or locally) for a search or a file list.
+    /// Run a shell script in folder `dir` for a search or a file list.
     /// Output is capped at `cap` bytes and the call at `timeout`; unlike `run`, what arrived
     /// before the cap or the deadline is returned (flagged), so a slow search still shows hits.
     /// `script` is trusted shell text; build it with `sq` for anything the user typed.
     pub async fn run_script(&self, dir: &str, script: &str, cap: usize, timeout: Duration) -> Result<Output> {
         let deadline = tokio::time::Instant::now() + timeout;
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let mut stdout = Vec::new();
         let (mut code, mut truncated, mut timed_out) = (-1, false, false);
-        match self {
+        let stderr = match self {
             Backend::Local(_) => {
                 let mut child = tokio::process::Command::new("sh")
                     .arg("-c")
@@ -177,38 +137,9 @@ impl Backend {
                 if let Ok(Ok(st)) = tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
                     code = st.code().unwrap_or(-1);
                 }
-                let e = tokio::time::timeout(Duration::from_millis(200), err_task).await.ok().and_then(|r| r.ok()).unwrap_or_default();
-                stderr = e;
+                tokio::time::timeout(Duration::from_millis(200), err_task).await.ok().and_then(|r| r.ok()).unwrap_or_default()
             }
-            Backend::Remote(s) => {
-                let mut ch = s.handle.channel_open_session().await?;
-                ch.exec(true, format!("cd {} && {script}", sq(dir))).await?;
-                loop {
-                    match tokio::time::timeout_at(deadline, ch.wait()).await {
-                        Err(_) => {
-                            timed_out = true;
-                            break;
-                        }
-                        Ok(None) => break,
-                        Ok(Some(ChannelMsg::Data { data })) => {
-                            if push_capped(&mut stdout, &data, cap) {
-                                truncated = true;
-                                break;
-                            }
-                        }
-                        Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
-                            push_capped(&mut stderr, &data, ERR_CAP);
-                        }
-                        Ok(Some(ChannelMsg::ExitStatus { exit_status })) => code = exit_status as i32,
-                        Ok(Some(ChannelMsg::Close)) => break,
-                        Ok(Some(_)) => {}
-                    }
-                }
-                if truncated || timed_out {
-                    let _ = ch.close().await;
-                }
-            }
-        }
+        };
         Ok(Output { stdout, stderr: String::from_utf8_lossy(&stderr).trim().to_string(), code, truncated, timed_out })
     }
 
@@ -295,19 +226,6 @@ mod tests {
         assert!(!folder_name_ok("/a\nb"));
         assert!(!folder_name_ok("/a\x1b[31m"));
         assert!(!folder_name_ok(""));
-    }
-
-    #[test]
-    fn quotes_safely() {
-        assert_eq!(shell_quote("status"), "status");
-        assert_eq!(shell_quote("--short"), "--short");
-        assert_eq!(shell_quote(""), "''");
-        assert_eq!(shell_quote("a b"), "'a b'");
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
-        assert_eq!(shell_quote("$(rm -rf ~)"), "'$(rm -rf ~)'");
-        assert_eq!(shell_quote("a;b|c&d`e`"), "'a;b|c&d`e`'");
-        assert_eq!(shell_quote("x\ny"), "'x\ny'");
-        assert_eq!(shell_join(&["git", "-C", "/my dir", "log"]), "git -C '/my dir' log");
     }
 
     #[tokio::test]

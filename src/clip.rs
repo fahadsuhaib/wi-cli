@@ -1,6 +1,5 @@
-//! Copying text to the user's clipboard. wi always runs on the user's own machine (even for
-//! remote boxes), so the local clipboard tool is tried first; the terminal's OSC 52 escape is
-//! the fallback and covers wi itself running over SSH.
+//! Copying text to the user's clipboard. The local clipboard tool is tried first; the terminal's
+//! OSC 52 escape is the fallback and covers wi itself running inside an SSH session.
 
 use std::io::Write;
 use std::process::{Command, Stdio};

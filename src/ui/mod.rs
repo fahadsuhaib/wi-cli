@@ -18,7 +18,6 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 pub enum Action {
     Preview,
     Git,
-    Download,
     /// Label every file path and URL on screen so one keypress opens it.
     OpenLink,
     NewTab,
@@ -44,7 +43,6 @@ pub enum Action {
     DictationEnter,
     Agent,
     CloseTab,
-    Reconnect,
     Scroll,
     /// Move the keyboard between the shell and the side preview.
     SwitchPane,
@@ -69,34 +67,27 @@ pub enum Action {
     /// The files recently shown in a preview, to open one again.
     RecentFiles,
     Quit,
-    EndAndQuit,
 }
 
 pub struct MenuItem {
     pub label: &'static str,
     pub key: char,
     pub action: Action,
-    /// Only shown for remote workspaces.
-    pub remote_only: bool,
     /// Header the entry is listed under (one of `SECTIONS`; empty means `OTHER`).
     pub section: &'static str,
     /// Extra words the filter matches besides the label.
     pub keywords: &'static [&'static str],
 }
 
-/// Menu entries that apply to this kind of workspace.
-pub fn menu_items(remote: bool) -> Vec<&'static MenuItem> {
-    MENU.iter().filter(|m| remote || !m.remote_only).collect()
+/// Every menu entry, in order.
+pub fn menu_items() -> Vec<&'static MenuItem> {
+    MENU.iter().collect()
 }
-
-/// On a remote box with tmux, "Quit" only detaches: the shells keep running there.
-pub const DETACH_ITEM: MenuItem = MenuItem { label: "Detach (keep sessions)", key: 'q', action: Action::Quit, remote_only: true, section: "SESSION", keywords: &["quit", "exit", "disconnect", "leave"] };
-pub const END_ITEM: MenuItem = MenuItem { label: "End sessions and quit", key: 'e', action: Action::EndAndQuit, remote_only: true, section: "SESSION", keywords: &["quit", "exit", "kill", "close"] };
 
 /// Menu entries for the theme item: `auto (dark)`, `auto (light)`, then one per named theme. The
 /// label shows what is set; the item opens the picker.
 static THEME_ITEMS: std::sync::LazyLock<Vec<MenuItem>> = std::sync::LazyLock::new(|| {
-    let mk = |label: String| MenuItem { label: Box::leak(label.into_boxed_str()), key: 'y', action: Action::Theme, remote_only: false, section: "VIEW", keywords: &["dark", "light", "auto", "colour", "color", "monokai", "solarized", "picker"] };
+    let mk = |label: String| MenuItem { label: Box::leak(label.into_boxed_str()), key: 'y', action: Action::Theme, section: "VIEW", keywords: &["dark", "light", "auto", "colour", "color", "monokai", "solarized", "picker"] };
     let mut v = vec![mk("Theme… auto (dark)".into()), mk("Theme… auto (light)".into())];
     v.extend(theme::ALL.iter().map(|t| mk(format!("Theme… {}", t.label))));
     v
@@ -117,13 +108,6 @@ pub fn set_theme_item(items: &mut [&'static MenuItem], mode: theme::Mode, kind: 
     }
 }
 
-static TMUX_MENU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Tell the menu that shells live in tmux (set once after connecting).
-pub fn set_tmux_menu(on: bool) {
-    TMUX_MENU.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// The theme setting the menu shows (0 auto, else 1 + index into `theme::ALL`).
 static THEME_MODE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -137,60 +121,54 @@ fn theme_mode() -> theme::Mode {
     match THEME_MODE.load(std::sync::atomic::Ordering::Relaxed) { 0 => theme::Mode::Auto, v => theme::Mode::Named((v - 1).min(theme::ALL.len() - 1)) }
 }
 
-/// Menu entries for a workspace, with the Quit entry replaced by Detach / End for tmux boxes.
-pub fn menu_items_for(remote: bool, tmux: bool) -> Vec<&'static MenuItem> {
-    let mut items = menu_items(remote);
+/// Menu entries for the workspace, with the theme entry showing the current mode.
+pub fn menu_items_for() -> Vec<&'static MenuItem> {
+    let mut items = menu_items();
     set_theme_item(&mut items, theme_mode(), theme::kind());
-    if tmux && let Some(i) = items.iter().position(|m| m.action == Action::Quit) {
-        items[i] = &DETACH_ITEM;
-        items.insert(i + 1, &END_ITEM);
-    }
     items
 }
 
 /// Hotkey of a menu entry that has none.
 pub const NO_KEY: char = '\0';
 
-const fn mi(label: &'static str, key: char, action: Action, remote_only: bool, section: &'static str, keywords: &'static [&'static str]) -> MenuItem {
-    MenuItem { label, key, action, remote_only, section, keywords }
+const fn mi(label: &'static str, key: char, action: Action, section: &'static str, keywords: &'static [&'static str]) -> MenuItem {
+    MenuItem { label, key, action, section, keywords }
 }
 
 pub const MENU: &[MenuItem] = &[
-    mi("Preview a file", 'p', Action::Preview, false, "FILES", &["open", "view", "show", "read", "markdown"]),
-    mi("Recent files", NO_KEY, Action::RecentFiles, false, "FILES", &["history", "previous", "open", "again", "last", "path"]),
-    mi("Find file", 'k', Action::FindFile, false, "FILES", &["open", "fuzzy", "name", "locate"]),
-    mi("Explorer", 'x', Action::Explorer, false, "FILES", &["tree", "browse", "folders", "files"]),
-    mi("Git changes", 'g', Action::Git, false, "FILES", &["diff", "status", "commit", "branch", "modified"]),
-    mi("Open path on screen", 'o', Action::OpenLink, false, "FILES", &["link", "url", "click", "hint"]),
-    mi("Search in files", 'l', Action::SearchText, false, "SEARCH", &["grep", "find", "text", "ripgrep"]),
-    mi("Find in output", 'u', Action::FindOutput, false, "SEARCH", &["search", "scrollback", "text", "history"]),
-    mi("New shell tab", 'n', Action::NewTab, false, "TABS", &["open", "terminal", "create"]),
-    mi("New tab in folder", 'f', Action::NewTabIn, false, "TABS", &["cd", "directory", "project", "open"]),
-    mi("Change folder of this tab", 'h', Action::ChangeDir, false, "TABS", &["cd", "directory", "project"]),
-    mi("Next tab", 't', Action::NextTab, false, "TABS", &["switch", "right", "forward"]),
-    mi("Previous tab", 'b', Action::PrevTab, false, "TABS", &["switch", "left", "back"]),
-    mi("Close tab", 'c', Action::CloseTab, false, "TABS", &["kill", "end", "remove"]),
-    mi("Rename tab", NO_KEY, Action::RenameTab, false, "TABS", &["title", "name", "label", "call"]),
-    mi("Switch pane", 'w', Action::SwitchPane, false, "TABS", &["focus", "split", "side"]),
-    mi("Close preview", 'v', Action::ClosePreview, false, "TABS", &["side", "pane", "hide"]),
+    mi("Preview a file", 'p', Action::Preview, "FILES", &["open", "view", "show", "read", "markdown"]),
+    mi("Recent files", NO_KEY, Action::RecentFiles, "FILES", &["history", "previous", "open", "again", "last", "path"]),
+    mi("Find file", 'k', Action::FindFile, "FILES", &["open", "fuzzy", "name", "locate"]),
+    mi("Explorer", 'x', Action::Explorer, "FILES", &["tree", "browse", "folders", "files"]),
+    mi("Git changes", 'g', Action::Git, "FILES", &["diff", "status", "commit", "branch", "modified"]),
+    mi("Open path on screen", 'o', Action::OpenLink, "FILES", &["link", "url", "click", "hint"]),
+    mi("Search in files", 'l', Action::SearchText, "SEARCH", &["grep", "find", "text", "ripgrep"]),
+    mi("Find in output", 'u', Action::FindOutput, "SEARCH", &["search", "scrollback", "text", "history"]),
+    mi("New shell tab", 'n', Action::NewTab, "TABS", &["open", "terminal", "create"]),
+    mi("New tab in folder", 'f', Action::NewTabIn, "TABS", &["cd", "directory", "project", "open"]),
+    mi("Change folder of this tab", 'h', Action::ChangeDir, "TABS", &["cd", "directory", "project"]),
+    mi("Next tab", 't', Action::NextTab, "TABS", &["switch", "right", "forward"]),
+    mi("Previous tab", 'b', Action::PrevTab, "TABS", &["switch", "left", "back"]),
+    mi("Close tab", 'c', Action::CloseTab, "TABS", &["kill", "end", "remove"]),
+    mi("Rename tab", NO_KEY, Action::RenameTab, "TABS", &["title", "name", "label", "call"]),
+    mi("Switch pane", 'w', Action::SwitchPane, "TABS", &["focus", "split", "side"]),
+    mi("Close preview", 'v', Action::ClosePreview, "TABS", &["side", "pane", "hide"]),
     // No hotkey (NO_KEY): the letters are used up; these are found with Space and a few letters.
-    mi("Pin tab right", NO_KEY, Action::PinRight, false, "TABS", &["pane", "split", "side", "beside", "pin"]),
-    mi("Pin tab left", NO_KEY, Action::PinLeft, false, "TABS", &["pane", "split", "side", "beside", "pin"]),
-    mi("Swap pane sides", NO_KEY, Action::SwapSides, false, "TABS", &["pane", "split", "flip", "left", "right", "move"]),
-    mi("Unsplit (unpin)", NO_KEY, Action::Unsplit, false, "TABS", &["pane", "split", "single", "pin", "close"]),
-    mi("Scroll", 's', Action::Scroll, false, "VIEW", &["history", "back", "up", "scrollback"]),
-    mi("Theme…", 'y', Action::Theme, false, "VIEW", &["dark", "light", "auto", "colour", "color", "monokai", "solarized", "picker"]),
-    mi("Mouse on/off", 'm', Action::Mouse, false, "VIEW", &["select", "copy", "click"]),
-    mi("Start / change agent", 'a', Action::Agent, false, "AGENT", &["claude", "codex", "ai", "assistant"]),
-    mi("Info", 'i', Action::Info, false, "SESSION", &["status", "folder", "box", "about"]),
-    mi("Reconnect", 'r', Action::Reconnect, true, "SESSION", &["connection", "ssh", "retry"]),
-    mi("Download", 'd', Action::Download, true, "SESSION", &["fetch", "copy", "save", "file"]),
+    mi("Pin tab right", NO_KEY, Action::PinRight, "TABS", &["pane", "split", "side", "beside", "pin"]),
+    mi("Pin tab left", NO_KEY, Action::PinLeft, "TABS", &["pane", "split", "side", "beside", "pin"]),
+    mi("Swap pane sides", NO_KEY, Action::SwapSides, "TABS", &["pane", "split", "flip", "left", "right", "move"]),
+    mi("Unsplit (unpin)", NO_KEY, Action::Unsplit, "TABS", &["pane", "split", "single", "pin", "close"]),
+    mi("Scroll", 's', Action::Scroll, "VIEW", &["history", "back", "up", "scrollback"]),
+    mi("Theme…", 'y', Action::Theme, "VIEW", &["dark", "light", "auto", "colour", "color", "monokai", "solarized", "picker"]),
+    mi("Mouse on/off", 'm', Action::Mouse, "VIEW", &["select", "copy", "click"]),
+    mi("Start / change agent", 'a', Action::Agent, "AGENT", &["claude", "codex", "ai", "assistant"]),
+    mi("Info", 'i', Action::Info, "SESSION", &["status", "folder", "about"]),
     #[cfg(target_os = "macos")]
-    mi("Dictation", NO_KEY, Action::Dictation, false, "AGENT", &["dictate", "voice", "speak", "talk", "listen", "microphone", "options"]),
-    mi("Auto-Enter for dictation", NO_KEY, Action::DictationEnter, false, "AGENT", &["auto", "enter", "send", "submit", "mic"]),
-    mi("Update wi", NO_KEY, Action::Update, false, "SESSION", &["upgrade", "new", "version", "release", "download", "latest"]),
-    mi("Restart wi", NO_KEY, Action::Restart, false, "SESSION", &["reload", "relaunch", "again", "new version"]),
-    mi("Quit", 'q', Action::Quit, false, "SESSION", &["exit", "detach", "disconnect", "leave"]),
+    mi("Dictation", NO_KEY, Action::Dictation, "AGENT", &["dictate", "voice", "speak", "talk", "listen", "microphone", "options"]),
+    mi("Auto-Enter for dictation", NO_KEY, Action::DictationEnter, "AGENT", &["auto", "enter", "send", "submit", "mic"]),
+    mi("Update wi", NO_KEY, Action::Update, "SESSION", &["upgrade", "new", "version", "release", "download", "latest"]),
+    mi("Restart wi", NO_KEY, Action::Restart, "SESSION", &["reload", "relaunch", "again", "new version"]),
+    mi("Quit", 'q', Action::Quit, "SESSION", &["exit", "leave"]),
 ];
 
 /// Section headers in display order; entries without a known section go under `OTHER`.
@@ -345,7 +323,7 @@ pub fn menu_layout(main: Rect, items: &[&MenuItem], st: &MenuState) -> MenuLayou
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuHit {
     Outside,
-    /// On the box but not on anything clickable.
+    /// On the menu but not on anything clickable.
     Inert,
     Filter,
     /// An entry (index into the item list).
@@ -565,7 +543,6 @@ pub struct View<'a> {
     pub screen: &'a vt100::Screen,
     pub name: &'a str,
     pub detail: &'a str,
-    pub remote: bool,
     pub menu_label: &'a str,
     /// (title, active, state) per tab; the strip shows only with 2+ tabs.
     pub tabs: &'a [(String, bool, crate::tab::TabState)],
@@ -698,14 +675,13 @@ fn draw_frame(f: &mut Frame, v: &View) {
     let bar = Style::default().bg(t.bar_bg).fg(t.bar_fg);
     let status_bar = Style::default().bg(t.status_bg).fg(t.status_fg);
 
-    let tail = if v.remote { "  connected" } else { "" };
-    let fixed = format!(" wicli  {}  ", v.name).chars().count() + tail.chars().count();
+    let fixed = format!(" wicli  {}  ", v.name).chars().count();
     // The mic button keeps its place at the right end; the folder text gives way first.
     let mic_w = v.mic.map_or(0, |(m, _)| mic_span(m, header.width).1 as usize);
     let room = (header.width as usize).saturating_sub(fixed + mic_w);
     let detail = left_trim(v.detail, room);
     f.render_widget(
-        Paragraph::new(format!(" wicli  {}  {detail}{tail}", v.name)).style(bar.fg(t.header).add_modifier(Modifier::BOLD)),
+        Paragraph::new(format!(" wicli  {}  {detail}", v.name)).style(bar.fg(t.header).add_modifier(Modifier::BOLD)),
         header,
     );
 
@@ -860,7 +836,6 @@ fn draw_frame(f: &mut Frame, v: &View) {
     let hint = match (v.menu.as_ref(), v.message) {
         _ if status_text.is_some() => status_text.unwrap_or_default(),
         _ if v.voice.is_some() => format!(" {}", v.voice.map(|d| d.footer.as_str()).unwrap_or_default()),
-        _ if v.confirm.is_some_and(|c| c.yes.is_empty()) => " Esc cancels the download".to_string(),
         _ if v.confirm.is_some() => " Y or Enter to continue · N or Esc to cancel".to_string(),
         _ if v.hints.is_some() => " type a label to open that link · Esc cancels".to_string(),
         _ if v.themes.is_some() => " arrows preview a theme · Enter applies and saves · type to filter · Esc cancels".to_string(),
@@ -918,7 +893,7 @@ fn draw_frame(f: &mut Frame, v: &View) {
         return;
     }
     match v.menu.as_ref() {
-        Some(st) => draw_menu(f, main, st, v.remote),
+        Some(st) => draw_menu(f, main, st),
         None if v.preview.is_some() || (split.is_some() && v.focus_side) => {}
         None if !v.screen.hide_cursor() && v.scroll.is_none() => {
             let (r, c) = v.screen.cursor_position();
@@ -987,8 +962,8 @@ fn bordered(title: &str, border: Color, bg: Color, fg: Color) -> Block<'_> {
     Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(border)).style(Style::default().bg(bg).fg(fg))
 }
 
-fn draw_menu(f: &mut Frame, main: Rect, st: &MenuState, remote: bool) {
-    let items = menu_items_for(remote, TMUX_MENU.load(std::sync::atomic::Ordering::Relaxed));
+fn draw_menu(f: &mut Frame, main: Rect, st: &MenuState) {
+    let items = menu_items_for();
     let lay = menu_layout(main, &items, st);
     let t = theme();
     let area = lay.rect;
@@ -1435,7 +1410,7 @@ mod tests {
 
     #[test]
     fn menu_groups_under_headers() {
-        let items = menu_items_for(false, false);
+        let items = menu_items_for();
         let rows = menu_rows(&items, "");
         let heads: Vec<&str> = rows.iter().filter_map(|r| if let Row::Header(h) = r { Some(*h) } else { None }).collect();
         assert_eq!(heads, ["FILES", "SEARCH", "TABS", "VIEW", "AGENT", "SESSION"]);
@@ -1447,7 +1422,7 @@ mod tests {
         e.dedup();
         assert_eq!(e.len(), items.len());
         // An entry with no known section goes under OTHER.
-        static ODD: MenuItem = MenuItem { label: "Odd", key: 'z', action: Action::Info, remote_only: false, section: "", keywords: &[] };
+        static ODD: MenuItem = MenuItem { label: "Odd", key: 'z', action: Action::Info, section: "", keywords: &[] };
         let mut with = items.clone();
         with.push(&ODD);
         let rows = menu_rows(&with, "");
@@ -1457,7 +1432,7 @@ mod tests {
 
     #[test]
     fn menu_filter_ranking() {
-        let items = menu_items_for(false, false);
+        let items = menu_items_for();
         assert_eq!(first_label(&items, "git"), Some("Git changes"));
         assert_eq!(first_label(&items, "grep"), Some("Search in files"));
         assert_eq!(first_label(&items, "srch"), Some("Search in files"));
@@ -1473,7 +1448,7 @@ mod tests {
 
     #[test]
     fn update_is_findable_and_theme_label_shows_mode() {
-        let items = menu_items_for(false, false);
+        let items = menu_items_for();
         assert_eq!(first_label(&items, "update"), Some("Update wi"));
         assert_eq!(first_label(&items, "upgrade"), Some("Update wi"));
         let mut items = items;
@@ -1489,19 +1464,6 @@ mod tests {
         set_theme_item(&mut items, named("tomorrow-night-blue"), theme::Kind::Dark);
         assert_eq!(first_label(&items, "theme"), Some("Theme… Tomorrow Night Blue"));
         assert_eq!(items.iter().filter(|m| m.key == 'y').count(), 1);
-    }
-
-    #[test]
-    fn menu_remote_and_tmux_variants() {
-        let local = menu_items_for(false, false);
-        assert!(!local.iter().any(|m| m.remote_only));
-        let remote = menu_items_for(true, false);
-        assert!(remote.iter().any(|m| m.action == Action::Download) && remote.iter().any(|m| m.action == Action::Reconnect));
-        let tmux = menu_items_for(true, true);
-        assert!(tmux.iter().any(|m| m.label.starts_with("Detach")) && tmux.iter().any(|m| m.action == Action::EndAndQuit));
-        assert!(!tmux.iter().any(|m| m.label == "Quit"));
-        assert_eq!(first_label(&tmux, "disconnect"), Some("Detach (keep sessions)"));
-        assert_eq!(first_label(&tmux, "end"), Some("End sessions and quit"));
     }
 
     #[test]
@@ -1527,7 +1489,7 @@ mod tests {
 
     #[test]
     fn menu_layout_scrolls_and_hit_tests() {
-        let items = menu_items_for(false, false);
+        let items = menu_items_for();
         let main = Rect::new(0, 1, 80, 12);
         let mut st = MenuState::default();
         let lay = menu_layout(main, &items, &st);
@@ -1565,7 +1527,7 @@ mod tests {
 
     #[test]
     fn menu_box_widens_on_wide_terminals_only() {
-        let items = menu_items_for(true, true);
+        let items = menu_items_for();
         let narrow = menu_layout(Rect::new(0, 1, 80, 40), &items, &MenuState::default()).rect;
         assert_eq!(narrow.width, 30);
         let wide = menu_layout(Rect::new(0, 1, 120, 40), &items, &MenuState::default()).rect;
@@ -1576,8 +1538,7 @@ mod tests {
 
     #[test]
     fn menu_keys_are_unique() {
-        let mut keys: Vec<char> = MENU.iter().map(|m| m.key).filter(|&k| k != NO_KEY).collect();
-        keys.push(END_ITEM.key);
+        let keys: Vec<char> = MENU.iter().map(|m| m.key).filter(|&k| k != NO_KEY).collect();
         let set: std::collections::HashSet<_> = keys.iter().collect();
         assert_eq!(set.len(), keys.len(), "{keys:?}");
     }

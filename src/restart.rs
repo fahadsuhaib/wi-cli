@@ -1,7 +1,7 @@
 //! Restart wi in place: the layout of the session is written to `state.toml`, wi executes itself
 //! (the same file, so after an update it is the new binary) with `WICLI_RESTORE=1`, and the new
-//! process reopens the tabs and removes the snapshot. Local shells cannot survive (no tmux behind
-//! them), so they start fresh in the same folders; remote tmux sessions simply reattach.
+//! process reopens the tabs and removes the snapshot. Shells cannot survive, so they start fresh
+//! in the same folders.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,8 @@ pub const MARKER: &str = "WICLI_RESTORE";
 pub struct SnapTab {
     /// `shell`, `agent` or `preview`.
     pub kind: String,
-    /// `local` or `remote`.
+    /// `local` (kept so older snapshots still read).
+    #[serde(default)]
     pub backend: String,
     /// Live folder of a shell or agent tab.
     #[serde(default)]
@@ -103,7 +104,7 @@ impl Snapshot {
     }
 }
 
-/// A local shell or agent tab whose folder is gone is not reopened (previews fail on their own).
+/// A shell or agent tab whose folder is gone is not reopened (previews fail on their own).
 pub fn local_tab_exists(t: &SnapTab) -> bool {
     t.kind == "preview" || t.cwd.is_empty() || std::path::Path::new(&t.cwd).is_dir()
 }
@@ -114,13 +115,9 @@ pub fn strip_deleted(p: &str) -> &str {
 }
 
 /// Plain words for the "Restart wi now?" question.
-pub fn summary(tabs: usize, remote: bool, tmux: bool) -> String {
+pub fn summary(tabs: usize) -> String {
     let n = format!("{tabs} tab{}", if tabs == 1 { "" } else { "s" });
-    match (remote, tmux) {
-        (false, _) => format!("{n} will be restarted: shells and agents start fresh in the same folders, previews reopen."),
-        (true, true) => format!("{n}: remote shells reattach and keep running, previews reopen."),
-        (true, false) => format!("{n} will be restarted: this box has no tmux, so shells start fresh in the same folders."),
-    }
+    format!("{n} will be restarted: shells and agents start fresh in the same folders, previews reopen.")
 }
 
 #[cfg(test)]
@@ -158,14 +155,14 @@ mod tests {
     fn sessions_are_kept_per_workspace() {
         let mut st = crate::agents::State::default();
         st.sessions.insert("local:/a".into(), Snapshot { key: "local:/a".into(), saved: 5, ..sample() });
-        st.sessions.insert("box:dev:/b".into(), Snapshot { key: "box:dev:/b".into(), saved: 6, ..sample() });
+        st.sessions.insert("local:/b".into(), Snapshot { key: "local:/b".into(), saved: 6, ..sample() });
         let back: crate::agents::State = toml::from_str(&toml::to_string_pretty(&st).unwrap()).unwrap();
         assert_eq!(back.sessions.len(), 2);
-        assert_eq!(back.sessions["box:dev:/b"].saved, 6);
+        assert_eq!(back.sessions["local:/b"].saved, 6);
         // Replacing one workspace's entry leaves the other alone.
         let mut back = back;
         back.sessions.remove("local:/a");
-        assert!(back.sessions.contains_key("box:dev:/b"));
+        assert!(back.sessions.contains_key("local:/b"));
         assert!(!toml::to_string_pretty(&crate::agents::State::default()).unwrap().contains("sessions"));
     }
 
@@ -223,8 +220,7 @@ mod tests {
     fn deleted_suffix_and_summary() {
         assert_eq!(strip_deleted("/usr/local/bin/wi (deleted)"), "/usr/local/bin/wi");
         assert_eq!(strip_deleted("/usr/local/bin/wi"), "/usr/local/bin/wi");
-        assert!(summary(1, false, false).starts_with("1 tab will be restarted"));
-        assert!(summary(3, true, true).contains("reattach"));
-        assert!(summary(2, true, false).contains("no tmux"));
+        assert!(summary(1).starts_with("1 tab will be restarted"));
+        assert!(summary(3).starts_with("3 tabs will be restarted"));
     }
 }

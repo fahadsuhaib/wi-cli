@@ -1,6 +1,5 @@
 //! Data for the file explorer: detailed directory listings (size, modified time), sorting, git
-//! marks from `git status`, and the small formatters the view uses. Local and remote go through
-//! `Backend`; remote listings use the attributes SFTP already sends (no per-entry stat).
+//! marks from `git status`, and the small formatters the view uses. Reads go through `Backend`.
 
 use crate::files::LIST_CAP;
 use crate::workspace::Backend;
@@ -8,9 +7,6 @@ use anyhow::{Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-/// At most this many symlinks per remote listing get the extra stat that tells whether they
-/// point at a directory.
-const SYMLINK_STAT_CAP: usize = 200;
 /// Entries past `LIST_CAP` are still counted (names only, no stat) up to this many.
 const COUNT_CAP: usize = 100_000;
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -291,9 +287,8 @@ pub fn parse_git_output(stdout: &[u8], truncated: bool) -> Option<GitMarks> {
 }
 
 impl Backend {
-    /// List a folder with size and modified time. Locally one `metadata` call per entry (two
-    /// for symlinks); remotely the SFTP attributes, plus one stat for each of the first 200
-    /// symlinks. An unreadable entry is listed with missing details, never fails the listing.
+    /// List a folder with size and modified time: one `metadata` call per entry (two for
+    /// symlinks). An unreadable entry is listed with missing details, never fails the listing.
     /// Stops at `LIST_CAP` entries (`truncated`). The result is sorted by name.
     pub async fn list_dir_detailed(&self, dir: &str) -> Result<DetailedListing> {
         let p = self.absolutize(dir);
@@ -321,36 +316,6 @@ impl Backend {
                         Some(m) => (m.is_dir(), Some(m.len()), mtime_of(m)),
                         None => (false, None, mtime_of(&lm)), // broken link
                     };
-                    entries.push(DirEntry::new(name, is_dir, is_link, size, mtime));
-                }
-            }
-            Backend::Remote(s) => {
-                let sftp = s.sftp().await?;
-                let mut stats = 0usize;
-                for e in sftp.read_dir(p.clone()).await? {
-                    let name = e.file_name();
-                    if name == "." || name == ".." {
-                        continue;
-                    }
-                    total += 1;
-                    if entries.len() >= LIST_CAP {
-                        continue;
-                    }
-                    let a = e.metadata();
-                    let is_link = e.file_type().is_symlink();
-                    let (mut is_dir, mut size, mut mtime) = (e.file_type().is_dir(), a.size, a.mtime.map(i64::from));
-                    if is_link {
-                        // The attributes are the link's own: its size is the target path length.
-                        size = None;
-                        if stats < SYMLINK_STAT_CAP {
-                            stats += 1;
-                            if let Ok(t) = sftp.metadata(child_path(&p, &name)).await {
-                                is_dir = t.is_dir();
-                                size = t.size;
-                                mtime = t.mtime.map(i64::from).or(mtime);
-                            }
-                        }
-                    }
                     entries.push(DirEntry::new(name, is_dir, is_link, size, mtime));
                 }
             }
@@ -389,14 +354,13 @@ fn mtime_of(m: &std::fs::Metadata) -> Option<i64> {
 
 // ---- hidden dev subcommand: wi __ls ----
 
-/// `wi __ls [--box NAME] <dir> [--git] [--sort name|size|mtime]`, plain text for tests.
+/// `wi __ls <dir> [--git] [--sort name|size|mtime]`, plain text for tests.
 pub async fn ls_cmd() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(2).collect();
-    let (mut box_name, mut dir, mut git, mut sort) = (None, None, false, SortKey::Name);
+    let (mut dir, mut git, mut sort) = (None, false, SortKey::Name);
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--box" => box_name = Some(it.next().ok_or_else(|| anyhow::anyhow!("--box needs a name"))?),
             "--git" => git = true,
             "--sort" => {
                 sort = match it.next().as_deref() {
@@ -407,22 +371,11 @@ pub async fn ls_cmd() -> Result<()> {
                 }
             }
             _ if dir.is_none() => dir = Some(a),
-            _ => bail!("usage: wi __ls [--box NAME] <dir> [--git] [--sort name|size|mtime]"),
+            _ => bail!("usage: wi __ls <dir> [--git] [--sort name|size|mtime]"),
         }
     }
-    let Some(dir) = dir else { bail!("usage: wi __ls [--box NAME] <dir> [--git] [--sort name|size|mtime]") };
-    let ws = match box_name {
-        Some(n) => {
-            let cfg = crate::config::Config::load()?;
-            let b = match cfg.find_box(&n) {
-                Some(b) => b.clone(),
-                None => crate::config::Config::ssh_config_box(&n)?.ok_or_else(|| anyhow::anyhow!("unknown box '{n}'"))?,
-            };
-            crate::workspace::Workspace::Remote(b)
-        }
-        None => crate::workspace::Workspace::Local(std::env::current_dir()?),
-    };
-    let backend = ws.connect().await?;
+    let Some(dir) = dir else { bail!("usage: wi __ls <dir> [--git] [--sort name|size|mtime]") };
+    let backend = crate::workspace::Workspace::Local(std::env::current_dir()?).connect();
     let mut l = backend.list_dir_detailed(&dir).await?;
     sort_entries(&mut l.entries, sort, false);
     let mut out = String::new();

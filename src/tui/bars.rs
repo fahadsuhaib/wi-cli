@@ -90,7 +90,7 @@ impl HintBar {
     }
 }
 
-/// A coloured badge (`LOCAL`, a box name) followed by dim segments with optional tones.
+/// A coloured badge (`LOCAL`) followed by dim segments with optional tones.
 #[derive(Clone, Debug, Default)]
 pub struct StatusLine {
     pub badge: String,

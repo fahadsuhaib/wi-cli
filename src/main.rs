@@ -29,11 +29,9 @@ mod files;
 mod gitdiff;
 mod diffview;
 mod history;
-mod session;
 mod tab;
 mod term;
 mod theme;
-mod transfer;
 mod tui;
 mod ui;
 mod update;
@@ -57,14 +55,11 @@ async fn main() {
     std::process::exit(code);
 }
 
-const HELP: &str = "wi: a terminal workspace for AI coding tools, local or over SSH
+const HELP: &str = "wi: a terminal workspace for AI coding tools
 
 usage:
-  wi                  local workspace in the current folder
-  wi <folder>         local workspace in that folder
-  wi <box>            remote workspace, a [[box]] name from the config
-  wi <ssh-alias>      remote workspace, a Host from ~/.ssh/config
-  wi fetch ...        download files from a box (see the docs)
+  wi                  workspace in the current folder
+  wi <folder>         workspace in that folder
   wi --fresh [...]    start without reopening the last session's tabs (and forget them)
   wi --version, -V    print the version
   wi --help, -h       print this help
@@ -87,28 +82,21 @@ async fn real_main() -> Result<()> {
         _ => {}
     }
     let cfg = config::Config::load()?;
-    if std::env::args().nth(1).as_deref() == Some("fetch") {
-        return fetch_cmd(&cfg).await;
-    }
     let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "--fresh").collect();
     let fresh = std::env::args().skip(1).any(|a| a == "--fresh");
     let ws = match args.first().cloned() {
-        // `wi` alone: local workspace in the current directory.
+        // `wi` alone: the current directory.
         None => workspace::Workspace::Local(std::env::current_dir()?),
         Some(arg) => {
-            if let Some(b) = cfg.find_box(&arg) {
-                workspace::Workspace::Remote(b.clone())
-            } else if let Some(b) = config::Config::ssh_config_box(&arg)? {
-                workspace::Workspace::Remote(b)
-            } else if std::path::Path::new(&arg).is_dir() {
+            if std::path::Path::new(&arg).is_dir() {
                 workspace::Workspace::Local(std::fs::canonicalize(&arg)?)
             } else {
-                bail!("'{arg}' is not a box in {}, a Host in {}, or a directory", config::config_path().display(), config::ssh_config_path().display());
+                bail!("'{arg}' is not a directory");
             }
         }
     };
 
-    let backend = ws.connect().await?;
+    let backend = ws.connect();
     app::run(&ws, &backend, &cfg, fresh).await
 }
 
@@ -124,38 +112,4 @@ pub fn setup_theme(cfg: &config::Config) {
     let chosen = theme::resolve(&cfg.defaults.theme, saved.as_deref(), || asked, fgbg.as_deref());
     let truecolor = theme::colorterm_is_truecolor(std::env::var("COLORTERM").ok().as_deref());
     theme::init(chosen, truecolor, cfg.defaults.ansi_remap, cfg.defaults.paint_background);
-}
-
-/// Dev command: `wi fetch <box> <remote-path> [--yes]` downloads through the opener cache.
-async fn fetch_cmd(cfg: &config::Config) -> Result<()> {
-    use opener::{FetchOpts, FetchResult};
-    let args: Vec<String> = std::env::args().skip(2).collect();
-    let yes = args.iter().any(|a| a == "--yes");
-    let pos: Vec<&String> = args.iter().filter(|a| *a != "--yes").collect();
-    let [box_name, path] = pos[..] else { bail!("usage: wi fetch <box> <remote-path> [--yes]") };
-    let b = match cfg.find_box(box_name) {
-        Some(b) => b.clone(),
-        None => config::Config::ssh_config_box(box_name)?.ok_or_else(|| anyhow::anyhow!("unknown box '{box_name}'"))?,
-    };
-    let backend = workspace::Workspace::Remote(b).connect().await?;
-    let mut opts = FetchOpts::new(box_name);
-    opts.confirmed = yes;
-    let mut last = std::time::Instant::now();
-    let mut progress = |done: u64, total: u64| {
-        if last.elapsed() >= std::time::Duration::from_secs(1) {
-            last = std::time::Instant::now();
-            eprintln!("wi: fetched {done} of {total} bytes");
-        }
-    };
-    let cancel = std::sync::atomic::AtomicBool::new(false);
-    match backend.fetch_to_cache(path, &opts, &mut progress, &cancel).await {
-        Ok(FetchResult::Ready(p)) => println!("{}", p.display()),
-        Ok(FetchResult::NeedsConfirm { size }) => {
-            println!("{size}");
-            eprintln!("wi: {path} is {size} bytes; rerun with --yes to download");
-            std::process::exit(2);
-        }
-        Err(e) => bail!("{e}"),
-    }
-    Ok(())
 }

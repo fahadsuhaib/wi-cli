@@ -1,5 +1,5 @@
 //! Auto-refresh of visible file previews. Pure logic only: the caller stats the visible files on
-//! a slow timer (no watchers, nothing resident on a box) and feeds what it saw to a `Watch`, which
+//! a slow timer (no watchers) and feeds what it saw to a `Watch`, which
 //! decides when the file has settled enough to read again.
 
 use std::time::{Duration, Instant};
@@ -34,8 +34,8 @@ pub enum Step {
 }
 
 /// How often visible files are looked at.
-pub fn poll_interval(remote: bool) -> Duration {
-    Duration::from_secs(if remote { 2 } else { 1 })
+pub fn poll_interval() -> Duration {
+    Duration::from_secs(1)
 }
 
 /// A file that keeps changing is still refreshed at least this often.

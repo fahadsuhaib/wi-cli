@@ -1,4 +1,4 @@
-//! File access shared by local and remote workspaces. Every read is bounded:
+//! File access for the workspace. Every read is bounded:
 //! previews read a capped prefix and directory listings are capped.
 
 use crate::workspace::Backend;
@@ -24,8 +24,8 @@ fn home() -> std::path::PathBuf {
 }
 
 impl Backend {
-    /// Turn what the user typed into a path the backend understands. Relative paths start at
-    /// the workspace root (local) or the login directory (remote); `~/` means home.
+    /// Turn what the user typed into an absolute path. Relative paths start at the workspace
+    /// root; `~/` means home.
     pub(crate) fn absolutize(&self, path: &str) -> String {
         match self {
             Backend::Local(root) => {
@@ -42,10 +42,6 @@ impl Backend {
                 };
                 p.to_string_lossy().into_owned()
             }
-            Backend::Remote(_) => {
-                let p = path.strip_prefix("~/").unwrap_or(path);
-                if p == "~" || p.is_empty() { ".".to_string() } else { p.to_string() }
-            }
         }
     }
 
@@ -54,10 +50,6 @@ impl Backend {
         let p = self.absolutize(path);
         match self {
             Backend::Local(_) => tokio::fs::metadata(&p).await.is_ok(),
-            Backend::Remote(s) => match s.sftp().await {
-                Ok(sftp) => sftp.metadata(p).await.is_ok(),
-                Err(_) => false,
-            },
         }
     }
 
@@ -75,10 +67,6 @@ impl Backend {
         let abs = self.resolve(&anchor(base, input)).await.map_err(|_| format!("no such folder: {input}"))?;
         let is_dir = match self {
             Backend::Local(_) => tokio::fs::metadata(&abs).await.map(|m| m.is_dir()).unwrap_or(false),
-            Backend::Remote(s) => match s.sftp().await {
-                Ok(sftp) => sftp.metadata(abs.clone()).await.map(|m| m.is_dir()).unwrap_or(false),
-                Err(_) => false,
-            },
         };
         if !is_dir {
             return Err(format!("not a folder: {input}"));
@@ -94,7 +82,6 @@ impl Backend {
         let p = self.absolutize(path);
         match self {
             Backend::Local(_) => Ok(tokio::fs::canonicalize(&p).await?.to_string_lossy().into_owned()),
-            Backend::Remote(s) => Ok(s.sftp().await?.canonicalize(p).await?),
         }
     }
 
@@ -110,14 +97,6 @@ impl Backend {
                     Obs::Seen(Stamp { mtime, size: m.len() })
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Obs::Gone,
-                Err(_) => Obs::Failed,
-            },
-            Backend::Remote(s) => match s.sftp().await {
-                Ok(sftp) => match sftp.metadata(p).await {
-                    Ok(m) => Obs::Seen(Stamp { mtime: i128::from(m.mtime.unwrap_or(0)) * 1_000_000_000, size: m.size.unwrap_or(0) }),
-                    Err(russh_sftp::client::error::Error::Status(st)) if st.status_code == russh_sftp::protocol::StatusCode::NoSuchFile => Obs::Gone,
-                    Err(_) => Obs::Failed,
-                },
                 Err(_) => Obs::Failed,
             },
         }
@@ -136,18 +115,6 @@ impl Backend {
                 let mut buf = Vec::with_capacity(max.min(meta.len() as usize));
                 f.take(max as u64).read_to_end(&mut buf).await?;
                 Ok((buf, meta.len()))
-            }
-            Backend::Remote(s) => {
-                let sftp = s.sftp().await?;
-                let meta = sftp.metadata(p.clone()).await?;
-                if meta.is_dir() {
-                    bail!("{path} is a directory");
-                }
-                let size = meta.size.unwrap_or(0);
-                let f = sftp.open(p).await?;
-                let mut buf = Vec::with_capacity(max.min(size as usize));
-                f.take(max as u64).read_to_end(&mut buf).await?;
-                Ok((buf, size))
             }
         }
     }
@@ -170,19 +137,6 @@ impl Backend {
                         is_dir = tokio::fs::metadata(e.path()).await.map(|m| m.is_dir()).unwrap_or(false);
                     }
                     entries.push(Entry { name: e.file_name().to_string_lossy().into_owned(), is_dir });
-                }
-            }
-            Backend::Remote(s) => {
-                for e in s.sftp().await?.read_dir(p).await? {
-                    let name = e.file_name();
-                    if name == "." || name == ".." {
-                        continue;
-                    }
-                    if entries.len() >= LIST_CAP {
-                        truncated = true;
-                        break;
-                    }
-                    entries.push(Entry { name, is_dir: e.file_type().is_dir() });
                 }
             }
         }

@@ -23,9 +23,7 @@ fn left_trim(s: &str, max: usize) -> String {
 
 /// The folder as shown in the title: `~` for the home folder on this machine.
 fn shown_root(ex: &ExplorerState) -> String {
-    if !ex.remote
-        && let Some(h) = dirs::home_dir()
-    {
+    if let Some(h) = dirs::home_dir() {
         let home = h.to_string_lossy().into_owned();
         if let Some(rest) = ex.root.strip_prefix(home.trim_end_matches('/'))
             && (rest.is_empty() || rest.starts_with('/'))
@@ -101,15 +99,9 @@ pub fn draw(f: &mut Frame, ex: &ExplorerState) {
 
     // ---- title bar
     let branch = ex.branch().map(|b| format!(" · {b}")).unwrap_or_default();
-    let right = ex.remote.then(|| ex.badge.clone());
-    let reserve = 2 + right.as_ref().map_or(0, |r| width(r) + 1);
     let head = "explorer · ";
-    let room = w.saturating_sub(reserve + width(head) + width(&branch));
-    let mut bar = TitleBar::new(format!("{head}{}{branch}", left_trim(&shown_root(ex), room)));
-    if let Some(r) = right {
-        bar = bar.right(r);
-    }
-    bar.render(Rect::new(0, 0, area.width, 1), buf, &t);
+    let room = w.saturating_sub(2 + width(head) + width(&branch));
+    TitleBar::new(format!("{head}{}{branch}", left_trim(&shown_root(ex), room))).render(Rect::new(0, 0, area.width, 1), buf, &t);
 
     // ---- hint line (or the find prompt)
     let hint_row = Rect::new(0, 1, area.width, 1);

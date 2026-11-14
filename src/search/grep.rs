@@ -1,5 +1,5 @@
 //! Text search in files: build the command (ripgrep, else grep), run it on the workspace, parse
-//! the output into matches grouped by file. Same code locally and over SSH; the command is one
+//! the output into matches grouped by file. The command is one
 //! bounded `sh` script (`cd dir && rg ... | head -n 2001`) and nothing is left running.
 
 use super::list::ListState;

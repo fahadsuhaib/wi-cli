@@ -1,6 +1,6 @@
 //! Per-file git diffs: a small unified-diff parser (pure, tested) and the call that fetches one
-//! file's staged or unstaged diff through the same capped, timed shell path as `git_marks`
-//! (local and remote). Git computes the diff; wi only reads it. Read-only: nothing here writes
+//! file's staged or unstaged diff through the same capped, timed shell path as `git_marks`.
+//! Git computes the diff; wi only reads it. Read-only: nothing here writes
 //! to the repository, and `GIT_OPTIONAL_LOCKS=0` keeps git from touching the index.
 
 use crate::exec::{OUT_CAP, sq};

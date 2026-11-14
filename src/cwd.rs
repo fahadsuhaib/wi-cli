@@ -1,10 +1,10 @@
 //! Working directory of a shell tab, so relative paths in its output resolve to the right file.
-//! Order: what the shell reported itself (OSC 7), then the shell process (local) or the tmux
-//! pane (remote). Looked up only when the user clicks a link.
+//! Order: what the shell reported itself (OSC 7), then the shell process. Looked up only when
+//! the user clicks a link.
 
 use crate::workspace::Backend;
 
-pub async fn tab_cwd(backend: &Backend, osc7: Option<&str>, pid: Option<u32>, tmux_session: Option<&str>) -> Option<String> {
+pub async fn tab_cwd(backend: &Backend, osc7: Option<&str>, pid: Option<u32>) -> Option<String> {
     if let Some(p) = osc7 {
         return Some(p.to_string());
     }
@@ -14,7 +14,6 @@ pub async fn tab_cwd(backend: &Backend, osc7: Option<&str>, pid: Option<u32>, tm
             // lsof (macOS) is a subprocess: keep it off the UI loop.
             tokio::task::spawn_blocking(move || local_cwd(pid)).await.ok().flatten()
         }
-        Backend::Remote(s) => s.tmux_pane_path(tmux_session?).await,
     }
 }
 
@@ -28,21 +27,12 @@ pub enum Activity {
     Unknown,
 }
 
-/// Local decision: the pty's foreground process group is the shell's own when it is idle.
+/// The pty's foreground process group is the shell's own when it is idle.
 pub fn local_idle(foreground: Option<i32>, shell_pid: Option<u32>, running: impl FnOnce(i32) -> Option<String>) -> Activity {
     match (foreground, shell_pid) {
         (Some(fg), Some(pid)) if fg == pid as i32 => Activity::Ready,
         (Some(fg), Some(_)) => Activity::Busy(running(fg).unwrap_or_else(|| "a program".into())),
         _ => Activity::Unknown,
-    }
-}
-
-/// tmux decision: the pane's foreground command is a shell.
-pub fn tmux_idle(command: Option<&str>) -> Activity {
-    match command {
-        Some(c) if crate::session::is_shell_name(c) => Activity::Ready,
-        Some(c) => Activity::Busy(c.trim().to_string()),
-        None => Activity::Unknown,
     }
 }
 
@@ -53,15 +43,11 @@ fn process_name(pgid: i32) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Whether a shell tab is idle at its prompt. Remote shells without tmux cannot be told apart.
-pub async fn tab_idle(backend: &Backend, handle: Option<&crate::workspace::ShellHandle>, tmux_session: Option<&str>) -> Activity {
+/// Whether a shell tab is idle at its prompt.
+pub async fn tab_idle(backend: &Backend, handle: Option<&crate::workspace::ShellHandle>) -> Activity {
     match backend {
         Backend::Local(_) => match handle {
             Some(h) => local_idle(h.foreground().await, h.pid(), process_name),
-            None => Activity::Unknown,
-        },
-        Backend::Remote(s) => match tmux_session {
-            Some(name) => tmux_idle(s.tmux_pane_command(name).await.as_deref()),
             None => Activity::Unknown,
         },
     }
@@ -111,20 +97,9 @@ mod tests {
         assert_eq!(local_idle(Some(100), None, |_| None), Activity::Unknown);
     }
 
-    #[test]
-    fn tmux_idle_decision() {
-        for sh in ["bash", "zsh", "sh", "dash", "fish", "ksh", "-bash"] {
-            assert_eq!(tmux_idle(Some(sh)), Activity::Ready, "{sh}");
-        }
-        assert_eq!(tmux_idle(Some("node")), Activity::Busy("node".into()));
-        assert_eq!(tmux_idle(Some("claude\n")), Activity::Busy("claude".into()));
-        assert_eq!(tmux_idle(Some("sleep")), Activity::Busy("sleep".into()));
-        assert_eq!(tmux_idle(None), Activity::Unknown);
-    }
-
     #[tokio::test]
     async fn osc7_wins() {
         let b = Backend::Local(std::path::PathBuf::from("/tmp"));
-        assert_eq!(tab_cwd(&b, Some("/a/b"), Some(std::process::id()), None).await.as_deref(), Some("/a/b"));
+        assert_eq!(tab_cwd(&b, Some("/a/b"), Some(std::process::id())).await.as_deref(), Some("/a/b"));
     }
 }
