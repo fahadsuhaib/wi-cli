@@ -26,9 +26,9 @@ def check(name, cond):
 class Run:
     def __init__(self, extra="", reply=False, keep_state=False):
         cfg = CFGDIR + "/config.toml"
-        open(cfg, "w").write(open(S + "/test.toml").read() + f'\n[defaults]\nagent_start = "always"\n{extra}\n[agents.claude]\ncommand = "{KE}"\n')
+        open(cfg, "w").write(f'\n[defaults]\nagent_start = "always"\n{extra}\n[agents.claude]\ncommand = "{KE}"\n')
         if not keep_state and os.path.exists(CFGDIR + "/state.toml"): os.remove(CFGDIR + "/state.toml")
-        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_TMUX_SOCKET="newlinetest")
+        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(WS); os.execve(WI, ["wi"], env)

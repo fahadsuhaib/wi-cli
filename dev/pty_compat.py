@@ -1,8 +1,8 @@
-# usage: python dev/pty_compat.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_compat.py <scratch-dir> local   (needs pyte)
 import os, pty, sys, time, select, struct, fcntl, termios, pyte
 S, mode = sys.argv[1], sys.argv[2]
 MENU = b"\x00"  # Ctrl-Space
-env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color")
+env = dict(os.environ, WICLI_CONFIG=S + "/none.toml", TERM="xterm-256color")
 # A plain shell: many default prompts (Ubuntu's .bashrc, zsh themes) rewrite the terminal title after
 # every command, which would hide the titles this test sets.
 os.makedirs(S + "/home_plain", exist_ok=True)

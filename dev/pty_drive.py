@@ -1,7 +1,7 @@
 import os, pty, sys, time, select, struct, fcntl, termios, pyte
-# usage: python dev/pty_drive.py <scratch-dir-with-test.toml> local|remote   (needs: pip install pyte)
+# usage: python dev/pty_drive.py <scratch-dir> local   (needs: pip install pyte)
 S, mode = sys.argv[1], sys.argv[2]
-env=dict(os.environ, WICLI_CONFIG=S+"/test.toml", TERM="xterm-256color")
+env=dict(os.environ, WICLI_CONFIG=S+"/none.toml", TERM="xterm-256color")
 args=["wi"] if mode=="local" else ["wi","test"]
 pid, fd = pty.fork()
 if pid==0:

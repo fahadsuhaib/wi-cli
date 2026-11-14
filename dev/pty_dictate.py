@@ -1,4 +1,4 @@
-# usage: python dev/pty_dictate.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_dictate.py <scratch-dir> local   (needs pyte)
 # Hands-free dictation with a FAKE engine (no microphone, no model): a script that speaks the
 # `wi-audio listen` event lines from a scenario file and waits on marker files, so every phrase
 # arrives exactly when the test says. Checks: the menu entry and the status indicator, N phrases
@@ -107,7 +107,7 @@ class Run:
             os.makedirs(self.wibin); wi = self.wibin + "/wi"; shutil.copy(WI, wi)
             cmd = "wi-audio"
         cfg = CFGDIR + "/config.toml"
-        open(cfg, "w").write(open(S + "/test.toml").read() + '\n[defaults]\nagent_start = "never"\n')
+        open(cfg, "w").write('\n[defaults]\nagent_start = "never"\n')
         self.state = CFGDIR + "/state.toml"
         if os.path.exists(self.state): os.remove(self.state)
         st = ("voice_mic_ok = true\n" if mic_ok else "") + ("voice_declined = [%s]\n" % ", ".join('"%s"' % d for d in declined) if declined else "")
@@ -115,7 +115,7 @@ class Run:
         elif auto_send: st += "voice_auto_send = true\n"
         else: st += "voice_auto_send = false\n"
         if st: open(self.state, "w").write(st)
-        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_TMUX_SOCKET="dictatetest",
+        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color",
                    FAKE_SCENARIO=CFGDIR + "/scenario.json", FAKE_PIDFILE=self.pidfile, FAKE_ARGS=self.argsfile, FAKE_MODEL_FLAG=self.flag,
                    WICLI_VOICE_BIN=self.vbin, WICLI_DICTATION_LOG=CFGDIR + "/dictation_default.log", PATH="/usr/bin:/bin")
         if not missing: env["WICLI_VOICE_COMMAND"] = cmd

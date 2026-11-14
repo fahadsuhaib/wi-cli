@@ -1,31 +1,22 @@
-# usage: python dev/pty_search.py <scratch-dir> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_search.py <scratch-dir> local   (needs pyte)
 # Search: text in files (rg or the grep fallback), fuzzy find file, find in shell output, find in a
 # preview. Runs the whole thing twice when the tool allows: once normally and once with
-# WICLI_NO_RG=1 (forces the grep fallback). Local mode uses a throwaway git repo under the scratch
-# dir (the macOS box has no rg, so it exercises grep; Linux with rg exercises both). Remote mode
-# builds ~/srchtest/repo on the test box, opens a tab in it, and removes it and its own tmux server
-# (socket searchtest) afterwards. Install ripgrep there for the rg pass:
-#   docker exec -u root devbox-test apt-get install -y ripgrep
+# WICLI_NO_RG=1 (forces the grep fallback). Uses a throwaway git repo under the scratch dir
+# (a macOS machine without rg exercises grep; Linux with rg exercises both).
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, pyte
 S, mode = os.path.realpath(sys.argv[1]), sys.argv[2]
-remote = mode == "remote"
 MENU = b"\x00"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
 COLS, ROWS = 120, 30
-X = "/home/dev/srchtest" if remote else S + "/srchtest"
+X = S + "/srchtest"
 R = X + "/repo"
 CFG = S + "/search_" + mode + ".toml"
-open(CFG, "w").write(open(S + "/test.toml").read())
+open(CFG, "w").write("")
 
 def sh(script):
-    if remote:
-        return subprocess.run(["docker", "exec", "-u", "dev", "devbox-test", "bash", "-c", script], capture_output=True, text=True)
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
-def box_has_rg():
-    if remote:
-        return sh("command -v rg").returncode == 0
+def has_rg():
     return shutil.which("rg") is not None
 
 FIXTURE = r'''
@@ -66,15 +57,15 @@ def check(name, cond):
 
 class Run:
     def __init__(self, extra_env=None):
-        env = dict(os.environ, WICLI_CONFIG=CFG, TERM="xterm-256color", COLORTERM="truecolor", WICLI_TMUX_SOCKET="searchtest", **(extra_env or {}))
+        env = dict(os.environ, WICLI_CONFIG=CFG, TERM="xterm-256color", COLORTERM="truecolor", **(extra_env or {}))
         env.pop("COLORFGBG", None)   # the dark theme is used, whatever the host terminal says
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.chdir(R if not remote else "/")
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(R)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         self.scr = pyte.Screen(COLS, ROWS); self.st = pyte.ByteStream(self.scr)
-        self.pump(3.5 if remote else 2.2)
+        self.pump(2.2)
     def pump(self, t, until=None):
         end = time.time() + t
         while time.time() < end:
@@ -109,7 +100,7 @@ class Run:
         self.pump(0.6)
     def bg(self, x, y): return self.scr.buffer[y][x].bg
     def quit(self):
-        self.send(MENU + (b"e" if remote else b"q"), 1.5)
+        self.send(MENU + b"q", 1.5)
 
 LIT = ("f2cc60",)   # matches: the dark theme's hint colour
 CUR = ("8fdc7f",)   # the current match: the dark theme's diff-add colour
@@ -130,13 +121,9 @@ def search(r, query, opts=b"", t=12.0):
     return r.wait(r"(\d[\d,]* match(es)? in \d+ files?|no matches|search failed)", t)
 
 def run_pass(norg):
-    tag = "[grep fallback] " if norg else ("[rg] " if box_has_rg() else "[grep] ")
+    tag = "[grep fallback] " if norg else ("[rg] " if has_rg() else "[grep] ")
     r = Run({"WICLI_NO_RG": "1"} if norg else None)
-    tool = "grep" if (norg or not box_has_rg()) else "rg"
-    if remote:
-        r.send(MENU + b"f", 0.6)
-        r.send(b"\x15" + R.encode() + b"\r", 2.5)
-        check(tag + "remote: new tab opened in the repo folder", r.find(r"repo") is not None)
+    tool = "grep" if (norg or not has_rg()) else "rg"
 
     # ---- search in files: prompt, chips, results
     r.send(MENU + b"l", 0.6)
@@ -279,7 +266,7 @@ def run_pass(norg):
     r.send(b'clear; for i in $(seq 1 300); do echo "OUTLINE_$i"; done\n', 2.0)
     r.send(MENU + b"u", 0.5)
     check(tag + "Find in output prompts", "find in output:" in r.text())
-    r.send((b"OUTLINE_2" if remote else b"OUTLINE_1") + b"\r", 0.8)   # under tmux only the screen is searchable (lines 2xx)
+    r.send(b"OUTLINE_1\r", 0.8)
     st = r.status()
     m = re.search(r"match 1 of (\d+)", st)
     total = int(m.group(1)) if m else 0
@@ -293,18 +280,14 @@ def run_pass(norg):
     r.send(b"\x1b", 0.6)
     check(tag + "Esc leaves find mode", "match 1 of" not in r.status() and "N older" not in r.status())
     r.send(MENU + b"u", 0.5)
-    early = "OUTLINE_42" if not remote else "OUTLINE_29"
+    early = "OUTLINE_42"
     r.send(early.encode() + b"\r", 0.8)
     check(tag + "a number printed early is found (%s)" % early, re.search(r"match \d+ of \d+", r.status()) is not None)
-    if remote:
-        check(tag + "the matches on screen are highlighted", any(r.bg(x, y) in LIT + CUR for y in range(1, 29) for x in range(COLS)))
-    else:
-        pos = r.find(early + r"(?!\d)")
-        check(tag + "the view scrolled back to it and it is highlighted", pos is not None and r.bg(pos[0] + 2, pos[1]) in LIT + CUR)
-    if not remote:
-        check(tag + "the match is far above the live screen", re.search(r"OUTLINE_300", r.text()) is None)
+    pos = r.find(early + r"(?!\d)")
+    check(tag + "the view scrolled back to it and it is highlighted", pos is not None and r.bg(pos[0] + 2, pos[1]) in LIT + CUR)
+    check(tag + "the match is far above the live screen", re.search(r"OUTLINE_300", r.text()) is None)
     r.send(b"\x1b", 0.6)
-    check(tag + "back at the live view", "OUTLINE_300" in r.text() or "OUTLINE_299" in r.text() or remote)
+    check(tag + "back at the live view", "OUTLINE_300" in r.text() or "OUTLINE_299" in r.text())
     r.send(MENU + b"u", 0.5)
     r.send(b"nothing_like_this\r", 0.6)
     check(tag + "no match in output is reported", "no match" in r.status() or "no match" in r.text())
@@ -333,15 +316,13 @@ def run_pass(norg):
 
 try:
     shutil.rmtree(X, ignore_errors=True)
-    if remote:
-        sh(f"rm -rf {X}")
     r_ = sh(FIXTURE)
     if r_.returncode != 0:
         print("FAIL fixture:", r_.stderr); sys.exit(1)
     run_pass(False)
-    if box_has_rg():
+    if has_rg():
         run_pass(True)
 finally:
-    sh(f"rm -rf {X}; command -v tmux >/dev/null && tmux -L searchtest kill-server 2>/dev/null; true")
+    shutil.rmtree(X, ignore_errors=True)
 print("FAILED: %d" % len(fails) if fails else "ALL PASS")
 sys.exit(1 if fails else 0)

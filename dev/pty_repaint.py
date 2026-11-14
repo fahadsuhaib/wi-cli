@@ -1,9 +1,9 @@
-# usage: python dev/pty_repaint.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_repaint.py <scratch-dir> local   (needs pyte)
 # After a pause in input the next key repaints the whole screen once (a terminal may have
 # discarded the screen while its tab was hidden); fast typing never does.
 import os, pty, sys, time, select, struct, fcntl, termios, pyte
 S = sys.argv[1]
-env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color", COLORTERM="truecolor")
+env = dict(os.environ, WICLI_CONFIG=S + "/none.toml", TERM="xterm-256color", COLORTERM="truecolor")
 env.pop("COLORFGBG", None)
 os.makedirs(S + "/ws", exist_ok=True)
 pid, fd = pty.fork()

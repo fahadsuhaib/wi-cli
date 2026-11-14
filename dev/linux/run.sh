@@ -12,15 +12,6 @@ docker run --rm -e LANG="$LANGV" -e EXTRA="$EXTRA" -v "$ROOT":/src:ro -v wicli-l
 rsync -a --delete --exclude target --exclude .git --exclude .worktrees /src/ /work/
 cd /work && ln -sfn /cache/target target   # pty scripts look for ../target/debug/wi
 S=/tmp/scratch; mkdir -p $S/ws
-cat > $S/test.toml <<T
-[[box]]
-name = "test"
-host = "127.0.0.1"
-port = 2222
-user = "dev"
-identity = "/work/dev/id_test"
-known_hosts = "$S/known_hosts"
-T
 results=(); failed=0
 step() { local name="$1"; shift; echo "=== $name"
   if "$@"; then results+=("PASS $name"); else results+=("FAIL $name"); failed=1; fi; }

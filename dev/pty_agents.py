@@ -1,4 +1,4 @@
-# usage: python dev/pty_agents.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_agents.py <scratch-dir> local   (needs pyte)
 # Uses fake agent commands (echo) so no real agent is started.
 import os, pty, sys, time, select, struct, fcntl, termios, shutil, pyte
 S = sys.argv[1]

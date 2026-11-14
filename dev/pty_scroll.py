@@ -1,4 +1,4 @@
-# usage: python dev/pty_scroll.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_scroll.py <scratch-dir> local   (needs pyte)
 # Checks that typing and pasting while scrolled back go to the tab (view jumps to the live
 # bottom), and that scroll mode never gets stuck (no history, program on the alternate screen).
 import os, pty, sys, time, select, struct, fcntl, termios, pyte
@@ -6,7 +6,7 @@ S, mode = sys.argv[1], sys.argv[2]
 MENU = b"\x00"
 PS, PE = b"\x1b[200~", b"\x1b[201~"
 WHEEL_UP, WHEEL_DN = b"\x1b[<64;10;10M", b"\x1b[<65;10;10M"
-env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color")
+env = dict(os.environ, WICLI_CONFIG=S + "/none.toml", TERM="xterm-256color")
 pid, fd = pty.fork()
 if pid == 0:
     os.makedirs(S + "/ws", exist_ok=True); os.chdir(S + "/ws")

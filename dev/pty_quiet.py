@@ -1,4 +1,4 @@
-# usage: python dev/pty_quiet.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_quiet.py <scratch-dir> local   (needs pyte)
 # Background tab markers: `*` while a background tab prints, `!` once it goes quiet.
 import os, pty, sys, time, select, struct, fcntl, termios, re, pyte
 S = sys.argv[1]

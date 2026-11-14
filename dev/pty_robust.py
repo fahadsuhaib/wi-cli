@@ -1,4 +1,4 @@
-# usage: python dev/pty_robust.py <scratch-dir-with-test.toml>   (needs pyte)
+# usage: python dev/pty_robust.py <scratch-dir>   (needs pyte)
 import os, pty, sys, time, select, struct, fcntl, termios, signal, subprocess, pyte
 S = sys.argv[1]
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
@@ -9,7 +9,7 @@ def check(name, cond):
     if not cond: fails.append(name)
 
 def spawn(args, cfg=None, cwd=None):
-    env = dict(os.environ, WICLI_CONFIG=cfg or S + "/test.toml", TERM="xterm-256color")
+    env = dict(os.environ, WICLI_CONFIG=cfg or S + "/none.toml", TERM="xterm-256color")
     pid, fd = pty.fork()
     if pid == 0:
         os.makedirs(S + "/ws", exist_ok=True); os.chdir(cwd or S + "/ws")
@@ -67,17 +67,15 @@ for name, sig in (("SIGTERM", signal.SIGTERM), ("SIGHUP", signal.SIGHUP)):
     check(f"{name}: output ends with leave-alt-screen", bytes(acc).rstrip().endswith(LEAVE))
     check(f"{name}: shell child gone", bool(kids) and all(pgone(k) for k in kids))
 
-# (c) unreachable box
-cfg = S + "/bad.toml"
-open(cfg, "w").write('[[box]]\nname="bad"\nhost="127.0.0.1"\nport=1\nuser="dev"\nidentity="%s/../dev/id_test"\n' % os.path.dirname(os.path.abspath(__file__)))
-pid, fd = spawn(["bad"], cfg); acc = bytearray()
+# (c) a folder that does not exist
+pid, fd = spawn([S + "/no/such/folder"]); acc = bytearray()
 st = wait_exit(pid, fd, acc, 15)
 out = bytes(acc).decode(errors="replace")
 lines = [l for l in out.replace("\r", "").split("\n") if l.strip()]
 print("   output:", lines)
-check("bad box: exit status 1", st not in ("timeout", None) and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 1)
-check("bad box: single wi: line", len(lines) == 1 and lines[0].startswith("wi: "))
-check("bad box: no alt screen", ENTER not in acc and LEAVE not in acc)
+check("bad folder: exit status 1", st not in ("timeout", None) and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 1)
+check("bad folder: single wi: line", len(lines) == 1 and lines[0].startswith("wi: "))
+check("bad folder: no alt screen", ENTER not in acc and LEAVE not in acc)
 
 # (d) invalid prefix_key
 cfg = S + "/badkey.toml"

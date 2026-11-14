@@ -1,10 +1,10 @@
-# usage: python dev/pty_select.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_select.py <scratch-dir> local   (needs pyte)
 # Selection and copy. WICLI_CLIPBOARD=file:... keeps the tests off the real clipboard.
 import os, pty, sys, time, select, struct, fcntl, termios, pyte
 S = sys.argv[1]
 MENU = b"\x00"
 clipfile = S + "/clip.txt"
-env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color", WICLI_CLIPBOARD="file:" + clipfile)
+env = dict(os.environ, WICLI_CONFIG=S + "/none.toml", TERM="xterm-256color", WICLI_CLIPBOARD="file:" + clipfile)
 os.makedirs(S + "/ws/pv", exist_ok=True)
 open(S + "/ws/pv/live.txt", "w").write("first line\nsecond line\n")
 pid, fd = pty.fork()

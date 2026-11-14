@@ -1,15 +1,13 @@
-# usage: python dev/pty_markdown.py <scratch-dir> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_markdown.py <scratch-dir> local   (needs pyte)
 # Rendered markdown preview through a real pty: theme colours, lists/quotes/code/tables laid out for the
 # pane width, the M source toggle, re-layout on resize, find and mouse copy. Dark and light themes.
-import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, signal, pyte
+import os, pty, sys, time, select, struct, fcntl, termios, shutil, re, signal, pyte
 S, mode = sys.argv[1], sys.argv[2]
-remote = mode == "remote"
 MENU = b"\x00"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
 W = S + "/mdws"
 clipfile = S + "/md_clip.txt"
-BOXCFG = open(S + "/test.toml").read()
+BASE = ""
 
 SAMPLE = """---
 title: Demo
@@ -52,17 +50,14 @@ fn main() { println!("hi"); }
 """
 
 def sh_write():
-    if remote:
-        subprocess.run(["docker", "exec", "-i", "-u", "dev", "-w", "/home/dev", "devbox-test", "bash", "-c", "rm -rf md; mkdir -p md && cat > md/rich.md"], input=SAMPLE.encode(), check=True)
-    else:
-        os.makedirs(W + "/md", exist_ok=True)
-        open(W + "/md/rich.md", "w").write(SAMPLE)
+    os.makedirs(W + "/md", exist_ok=True)
+    open(W + "/md/rich.md", "w").write(SAMPLE)
 shutil.rmtree(W, ignore_errors=True); os.makedirs(W)
 sh_write()
 
 def config(theme, side):
     path = f"{S}/md_{theme}_{side}.toml"
-    open(path, "w").write(BOXCFG + f'\n[defaults]\ntheme = "{theme}"\npreview_side = "{side}"\n')
+    open(path, "w").write(BASE + f'\n[defaults]\ntheme = "{theme}"\npreview_side = "{side}"\n')
     return path
 
 fails = []
@@ -77,11 +72,11 @@ class Run:
         env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", COLORTERM="truecolor", WICLI_CLIPBOARD="file:" + clipfile)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            if not remote: os.chdir(W)
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(W)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.scr = pyte.Screen(cols, rows); self.st = pyte.ByteStream(self.scr)
-        self.pump(3.2 if remote else 2.2)
+        self.pump(2.2)
     def pump(self, t, until=None):
         end = time.time() + t
         while time.time() < end:
@@ -120,7 +115,7 @@ class Run:
     def open_md(self):
         self.send(MENU + b"p", 0.5); self.send(b"md/rich.md\r", 1.5)
     def quit(self):
-        self.send(MENU + (b"e" if remote else b"q"), 1.5)
+        self.send(MENU + b"q", 1.5)
 
 def block(rows, start, end):
     """Rows from the first one matching `start` up to (not including) the first later one matching `end`."""

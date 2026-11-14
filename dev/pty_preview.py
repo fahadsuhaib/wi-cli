@@ -1,11 +1,9 @@
-# usage: python dev/pty_preview.py <scratch-dir-with-test.toml> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_preview.py <scratch-dir> local   (needs pyte)
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, re, pyte
 S, mode = sys.argv[1], sys.argv[2]
 MENU = b"\x00"
-env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color")
-remote = mode == "remote"
-rel = "pv"   # directory holding the fixtures, relative to the workspace root / login dir
+env = dict(os.environ, WICLI_CONFIG=S + "/none.toml", TERM="xterm-256color")
+rel = "pv"   # directory holding the fixtures, relative to the workspace root
 
 def make_fixtures():
     script = r'''
@@ -21,18 +19,14 @@ if [ ! -f huge.csv ] || [ $(wc -c < huge.csv) -lt 500000000 ]; then
   (echo "id,name,value"; yes "12345,abcdefgh,3.14159" ) | head -c 500000000 > huge.csv
 fi
 '''
-    if remote:
-        subprocess.run(["docker", "exec", "-u", "dev", "-w", "/home/dev", "devbox-test", "bash", "-c", script], check=True)
-    else:
-        os.makedirs(S + "/ws", exist_ok=True)
-        subprocess.run(["bash", "-c", script], check=True, cwd=S + "/ws")
+    os.makedirs(S + "/ws", exist_ok=True)
+    subprocess.run(["bash", "-c", script], check=True, cwd=S + "/ws")
 make_fixtures()
 
-args = ["wi", "test"] if remote else ["wi"]
 pid, fd = pty.fork()
 if pid == 0:
-    if not remote: os.chdir(S + "/ws")
-    os.execve(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi"), args, env)
+    os.chdir(S + "/ws")
+    os.execve(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi"), ["wi"], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
 scr = pyte.Screen(100, 30); st = pyte.ByteStream(scr)
 def pump(t, until=None):
@@ -96,10 +90,7 @@ os.write(fd, b"\x1b"); pump(0.4)
 # reload picks up changes
 open_file(f"{rel}/live.txt")
 check("text shows line numbers", "1  first line" in text())
-if remote:
-    subprocess.run(["docker", "exec", "-u", "dev", "-w", "/home/dev/pv", "devbox-test", "bash", "-c", "echo third line >> live.txt"], check=True)
-else:
-    open(S + "/ws/pv/live.txt", "a").write("third line\n")
+open(S + "/ws/pv/live.txt", "a").write("third line\n")
 os.write(fd, b"r"); pump(1.0)
 check("R reloads the file", "third line" in text())
 os.write(fd, b"\x1b"); pump(0.4)
@@ -114,7 +105,7 @@ check(f"500 MB CSV opens in under 1 s ({dt:.2f}s)", ok and dt < 1.0)
 check("csv banner says 200 of ~N rows", re.search(r"200 of ~[\d,]+ rows", text()) is not None)
 os.write(fd, b"\x1b"); pump(0.3)
 
-os.write(fd, MENU + (b"e" if mode == "remote" else b"q")); pump(1.5)  # remote: End sessions and quit, so no tmux session leaks into the next test
+os.write(fd, MENU + b"q"); pump(1.5)
 p, _ = os.waitpid(pid, os.WNOHANG)
 check("quit exits", p != 0)
 sys.exit(1 if fails else 0)

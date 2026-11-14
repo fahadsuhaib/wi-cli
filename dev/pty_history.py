@@ -1,11 +1,8 @@
-# usage: python dev/pty_history.py <scratch-dir-with-test.toml> local|remote   (needs pyte)
-# remote: no (the history logic is the same on both; remote opens go through the same preview path)
+# usage: python dev/pty_history.py <scratch-dir> local   (needs pyte)
 # Recent files: H in a preview, the "Recent files" menu item, persistence across a restart, the full
 # path in the preview header, and a deleted file in the list.
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, pyte
 S, mode = sys.argv[1], sys.argv[2]
-if mode == "remote":
-    print("SKIP remote (local only)"); sys.exit(0)
 MENU = b"\x00"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
 W = S + "/hws"
@@ -16,7 +13,7 @@ for n in "abc":
     open(f"{W}/hist/{n}.txt", "w").write(f"CONTENT_OF_{n.upper()}\n")
 open(CFG + "/config.toml", "w").write("")
 env0 = {k: v for k, v in os.environ.items() if k != "COLORFGBG"}
-env0.update(WICLI_CONFIG=CFG + "/config.toml", TERM="xterm-256color", WICLI_TMUX_SOCKET=os.environ.get("WICLI_TMUX_SOCKET", "histtest"))
+env0.update(WICLI_CONFIG=CFG + "/config.toml", TERM="xterm-256color")
 
 fails = []
 def check(name, cond):

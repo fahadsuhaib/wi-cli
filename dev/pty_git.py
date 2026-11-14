@@ -1,22 +1,14 @@
-# usage: python dev/pty_git.py <scratch-dir> local|remote   (needs pyte)
-# remote: yes
-# Remote mode turns the box's home directory (the login directory) into a throwaway git repo for
-# the test and removes it again afterwards.
+# usage: python dev/pty_git.py <scratch-dir> local   (needs pyte)
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, pyte
 S, mode = sys.argv[1], sys.argv[2]
 MENU = b"\x00"  # Ctrl-Space
-remote = mode == "remote"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
-G = S + "/gitfix"          # local fixtures live here, never in the repo
+G = S + "/gitfix"          # fixtures live here, never in the repo
 REPO, NOGIT = G + "/repo", G + "/nogit"
 
 def sh(script, cwd=None):
-    if remote:
-        subprocess.run(["docker", "exec", "-u", "dev", "-w", "/home/dev", "devbox-test", "bash", "-c", script], check=True)
-    else:
-        subprocess.run(["bash", "-c", script], check=True, cwd=cwd or REPO)
+    subprocess.run(["bash", "-c", script], check=True, cwd=cwd or REPO)
 
-CLEAN = "rm -rf .git a.txt b.txt c.txt"
 FIXTURE = r'''
 set -e
 rm -rf .git a.txt b.txt c.txt
@@ -46,11 +38,11 @@ def is_col(c, name): return c.fg == HEX[name]
 class Session:
     def __init__(self, cwd, env_extra=None):
         env = {k: v for k, v in os.environ.items() if k != "COLORFGBG"}
-        env.update(WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color", COLORTERM="truecolor", **(env_extra or {}))
+        env.update(WICLI_CONFIG=S + "/none.toml", TERM="xterm-256color", COLORTERM="truecolor", **(env_extra or {}))
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            if not remote: os.chdir(cwd)
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(cwd)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
         self.scr = pyte.Screen(100, 30); self.st = pyte.ByteStream(self.scr)
         self.pump(3.0)
@@ -78,7 +70,6 @@ class Session:
         except ChildProcessError: pass
 
 # ---- not a repo: status-bar message, no tab, no branch in the header
-if remote: sh("rm -rf .git")
 s = Session(NOGIT)
 check("no branch in header outside a repo", "(" not in s.scr.display[0])
 s.send(MENU + b"g", 1.5)
@@ -88,11 +79,10 @@ check("non-repo: no tab opened (no tab strip)", "1 shell" not in s.scr.display[1
 check("non-repo: no diff view", "Branch" not in s.text())
 s.quit()
 
-if not remote:
-    s = Session(NOGIT, {"PATH": "/nonexistent"})
-    s.send(MENU + b"g", 1.5)
-    check("git missing: status bar says so", "not installed" in s.scr.display[-1])
-    s.quit()
+s = Session(NOGIT, {"PATH": "/nonexistent"})
+s.send(MENU + b"g", 1.5)
+check("git missing: status bar says so", "not installed" in s.scr.display[-1])
+s.quit()
 
 # ---- a repo with a modified, a staged and an untracked file
 sh(FIXTURE)
@@ -143,5 +133,4 @@ check("menu Git again reuses the one git tab", s.scr.display[1].count("git") == 
 s.send(b"\x1b", 0.4)
 s.quit()
 
-if remote: sh(CLEAN)
 sys.exit(1 if fails else 0)

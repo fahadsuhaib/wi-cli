@@ -1,34 +1,28 @@
-# usage: python dev/pty_tabdir.py <scratch-dir> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_tabdir.py <scratch-dir> local   (needs pyte)
 # Per-tab base folders: new tab in a folder, recent folders, folder completion, change folder
 # (only at an idle prompt), labels, header, git per folder, agent choice per folder.
-# Uses fake agent commands (echo) so no real agent is started. Remote mode builds its fixtures
-# under /home/dev/tabdir-test on the box and removes them (and its own tmux server, socket tabdirtest) afterwards.
+# Uses fake agent commands (echo) so no real agent is started.
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, pyte
 S, mode = sys.argv[1], sys.argv[2]
-remote = mode == "remote"
 MENU = b"\x00"  # Ctrl-Space
 S = os.path.realpath(S)
-COLS, ROWS = (240 if remote else 150), 30  # remote labels carry the hostname title, so many tabs need width
-SLOW = 1.8 if remote else 1.0
+COLS, ROWS = 150, 30
+SLOW = 1.0
 CFGDIR = S + "/tabdir_cfg_" + mode
 STATE = CFGDIR + "/state.toml"
 shutil.rmtree(CFGDIR, ignore_errors=True); os.makedirs(CFGDIR)
-base_cfg = open(S + "/test.toml").read()
+base_cfg = ""
 open(CFGDIR + "/config.toml", "w").write(base_cfg + '\n[agents.claude]\ncommand = "echo FAKE_CLAUDE_STARTED"\n')
-X = "/home/dev/tabdir-test" if remote else S + "/tabdir"
-START = "/home/dev" if remote else X + "/ws"
+X = S + "/tabdir"
+START = X + "/ws"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
-# Own tmux server on the box, so this test can run next to other remote tests.
-env = dict(os.environ, WICLI_CONFIG=CFGDIR + "/config.toml", TERM="xterm-256color", WICLI_TMUX_SOCKET="tabdirtest")
+env = dict(os.environ, WICLI_CONFIG=CFGDIR + "/config.toml", TERM="xterm-256color")
 # A plain shell with an empty home: default prompts (Ubuntu's .bashrc, zsh themes) change the title
 # and can be slow to start, which these checks do not want.
 os.makedirs(CFGDIR + "/home_plain", exist_ok=True)
 env.update(SHELL="/bin/bash", HOME=CFGDIR + "/home_plain")
 
 def sh(script, check=True):
-    if remote:
-        return subprocess.run(["docker", "exec", "-u", "dev", "devbox-test", "bash", "-c", script], capture_output=True, text=True)
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
 FIXTURE = f'''
@@ -52,8 +46,8 @@ if r.returncode != 0:
 
 pid, fd = pty.fork()
 if pid == 0:
-    os.chdir(START if not remote else "/")
-    os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+    os.chdir(START)
+    os.execve(WI, ["wi"], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 scr = pyte.Screen(COLS, ROWS); st = pyte.ByteStream(scr)
 
@@ -76,10 +70,7 @@ def send(b, t=0.8):
 def type_path(p, t=0.5): send(b"\x15" + p.encode(), t)
 
 def cleanup():
-    if remote:
-        sh(f"rm -rf '{X}'; tmux -L tabdirtest kill-server 2>/dev/null; true")
-    else:
-        shutil.rmtree(X, ignore_errors=True)
+    shutil.rmtree(X, ignore_errors=True)
     sh("pkill -x -f 'sleep 31'; true")
     shutil.rmtree(CFGDIR, ignore_errors=True)
 
@@ -229,7 +220,7 @@ t = text()
 check("remembered folder starts the agent without asking", "start an agent" not in t.lower() and "FAKE_CLAUDE_STARTED" in t)
 
 # quit
-send(MENU + (b"e" if remote else b"q"), 1.5)
+send(MENU + b"q", 1.5)
 try:
     p, _ = os.waitpid(pid, os.WNOHANG)
 except ChildProcessError:

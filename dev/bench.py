@@ -1,8 +1,7 @@
-# usage: python dev/bench.py <scratch-dir-with-test.toml> [--remote]
+# usage: python dev/bench.py <scratch-dir>
 # Measures wi's own RSS/CPU (ps on the wi pid only; child shells are separate processes).
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, re
 S = sys.argv[1]
-REMOTE = "--remote" in sys.argv
 HERE = os.path.dirname(os.path.abspath(__file__))
 WI = os.path.join(HERE, "..", "target/release/wi")
 MENU = b"\x00"
@@ -26,14 +25,12 @@ def cputime(pid):  # [dd-][hh:]mm:ss.ss -> seconds
     return s + d * 86400
 
 class Run:
-    def __init__(self, remote):
-        env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color")
-        args = ["wi", "test"] if remote else ["wi"]
+    def __init__(self):
+        env = dict(os.environ, WICLI_CONFIG=S + "/none.toml", TERM="xterm-256color")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            if not remote:
-                os.makedirs(S + "/ws", exist_ok=True); os.chdir(S + "/ws")
-            os.execve(WI, args, env)
+            os.makedirs(S + "/ws", exist_ok=True); os.chdir(S + "/ws")
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 90, 0, 0))
         self.tail = b""
     def pump(self, t, stop=None, sample=None, bursts=None):
@@ -54,12 +51,12 @@ class Run:
         try: os.kill(self.pid, 9); os.waitpid(self.pid, 0)
         except Exception: pass
 
-def scenario(remote):
+def scenario():
     res = {}
-    r = Run(remote)
-    r.pump(3.0 if remote else 2.0)
+    r = Run()
+    r.pump(2.0)
     for _ in range(9):
-        os.write(r.fd, MENU + b"n"); r.pump(0.8 if remote else 0.4)
+        os.write(r.fd, MENU + b"n"); r.pump(0.4)
     r.pump(2.0)
     # (a) idle, 10 tabs
     c0, t0 = cputime(r.pid), time.time()
@@ -91,10 +88,9 @@ def row(name, val, budget, unit):
     fail |= not ok
     rows.append((name, f"{val:.2f} {unit}", f"< {budget:g} {unit} (+20%)", "PASS" if ok else "FAIL"))
 
-for remote in ([False, True] if REMOTE else [False]):
-    tag = "remote" if remote else "local"
+for tag in ["local"]:
     try:
-        res = scenario(remote)
+        res = scenario()
     except Exception as e:
         print(f"{tag}: scenario error {e!r}"); fail = True; continue
     if not res["ok"]:

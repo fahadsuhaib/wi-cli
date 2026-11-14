@@ -1,22 +1,16 @@
-# usage: python dev/pty_split.py <scratch-dir> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_split.py <scratch-dir> local   (needs pyte)
 # Side-by-side preview pane in a 120x30 terminal. WICLI_CLIPBOARD=file:... keeps the tests off the
-# real clipboard. Remote mode uses ~ on the test box (files under split/, and a throwaway git repo in
-# the home directory for the Git view, removed again at the end).
+# real clipboard.
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, pyte
 S, mode = sys.argv[1], sys.argv[2]
-remote = mode == "remote"
 MENU = b"\x00"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
 W = S + "/sws"
 clipfile = S + "/split_clip.txt"
-BOXCFG = open(S + "/test.toml").read()
+BASECFG = ""
 
 def sh(script):
-    if remote:
-        subprocess.run(["docker", "exec", "-u", "dev", "-w", "/home/dev", "devbox-test", "bash", "-c", script], check=True)
-    else:
-        subprocess.run(["bash", "-c", script], check=True, cwd=W)
+    subprocess.run(["bash", "-c", script], check=True, cwd=W)
 
 FILES = r'''
 set -e
@@ -42,7 +36,7 @@ def config(side=None, pct=None):
     if side or pct:
         extra = "\n[defaults]\n" + (f'preview_side = "{side}"\n' if side else "") + (f"preview_width_pct = {pct}\n" if pct else "")
     path = S + "/split_" + (side or "default") + ".toml"
-    open(path, "w").write(BOXCFG + extra)
+    open(path, "w").write(BASECFG + extra)
     return path
 
 fails = []
@@ -57,11 +51,11 @@ class Run:
         env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", COLORTERM="truecolor", WICLI_CLIPBOARD="file:" + clipfile)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            if not remote: os.chdir(W)
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(W)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.scr = pyte.Screen(cols, rows); self.st = pyte.ByteStream(self.scr)
-        self.pump(3.2 if remote else 2.2)
+        self.pump(2.2)
     def pump(self, t, until=None):
         end = time.time() + t
         while time.time() < end:
@@ -109,7 +103,7 @@ class Run:
     def open_file(self, path, t=1.2):
         self.send(MENU + b"p", 0.5); self.send(path.encode() + b"\r", t)
     def quit(self):
-        self.send(MENU + (b"e" if remote else b"q"), 1.5)
+        self.send(MENU + b"q", 1.5)
 
 def clip():
     return open(clipfile).read() if os.path.exists(clipfile) else None
@@ -170,8 +164,7 @@ check("selection highlights in the preview", pos is not None and r.scr.buffer[po
 r.click(10, 20)
 r.send(b"clear; seq 1 300\n", 1.0)
 r.wheel(True, 10, 10, 2)
-# (under tmux the box repaints on the alternate screen, so wi has no scrollback of its own to browse)
-if not remote: check("wheel in the shell pane scrolls the shell scrollback", "scrollback" in r.text())
+check("wheel in the shell pane scrolls the shell scrollback", "scrollback" in r.text())
 r.wheel(False, 10, 10, 60)
 f0 = r.lines_from()
 r.wheel(False, 90, 10, 3)
@@ -309,6 +302,4 @@ try:
     r.quit()
 finally:
     sh("rm -rf .git g1.txt")
-if remote:
-    sh("rm -rf split")
 sys.exit(1 if fails else 0)

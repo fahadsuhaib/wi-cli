@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Split the terminal scripts into balanced CI shards.
 
-usage: dev/shard.py <k> <n> [--local-only]
+usage: dev/shard.py <k> <n>
 
-Prints the tasks ("<script> <local|remote>") that shard k of n should run, one per line. Tasks are
-the local run and, for scripts marked `# remote: yes`, the remote run. They are assigned
+Prints the tasks ("<script> local") that shard k of n should run, one per line. They are assigned
 longest-first to the least-loaded shard, using the measured seconds in dev/shard-weights.txt
 (unknown tasks get DEFAULT seconds), so every shard finishes at about the same time.
 """
@@ -14,15 +13,13 @@ DEFAULT = 40
 here = os.path.dirname(os.path.abspath(__file__))
 
 
-def tasks(local_only):
+def tasks():
     out = []
     for path in sorted(glob.glob(os.path.join(here, "pty_*.py"))):
         name = "dev/" + os.path.basename(path)
         if name == "dev/pty_drive.py":  # the interactive driver, not a test
             continue
         out.append((name, "local"))
-        if not local_only and "# remote: yes" in open(path, errors="replace").read():
-            out.append((name, "remote"))
     return out
 
 
@@ -52,7 +49,7 @@ if __name__ == "__main__":
     k, n = int(args[0]), int(args[1])
     if not 1 <= k <= n:
         sys.exit("shard index must be 1..n")
-    all_tasks = tasks("--local-only" in sys.argv)
+    all_tasks = tasks()
     shards, load = assign(all_tasks, n, weights())
     order = {t: i for i, t in enumerate(all_tasks)}
     for t in sorted(shards[k - 1], key=order.get):

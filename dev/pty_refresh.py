@@ -1,20 +1,16 @@
-# usage: python dev/pty_refresh.py <scratch-dir-with-test.toml> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_refresh.py <scratch-dir> local   (needs pyte)
 # Auto-refresh of visible file previews: the side pane while the shell has the keyboard, a focused
 # preview tab, idle quiet, deletion note, a burst of writes, the 5 s default debounce, and the
-# preview_autorefresh = false switch. Files live in refresh/ (workspace root, or the login dir on the box).
+# preview_autorefresh = false switch. Files live in refresh/ (workspace root).
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, threading, pyte
 S, mode = sys.argv[1], sys.argv[2]
-remote = mode == "remote"
 MENU = b"\x00"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
 W = S + "/rws"
-BOXCFG = open(S + "/test.toml").read()
-POLL = 2.0 if remote else 1.0
+BASECFG = ""
+POLL = 1.0
 
 def sh(script, bg=False):
-    if remote:
-        return subprocess.run(["docker", "exec", "-u", "dev", "-w", "/home/dev", "devbox-test", "bash", "-c", script], check=True)
     return subprocess.run(["bash", "-c", script], check=True, cwd=W)
 
 shutil.rmtree(W, ignore_errors=True); os.makedirs(W)
@@ -24,7 +20,7 @@ sh("rm -rf refresh; mkdir -p refresh; for i in $(seq 1 5); do echo base_$i; done
 
 def config(name, extra):
     path = S + f"/refresh_{name}.toml"
-    open(path, "w").write(BOXCFG + "\n[defaults]\n" + extra)
+    open(path, "w").write(BASECFG + "\n[defaults]\n" + extra)
     return path
 
 fails = []
@@ -36,15 +32,15 @@ class Run:
     def __init__(self, cfg, cols=120, rows=30):
         self.cols, self.rows_n = cols, rows
         env = {k: v for k, v in os.environ.items() if k != "COLORFGBG"}
-        env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_TMUX_SOCKET=os.environ.get("WICLI_TMUX_SOCKET", "refreshtest"))
+        env.update(WICLI_CONFIG=cfg, TERM="xterm-256color")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            if not remote: os.chdir(W)
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(W)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.scr = pyte.Screen(cols, rows); self.st = pyte.ByteStream(self.scr)
         self.nbytes = 0
-        self.pump(3.2 if remote else 2.2)
+        self.pump(2.2)
     def pump(self, t, until=None):
         end = time.time() + t
         while time.time() < end:
@@ -164,6 +160,4 @@ r.send(b"r", 1.0)
 check("R still reloads by hand (side pane focused)", "manual_change" in r.right())
 r.quit()
 
-if remote:
-    sh("rm -rf refresh")
 sys.exit(1 if fails else 0)

@@ -1,4 +1,4 @@
-# usage: python dev/pty_restore.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_restore.py <scratch-dir> local   (needs pyte)
 # Reopening the tabs after a normal quit: three tabs (one renamed, one in a subfolder), quit from the
 # menu, start again in the same folder: same tabs, names, active tab and the status note. Also
 # `wi --fresh` (one tab, snapshot forgotten), `restore_tabs = false`, an old snapshot (30 days), a
@@ -23,8 +23,8 @@ def check(name, cond):
 class Run:
     def __init__(self, ws, args=(), restore=True):
         cfg = CFGDIR + "/config.toml"
-        open(cfg, "w").write(open(S + "/test.toml").read() + f'\n[defaults]\nagent_start = "never"\nrestore_tabs = {"true" if restore else "false"}\n')
-        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_TMUX_SOCKET="restoretest", SHELL="/bin/sh", PS1="$ ")
+        open(cfg, "w").write(f'\n[defaults]\nagent_start = "never"\nrestore_tabs = {"true" if restore else "false"}\n')
+        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", SHELL="/bin/sh", PS1="$ ")
         env.pop("WICLI_RESTORE_TABS", None)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:

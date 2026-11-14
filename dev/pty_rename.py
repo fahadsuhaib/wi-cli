@@ -1,4 +1,4 @@
-# usage: python dev/pty_rename.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_rename.py <scratch-dir> local   (needs pyte)
 # Rename a tab: menu action, single click on the active tab, double-click on another tab; prefilled
 # name, cursor editing, paste, Esc cancels, empty name resets, long names, the name survives the
 # program setting its own title, and an agent tab with a custom name still gets its new-line keys.
@@ -27,9 +27,9 @@ class Run:
     def __init__(self, ws, agent=False, reply=False):
         cfg = CFGDIR + "/config.toml"
         extra = f'\n[defaults]\nagent_start = "always"\n[agents.claude]\ncommand = "perl {CFGDIR}/ke.pl"\n' if agent else '\n[defaults]\nagent_start = "never"\n'
-        open(cfg, "w").write(open(S + "/test.toml").read() + extra)
+        open(cfg, "w").write(extra)
         if os.path.exists(CFGDIR + "/state.toml"): os.remove(CFGDIR + "/state.toml")
-        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_TMUX_SOCKET="renametest")
+        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(ws); os.execve(WI, ["wi"], env)

@@ -1,8 +1,8 @@
-# usage: python dev/pty_mouse.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_mouse.py <scratch-dir> local   (needs pyte)
 import os, pty, sys, time, select, struct, fcntl, termios, re, pyte
 S = sys.argv[1]
 MENU = b"\x00"
-env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color")
+env = dict(os.environ, WICLI_CONFIG=S + "/none.toml", TERM="xterm-256color")
 os.makedirs(S + "/ws/pv", exist_ok=True)
 open(S + "/ws/pv/big.log", "w").write(("x" * 79 + "\n") * 300)
 pid, fd = pty.fork()

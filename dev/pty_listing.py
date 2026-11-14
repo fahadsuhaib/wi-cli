@@ -1,31 +1,21 @@
-# usage: python dev/pty_listing.py <scratch-dir> local|remote   (box "test" in <scratch-dir>/test.toml; plain subprocess test, no pty; drives the hidden `wi __ls`)
-# remote: yes
+# usage: python dev/pty_listing.py <scratch-dir> local   (plain subprocess test, no pty; drives the hidden `wi __ls`)
 import os, shutil, subprocess, sys, tempfile, time
 S, mode = sys.argv[1], sys.argv[2]
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
-env = dict(os.environ, WICLI_CONFIG=S + "/test.toml")
+env = dict(os.environ, WICLI_CONFIG=S + "/none.toml")
 fails = []
 def check(name, cond, extra=""):
     print(("PASS " if cond else "FAIL ") + name + (" " + str(extra)[:300] if extra else ""))
     if not cond: fails.append(name)
 
-remote = mode == "remote"
-if remote:
-    ROOT = "/home/dev/explorer-test"
-    def sh(cmd):
-        r = subprocess.run(["docker", "exec", "-u", "dev", "devbox-test", "sh", "-c", cmd], capture_output=True, text=True)
-        if r.returncode: print("fixture error:", r.stderr)
-    sh(f"rm -rf {ROOT}")
-    sh(f"mkdir -p {ROOT}")
-else:
-    ROOT = os.path.realpath(tempfile.mkdtemp(prefix="explorer-test-", dir=S))
-    def sh(cmd):
-        r = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True)
-        if r.returncode: print("fixture error:", r.stderr)
+ROOT = os.path.realpath(tempfile.mkdtemp(prefix="explorer-test-", dir=S))
+def sh(cmd):
+    r = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True)
+    if r.returncode: print("fixture error:", r.stderr)
 
 def ls(path, *extra):
     t = time.time()
-    r = subprocess.run([BIN, "__ls", *(["--box", "test"] if remote else []), path, *extra], capture_output=True, text=True, env=env)
+    r = subprocess.run([BIN, "__ls", path, *extra], capture_output=True, text=True, env=env)
     return r, time.time() - t
 def rows(r):
     return [l.split(" ", 4) for l in r.stdout.splitlines() if l[:2] in ("d ", "f ", "l ")]
@@ -63,8 +53,6 @@ printf 'dd' >> top.txt && printf 'u' > "src/new file.txt" && printf 'n' > added.
     n = len(rows(r))
     check("5200 files capped at 5000 with notice", n == 5000 and "truncated 5200" in r.stdout, (n, r.stdout[-40:]))
     print(f"INFO many listing took {dt:.2f}s")
-    if remote:
-        check("5200-entry remote folder lists in under 3 s", dt < 3, f"{dt:.2f}s")
     r, _ = ls(f"{ROOT}/nope")
     check("missing dir: exit 1 and wi: message", r.returncode == 1 and r.stderr.startswith("wi: "), r.stderr)
     r, _ = ls(f"{ROOT}/plain", "--git")
@@ -80,7 +68,6 @@ printf 'dd' >> top.txt && printf 'u' > "src/new file.txt" && printf 'n' > added.
     r, _ = ls(f"{ROOT}/repo/src", "--git")
     check("git from a subfolder keeps repo-relative keys", "git M src/mod.rs" in r.stdout and f"repo {ROOT}/repo" in r.stdout.splitlines(), r.stdout[-200:])
 finally:
-    if remote: sh(f"rm -rf {ROOT}")
-    else: shutil.rmtree(ROOT, ignore_errors=True)
+    shutil.rmtree(ROOT, ignore_errors=True)
 print("FAILED: " + ", ".join(fails) if fails else "ALL PASS")
 sys.exit(1 if fails else 0)

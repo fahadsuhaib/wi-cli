@@ -1,10 +1,8 @@
 # usage: python dev/pty_panes.py <scratch-dir> local   (needs pyte)
-# remote: no
 # Pinned panes: pin the active tab right/left from the menu, swap with the title-bar button, unsplit,
 # keep output flowing in the pinned pane, mouse (focus, wheel, selection), remembered layout.
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, pyte
 S, mode = sys.argv[1], sys.argv[2]
-remote = False
 MENU = b"\x00"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
 W = S + "/pnw"
@@ -27,11 +25,11 @@ class Run:
         env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", COLORTERM="truecolor", WICLI_CLIPBOARD="file:" + clipfile)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            if not remote: os.chdir(W)
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(W)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.scr = pyte.Screen(cols, rows); self.st = pyte.ByteStream(self.scr)
-        self.pump(3.2 if remote else 2.2)
+        self.pump(2.2)
     def pump(self, t, until=None):
         end = time.time() + t
         while time.time() < end:
@@ -79,7 +77,7 @@ class Run:
     def open_file(self, path, t=1.2):
         self.send(MENU + b"p", 0.5); self.send(path.encode() + b"\r", t)
     def quit(self):
-        self.send(MENU + (b"e" if remote else b"q"), 1.5)
+        self.send(MENU + b"q", 1.5)
 
 
 def clip():

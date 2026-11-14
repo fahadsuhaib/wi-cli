@@ -4,15 +4,12 @@
 # all diagrams to source and back (also after R), a narrow pane shows source, M source still works.
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, signal, pyte
 S, mode = os.path.realpath(sys.argv[1]), sys.argv[2]
-remote = False
 if mode != "local":
     print("local only"); sys.exit(0)
 MENU = b"\x00"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
 W = S + "/mmws"
 clipfile = S + "/mm_clip.txt"
-BOXCFG = open(S + "/test.toml").read()
-
 SAMPLE = """# Plan
 
 ```mermaid
@@ -42,7 +39,7 @@ open(W + "/md/diag.md", "w").write(SAMPLE)
 
 def config(side):
     path = f"{S}/mm_{side}.toml"
-    open(path, "w").write(BOXCFG + f'\n[defaults]\ntheme = "dark"\npreview_side = "{side}"\n')
+    open(path, "w").write(f'[defaults]\ntheme = "dark"\npreview_side = "{side}"\n')
     return path
 
 fails = []
@@ -57,11 +54,11 @@ class Run:
         env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", COLORTERM="truecolor", WICLI_CLIPBOARD="file:" + clipfile)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            if not remote: os.chdir(W)
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(W)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.scr = pyte.Screen(cols, rows); self.st = pyte.ByteStream(self.scr)
-        self.pump(3.2 if remote else 2.2)
+        self.pump(2.2)
     def pump(self, t, until=None):
         end = time.time() + t
         while time.time() < end:
@@ -100,7 +97,7 @@ class Run:
     def open_md(self):
         self.send(MENU + b"p", 0.5); self.send(b"md/diag.md\r", 1.5)
     def quit(self):
-        self.send(MENU + (b"e" if remote else b"q"), 1.5)
+        self.send(MENU + b"q", 1.5)
 
 def block(rows, start, end):
     """Rows from the first one matching `start` up to (not including) the first later one matching `end`."""

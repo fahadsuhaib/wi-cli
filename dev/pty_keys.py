@@ -1,13 +1,10 @@
-# usage: python dev/pty_keys.py <scratch-dir> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_keys.py <scratch-dir> local   (needs pyte)
 # Key-protocol layer: Shift+Enter and friends reported with kitty CSI u / modifyOtherKeys are
 # translated to what the program in the tab expects. A perl "key echo" program prints each chunk
-# of input as hex. Uses a temp config and fake agent commands only. Local: the agent tab is a
-# CLAUDE.md workspace; remote: an OSC title containing "claude" marks the tab as an agent.
-# Remote mode uses its own tmux server (socket keystest) and removes it afterwards.
-import os, pty, sys, time, select, struct, fcntl, termios, shutil, subprocess, pyte
+# of input as hex. Uses a temp config and fake agent commands only. The agent tab is a
+# CLAUDE.md workspace.
+import os, pty, sys, time, select, struct, fcntl, termios, shutil, pyte
 S, mode = sys.argv[1], sys.argv[2]
-remote = mode == "remote"
 S = os.path.realpath(S)
 MENU = b"\x00"
 PS, PE = b"\x1b[200~", b"\x1b[201~"
@@ -28,17 +25,10 @@ while (sysread(STDIN, $b, 256)) {
 }
 system("stty sane");
 '''
-RDIR = "/home/dev/keys-test"
-if remote:
-    subprocess.run(["docker", "exec", "-i", "-u", "dev", "devbox-test", "sh", "-c", f"mkdir -p {RDIR} && cat > {RDIR}/ke.pl"], input=KE_SRC, text=True, check=True)
-    KE = f"perl {RDIR}/ke.pl"
-else:
-    open(CFGDIR + "/ke.pl", "w").write(KE_SRC)
-    KE = f"perl {CFGDIR}/ke.pl"
+open(CFGDIR + "/ke.pl", "w").write(KE_SRC)
+KE = f"perl {CFGDIR}/ke.pl"
 
 def cleanup():
-    if remote:
-        subprocess.run(["docker", "exec", "-u", "dev", "devbox-test", "sh", "-c", f"rm -rf {RDIR}; tmux -L keystest kill-server 2>/dev/null; true"], capture_output=True)
     shutil.rmtree(CFGDIR, ignore_errors=True); shutil.rmtree(WS, ignore_errors=True)
 
 fails = []
@@ -49,18 +39,18 @@ def check(name, cond):
 class Run:
     def __init__(self, extra=""):
         cfg = CFGDIR + "/config.toml"
-        base = open(S + "/test.toml").read()
+        base = ""
         open(cfg, "w").write(base + f'\n[defaults]\nagent_start = "always"\n{extra}\n[agents.claude]\ncommand = "{KE}"\n')
         if os.path.exists(CFGDIR + "/state.toml"): os.remove(CFGDIR + "/state.toml")
-        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color", WICLI_TMUX_SOCKET="keystest")
+        env = dict(os.environ, WICLI_CONFIG=cfg, TERM="xterm-256color")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(WS)
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 110, 0, 0))
         self.scr = pyte.Screen(110, 30); self.st = pyte.ByteStream(self.scr)
         self.raw = bytearray()
-        self.pump(3.0 if remote else 2.2)
+        self.pump(2.2)
     def pump(self, t):
         end = time.time() + t
         while time.time() < end:
@@ -83,15 +73,13 @@ class Run:
         after = [l for l in self.rows() if l.strip().startswith("KE:")]
         return self.ke() if after != before or len(after) else None
     def quit(self):
-        self.send(MENU + (b"e" if remote else b"q"), 1.5)
+        self.send(MENU + b"q", 1.5)
         try: os.waitpid(self.pid, os.WNOHANG)
         except ChildProcessError: pass
 
 def start_agent_tab(r):
     """Make the first tab a key-echo agent tab and return once KE runs."""
-    if remote:
-        r.send(("printf '\\033]0;claude-fake\\007'; " + KE + "\r").encode(), 1.2)
-    # local: started by wi itself (CLAUDE.md workspace, agent_start = always)
+    # started by wi itself (CLAUDE.md workspace, agent_start = always)
     r.send(b"x", 0.7)
     return r.ke() == "78"
 
@@ -117,12 +105,9 @@ check("Alt+Left becomes ESC b (word left)", r.key(b"\x1b[1;3D") == "1b62")
 check("unicode text untouched", r.key("é日🎉".encode()) == "c3a9e697a5f09f8e89")
 check("shifted letter as CSI u arrives as the capital", r.key(b"\x1b[97:65;2u") == "41")
 check("super combos are dropped", r.key(b"\x1b[97;9u\x1b[98u") == "62")
-# (remote: tmux sits between wi and the program, rewrites pastes and consumes the program's own
-# kitty requests, so those checks are local only)
-if not remote:
-    # bracketed paste content is never decoded
-    r.send(PS + b"a\x1b[13;2ub" + PE, 0.9)
-    check("paste containing literal CSI u is delivered as written", r.ke() == "611b5b31333b32756 2".replace(" ", ""))
+# bracketed paste content is never decoded
+r.send(PS + b"a\x1b[13;2ub" + PE, 0.9)
+check("paste containing literal CSI u is delivered as written", r.ke() == "611b5b31333b32756 2".replace(" ", ""))
 
 # Ctrl+Space as CSI u opens the menu, in both encodings
 r.send(b"\x1b[32;5u", 0.8)
@@ -132,20 +117,19 @@ check("Esc closes the menu", "arrows + Enter" not in r.text() and "New shell tab
 r.send(b"\x1b[27;5;32~", 0.8)
 check("Ctrl+Space as modifyOtherKeys opens the menu", "New shell tab" in r.text() or "arrows + Enter" in r.text())
 r.send(b"\x1b", 0.9)
-if not remote:
-    # the program turns the kitty protocol on itself: raw reports are forwarded; LF again after it pops
-    r.send(b"Q", 0.8)
-    check("query before the program enables anything answers flags 0", "KE:1b5b3f3075" in r.text())
-    r.send(b"p", 0.8)
-    check("program with kitty flags gets raw CSI u for Shift+Enter", r.key(b"\x1b[13;2u") == "1b5b31333b3275")
-    check("it also gets raw Ctrl+C report", r.key(b"\x1b[99;5u") == "1b5b39393b3575")
-    r.send(b"Q", 0.8)
-    check("query answers the tab's flags", "KE:1b5b3f3175" in r.text())
-    r.send(b"\x1b[32;5u", 0.8)
-    check("Ctrl+Space still opens the menu with the protocol on in the tab", "New shell tab" in r.text() or "arrows + Enter" in r.text())
-    r.send(b"\x1b", 0.9)
-    r.send(b"o", 0.8)
-    check("after the program pops, Shift+Enter is LF again", r.key(b"\x1b[13;2u") == "0a")
+# the program turns the kitty protocol on itself: raw reports are forwarded; LF again after it pops
+r.send(b"Q", 0.8)
+check("query before the program enables anything answers flags 0", "KE:1b5b3f3075" in r.text())
+r.send(b"p", 0.8)
+check("program with kitty flags gets raw CSI u for Shift+Enter", r.key(b"\x1b[13;2u") == "1b5b31333b3275")
+check("it also gets raw Ctrl+C report", r.key(b"\x1b[99;5u") == "1b5b39393b3575")
+r.send(b"Q", 0.8)
+check("query answers the tab's flags", "KE:1b5b3f3175" in r.text())
+r.send(b"\x1b[32;5u", 0.8)
+check("Ctrl+Space still opens the menu with the protocol on in the tab", "New shell tab" in r.text() or "arrows + Enter" in r.text())
+r.send(b"\x1b", 0.9)
+r.send(b"o", 0.8)
+check("after the program pops, Shift+Enter is LF again", r.key(b"\x1b[13;2u") == "0a")
 
 # plain (non-agent) tab
 r.send(MENU + b"n", 1.5)
@@ -197,8 +181,7 @@ for setting, want in (("esc-cr", "1b0d"), ("newline", "0a"), ("enter", "0d")):
 r = Run('key_protocol = "off"')
 check("key_protocol = off sends no request", b"\x1b[>1u" not in bytes(r.raw) and b"\x1b[>4;2m" not in bytes(r.raw))
 ok = start_agent_tab(r)
-if not remote:
-    check("key_protocol = off forwards reports untouched", ok and r.key(b"\x1b[13;2u") == "1b5b31333b3275")
+check("key_protocol = off forwards reports untouched", ok and r.key(b"\x1b[13;2u") == "1b5b31333b3275")
 r.raw.clear()
 r.quit()
 check("key_protocol = off sends no pop on quit", b"\x1b[<u" not in bytes(r.raw))

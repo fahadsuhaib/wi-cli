@@ -1,20 +1,17 @@
-# usage: python dev/pty_menu.py <scratch-dir> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_menu.py <scratch-dir> local   (needs pyte)
 # The searchable, grouped, scrollable menu: sections, scrolling on short terminals, hotkeys, the
-# Space filter and its Esc ladder, mouse clicks and wheel. Remote mode uses its own tmux socket
-# (menutest) on the box and kills only that server afterwards.
-import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, pyte
+# Space filter and its Esc ladder, mouse clicks and wheel.
+import os, pty, sys, time, select, struct, fcntl, termios, shutil, pyte
 S, mode = sys.argv[1], sys.argv[2]
-remote = mode == "remote"
 MENU = b"\x00"  # Ctrl-Space
 S = os.path.realpath(S)
-SLOW = 1.8 if remote else 1.0
+SLOW = 1.0
 CFGDIR = S + "/menu_cfg_" + mode
 shutil.rmtree(CFGDIR, ignore_errors=True); os.makedirs(CFGDIR + "/home_plain"); os.makedirs(CFGDIR + "/ws")
-open(CFGDIR + "/config.toml", "w").write(open(S + "/test.toml").read())
+open(CFGDIR + "/config.toml", "w").write("")
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
 env = dict(os.environ, WICLI_CONFIG=CFGDIR + "/config.toml", TERM="xterm-256color", COLORTERM="truecolor",
-           WICLI_TMUX_SOCKET="menutest", SHELL="/bin/bash", HOME=CFGDIR + "/home_plain")
+           SHELL="/bin/bash", HOME=CFGDIR + "/home_plain")
 env.pop("COLORFGBG", None)
 
 SECTIONS = ["FILES", "SEARCH", "TABS", "VIEW", "AGENT", "SESSION"]
@@ -22,16 +19,15 @@ LOCAL = ["Preview a file", "Find file", "Git changes", "Open path on screen", "S
          "New shell tab", "New tab in folder", "Change folder of this tab", "Next tab", "Previous tab", "Close tab",
          "Switch pane", "Close preview", "Scroll", "Theme… auto (dark)", "Mouse on/off", "Start / change agent",
          "Info", "Update wi", "Restart wi", "Quit"]
-REMOTE = [l for l in LOCAL if l != "Quit"] + ["Reconnect", "Download", "Detach (keep sessions)", "End sessions and quit"]
-LABELS = REMOTE if remote else LOCAL
+LABELS = LOCAL
 
 class Term:
     def __init__(self, cols, rows):
         self.cols, self.rows = cols, rows
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.chdir(CFGDIR + "/ws" if not remote else "/")
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(CFGDIR + "/ws")
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.scr = pyte.Screen(cols, rows); self.st = pyte.ByteStream(self.scr)
         self.pump(3.0 * SLOW)
@@ -76,8 +72,6 @@ def open_menu(t): t.send(MENU, 0.7)
 def menu_open(t): return "Space: search" in t.text() or "filter:" in t.text()
 def cleanup():
     if cur: cur.close()
-    if remote:
-        subprocess.run(["docker", "exec", "-u", "dev", "devbox-test", "bash", "-c", "tmux -L menutest kill-server 2>/dev/null; true"], capture_output=True)
     shutil.rmtree(CFGDIR, ignore_errors=True)
 
 # ---- 120x40: everything fits
@@ -89,16 +83,12 @@ missing = [l for l in LABELS if l not in tx]
 check("120x40: every entry visible " + str(missing), not missing)
 check("120x40: search hint shown", "Space: search" in tx)
 check("120x40: no 'more' markers when everything fits", "more below" not in tx and "more above" not in tx)
-if remote:
-    check("remote: Detach and End shown, plain Quit gone", "Detach (keep sessions)" in tx and "End sessions and quit" in tx and "Reconnect" in tx and "Download" in tx)
-else:
-    check("local: no remote-only entries", "Reconnect" not in tx and "Download" not in tx)
 t.send(b"\x1b", 0.6)
 check("Esc closes the menu", not menu_open(t))
 
 # ---- hotkeys keep working
 open_menu(t); t.send(b"i", 0.8)
-check("hotkey i: Info", ("connected" if remote else "local workspace") in t.text() and not menu_open(t))
+check("hotkey i: Info", "local workspace" in t.text() and not menu_open(t))
 open_menu(t); t.send(b"y", 0.8)
 check("hotkey y: opens the theme picker", "type to filter" in t.text() and "Monokai" in t.text())
 t.send(b"\x1b", 0.6)
@@ -180,7 +170,7 @@ check("80x16: not everything fits, 'more below' marker", "more below" in tx and 
 check("80x16: first section visible", "FILES" in tx and "Preview a file" in tx)
 t.send(b"\x1b[F", 0.5)
 tx = t.text()
-last = "End sessions and quit" if remote else "Quit"
+last = "Quit"
 check("End reaches the last entry, 'more above' marker", last in tx and "more above" in tx and "more below" not in tx)
 t.send(b"\x1b[H", 0.5)
 check("Home returns to the first entry", "Preview a file" in t.text() and "more above" not in t.text())
@@ -198,30 +188,25 @@ check("wheel up scrolls back", "Preview a file" in t.text() and "more above" not
 t.send(b"\x1b[F", 0.5)
 p = t.find(last)
 t.mouse(0, p[0] + 1, p[1])
-if remote:
-    check("click on the last entry after scrolling runs it (End sessions)", True)
-    time.sleep(1.5)
-else:
-    time.sleep(1.5)
-    try:
-        os.waitpid(t.pid, os.WNOHANG)
-    except ChildProcessError: pass
-    t.pump(0.5)
-    alive = True
-    try:
-        pidr, _ = os.waitpid(t.pid, os.WNOHANG); alive = pidr == 0
-    except ChildProcessError: alive = False
-    check("click on the last entry after scrolling runs it (Quit exits)", not alive)
+time.sleep(1.5)
+try:
+    os.waitpid(t.pid, os.WNOHANG)
+except ChildProcessError: pass
+t.pump(0.5)
+alive = True
+try:
+    pidr, _ = os.waitpid(t.pid, os.WNOHANG); alive = pidr == 0
+except ChildProcessError: alive = False
+check("click on the last entry after scrolling runs it (Quit exits)", not alive)
 t.close()
 
 # ---- 80x20 sanity
-if not remote or True:
-    cur = t = Term(80, 20)
-    open_menu(t)
-    check("80x20: scrolls too, markers shown", "more below" in t.text())
-    t.send(b"\x1b[F", 0.5)
-    check("80x20: End shows the last entry", ("End sessions and quit" if remote else "Quit") in t.text())
-    t.send(b"\x1b", 0.5)
-    t.close()
+cur = t = Term(80, 20)
+open_menu(t)
+check("80x20: scrolls too, markers shown", "more below" in t.text())
+t.send(b"\x1b[F", 0.5)
+check("80x20: End shows the last entry", "Quit" in t.text())
+t.send(b"\x1b", 0.5)
+t.close()
 cleanup()
 sys.exit(1 if fails else 0)

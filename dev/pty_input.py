@@ -1,10 +1,10 @@
-# usage: python dev/pty_input.py <scratch-dir-with-test.toml> local   (needs pyte)
+# usage: python dev/pty_input.py <scratch-dir> local   (needs pyte)
 # Checks scrollback mode and bracketed paste handling.
 import os, pty, sys, time, select, struct, fcntl, termios, pyte
 S, mode = sys.argv[1], sys.argv[2]
 MENU = b"\x00"  # Ctrl-Space
 PS, PE = b"\x1b[200~", b"\x1b[201~"
-env = dict(os.environ, WICLI_CONFIG=S + "/test.toml", TERM="xterm-256color")
+env = dict(os.environ, WICLI_CONFIG=S + "/none.toml", TERM="xterm-256color")
 args = ["wi"] if mode == "local" else ["wi", "test"]
 pid, fd = pty.fork()
 if pid == 0:

@@ -1,16 +1,13 @@
-# usage: python dev/pty_explorer.py <scratch-dir> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_explorer.py <scratch-dir> local   (needs pyte)
 # The file explorer (menu x): full-screen tree with sizes, times and git marks, detail pane with the real
 # previews, folding, lazy loading, hidden/changed/sort/find, Enter/O/T/A/C/P actions, mouse, narrow layout,
 # light theme. Fixture: a git repo (src/, docs/, README.md, data.json, table.csv, a png, hidden files, a modified,
-# a staged and an untracked file, a folder with unicode and spaces, a 600-file folder). Remote mode builds it under
-# /home/dev/exptest on the box (own tmux server, socket exptest) and removes it afterwards.
+# a staged and an untracked file, a folder with unicode and spaces, a 600-file folder).
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, signal, pyte
 S, mode = os.path.realpath(sys.argv[1]), sys.argv[2]
-remote = mode == "remote"
 MENU = b"\x00"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
-X = "/home/dev/exptest" if remote else S + "/exptest"
+X = S + "/exptest"
 P = X + "/proj"
 H = S + "/exp_home_" + mode
 CFG = S + "/explorer_" + mode + ".toml"
@@ -18,7 +15,7 @@ CFG_LIGHT = S + "/explorer_light_" + mode + ".toml"
 CLIP = S + "/explorer_clip_" + mode
 LOG = S + "/explorer_open_" + mode + ".log"
 EDITOR = S + "/explorer_editor.sh"
-base = open(S + "/test.toml").read()
+base = ""
 open(CFG, "w").write(base)
 open(CFG_LIGHT, "w").write(base + '\n[defaults]\ntheme = "light"\n')
 open(EDITOR, "w").write('#!/bin/sh\necho "EDITOR_ARGS:$*"\nsleep 60\n'); os.chmod(EDITOR, 0o755)
@@ -27,8 +24,6 @@ for f in (CLIP, LOG):
     if os.path.exists(f): os.remove(f)
 
 def sh(script):
-    if remote:
-        return subprocess.run(["docker", "exec", "-u", "dev", "devbox-test", "bash", "-c", script], capture_output=True, text=True)
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
 FIXTURE = r'''
@@ -68,18 +63,15 @@ class Run:
     def __init__(self, cols=120, rows=36, cfg=CFG, extra=None):
         self.cols, self.rows_n = cols, rows
         env = {k: v for k, v in os.environ.items() if k != "COLORFGBG"}
-        env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", COLORTERM="truecolor", WICLI_TMUX_SOCKET="exptest",
-                   WICLI_CLIPBOARD="file:" + CLIP, WICLI_OPEN_LOG=LOG, SHELL="/bin/bash", HOME=H, **({} if remote else {"EDITOR": EDITOR}), **(extra or {}))
+        env.update(WICLI_CONFIG=cfg, TERM="xterm-256color", COLORTERM="truecolor",
+                   WICLI_CLIPBOARD="file:" + CLIP, WICLI_OPEN_LOG=LOG, SHELL="/bin/bash", HOME=H, EDITOR=EDITOR, **(extra or {}))
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.chdir(P if not remote else "/")
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(P)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.scr = pyte.Screen(cols, rows); self.st = pyte.ByteStream(self.scr)
-        self.pump(3.5 if remote else 2.2)
-        if remote:
-            self.send(MENU + b"f", 0.6)
-            self.send(b"\x15" + P.encode() + b"\r", 2.5)
+        self.pump(2.2)
     def pump(self, t, until=None):
         end = time.time() + t
         while time.time() < end:
@@ -159,7 +151,7 @@ class Run:
         if os.environ.get("EXP_DUMP"):
             print("-----", tag); print(self.text())
     def quit(self):
-        self.send(MENU + (b"e" if remote else b"q"), 1.5)
+        self.send(MENU + b"q", 1.5)
 
 def main():
     # ================= wide terminal, dark theme
@@ -169,10 +161,8 @@ def main():
     rows = r.rows()
     check("title bar: explorer, folder and branch", re.search(r"explorer · .*exptest/proj · main", rows[0]) is not None)
     check("title bar is the inverted bar colour", r.bg(1, 0) != DARK_BG)
-    if remote: check("remote: the box name is on the right of the title bar", rows[0].rstrip().endswith("test"))
     check("hint line shows the keys", "Enter view" in rows[1] and "Q back" in rows[1] and "E edit" in rows[1] and "O open" in rows[1] and "Space mark" in rows[1] and "M send" in rows[1] and "type find" in rows[1])
-    badge = "test" if remote else "LOCAL"
-    check("status line: badge and counts", badge in rows[2] and "10 items" in rows[2] and "3 changed" in rows[2] and "2 hidden" in rows[2])
+    check("status line: badge and counts", "LOCAL" in rows[2] and "10 items" in rows[2] and "3 changed" in rows[2] and "2 hidden" in rows[2])
     check("column headers", all(w in rows[3] for w in ("FILES", "SIZE", "MODIFIED")) and "▲" in rows[3])
     yb, yd, ys = r.row_of("bulk"), r.row_of("docs"), r.row_of("src")
     yfiles = [r.row_of(n) for n in ("data.json", "logo.png", "new_file.txt", "notes.txt", "README.md", "staged.txt", "table.csv")]
@@ -204,7 +194,7 @@ def main():
     r.send(b"\x1b[C", 0.05)
     ok = r.pump(8, until=lambda: "f599.txt" in r.text() or "f000.txt" in r.left())
     dt = time.time() - t0
-    check("Right on a folder expands it (600 files load fast: %.2fs)" % dt, ok and "f000.txt" in r.left() and "▾ bulk" in r.left() and dt < (4.0 if remote else 1.5))
+    check("Right on a folder expands it (600 files load fast: %.2fs)" % dt, ok and "f000.txt" in r.left() and "▾ bulk" in r.left() and dt < 1.5)
     r.dump("bulk open")
     check("children use guide glyphs", "├ f000.txt" in r.left() and "└ f599.txt" not in r.left())
     check("status counts the loaded entries", "610 items" in r.rows()[2])
@@ -391,16 +381,12 @@ def main():
     r.send(b"\x1b[B", 0.2)
     check("selected the résumé file", "résumé notes" in (r.sel_name() or ""))
     r.dump("before O")
-    r.send(b"e", 2.5 if remote else 2.0)
+    r.send(b"e", 2.0)
     t = r.text()
     r.dump("after E")
-    if remote:
-        check("E opens a new tab and runs vi (EDITOR unset) on the quoted file", "explorer ·" not in t and "résumé body" in t and re.search(r"\n~\n~\n", t) is not None)
-    else:
-        check("E opens a new tab and runs $EDITOR with `-- <file>` (quoted: spaces, unicode)", "explorer ·" not in t and "EDITOR_ARGS:-- %s/docs/ünï çødé/résumé notes.txt" % P in "".join(r.rows()))
+    check("E opens a new tab and runs $EDITOR with `-- <file>` (quoted: spaces, unicode)", "explorer ·" not in t and "EDITOR_ARGS:-- %s/docs/ünï çødé/résumé notes.txt" % P in "".join(r.rows()))
     check("the editor runs in a new tab named after the file's folder", "ünï çødé" in r.rows()[1])
-    r.send(MENU + b"c", 1.0) if not remote else r.send(b"\x1b:q!\r", 1.0)
-    if remote: r.send(MENU + b"c", 1.0)
+    r.send(MENU + b"c", 1.0)
 
     # ---- T: a new shell tab in the selected folder
     r.open_explorer()
@@ -424,7 +410,7 @@ def main():
     r.send(b"\r", 1.2)
     t = r.text()
     r.dump("after png enter")
-    check("Enter on the png raises the native-open confirmation", ("Download and open" if remote else "Open in the default app") in t and "Size: 24 B" in t and "explorer ·" not in t)
+    check("Enter on the png raises the native-open confirmation", "Open in the default app" in t and "Size: 24 B" in t and "explorer ·" not in t)
     r.send(b"\x1b", 0.8)
     check("cancelling it opens nothing", not os.path.exists(LOG) or "logo.png" not in open(LOG).read())
     check("cancelled message", "cancelled" in r.status())
@@ -557,13 +543,11 @@ try:
     r_ = sh(FIXTURE)
     if r_.returncode != 0:
         print("FAIL fixture:", r_.stderr); sys.exit(1)
-    if remote:
-        sh(f"mkdir -p /home/dev/exptest")
     main()
 except Exception as e:
     import traceback; traceback.print_exc()
     fails.append("exception: %r" % (e,))
 finally:
-    sh(f"rm -rf {X}; command -v tmux >/dev/null && tmux -L exptest kill-server 2>/dev/null; true")
+    sh(f"rm -rf {X}")
 print("FAILED: %d" % len(fails) if fails else "ALL PASS")
 sys.exit(1 if fails else 0)

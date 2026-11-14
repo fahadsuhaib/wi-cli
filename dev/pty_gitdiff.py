@@ -1,25 +1,20 @@
-# usage: python dev/pty_gitdiff.py <scratch-dir> local|remote   (needs pyte)
-# remote: yes
+# usage: python dev/pty_gitdiff.py <scratch-dir> local   (needs pyte)
 # The git diff viewer in the file explorer: a changed file opens to its diff in the detail pane (unified,
 # line numbers, theme-tinted add/remove rows, header with +added -removed and hunk n/m), staged/unstaged
 # split (two letters in the mark column, Tab switches), N/P hunks, D toggles diff/content, untracked and
-# binary files, and the auto-refresh of an open diff after the file is edited. Remote mode builds the repo
-# under /home/dev/gdtest on the box (own tmux socket) and removes it afterwards.
+# binary files, and the auto-refresh of an open diff after the file is edited.
 import os, pty, sys, time, select, struct, fcntl, termios, subprocess, shutil, re, pyte
 S, mode = os.path.realpath(sys.argv[1]), sys.argv[2]
-remote = mode == "remote"
 MENU = b"\x00"
 WI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target/debug/wi")
-X = "/home/dev/gdtest" if remote else S + "/gdtest"
+X = S + "/gdtest"
 P = X + "/proj"
 H = S + "/gd_home_" + mode
 CFG = S + "/gitdiff_" + mode + ".toml"
-open(CFG, "w").write(open(S + "/test.toml").read() + "\n[defaults]\npreview_refresh_debounce_ms = 400\n")
+open(CFG, "w").write("\n[defaults]\npreview_refresh_debounce_ms = 400\n")
 shutil.rmtree(H, ignore_errors=True); os.makedirs(H)
 
 def sh(script):
-    if remote:
-        return subprocess.run(["docker", "exec", "-u", "dev", "devbox-test", "bash", "-c", script], capture_output=True, text=True)
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
 FIXTURE = r'''
@@ -58,17 +53,14 @@ class Run:
     def __init__(self, cols=120, rows=18):
         self.cols, self.rows_n = cols, rows
         env = {k: v for k, v in os.environ.items() if k != "COLORFGBG"}
-        env.update(WICLI_CONFIG=CFG, TERM="xterm-256color", COLORTERM="truecolor", WICLI_TMUX_SOCKET="gdtest", SHELL="/bin/bash", HOME=H)
+        env.update(WICLI_CONFIG=CFG, TERM="xterm-256color", COLORTERM="truecolor", SHELL="/bin/bash", HOME=H)
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.chdir(P if not remote else "/")
-            os.execve(WI, ["wi", "test"] if remote else ["wi"], env)
+            os.chdir(P)
+            os.execve(WI, ["wi"], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.scr = pyte.Screen(cols, rows); self.st = pyte.ByteStream(self.scr)
-        self.pump(3.5 if remote else 2.2)
-        if remote:
-            self.send(MENU + b"f", 0.6)
-            self.send(b"\x15" + P.encode() + b"\r", 2.5)
+        self.pump(2.2)
     def pump(self, t, until=None):
         end = time.time() + t
         while time.time() < end:
@@ -113,7 +105,7 @@ class Run:
     def hint(self): return self.rows()[1]
     def status(self): return self.rows()[2]
     def quit(self):
-        self.send(MENU + (b"e" if remote else b"q"), 1.5)
+        self.send(MENU + b"q", 1.5)
 
 def main():
     sh("rm -rf " + X)
